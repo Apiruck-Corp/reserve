@@ -118,33 +118,34 @@ struct APIConsumptionDetailsTests {
     }
     let regular = await refusal(
       status: 401,
-      body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+      body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-api03-regular"}}"#,
       key: "sk-ant-api03-regular-test-key-000000")
-    #expect(regular?.hasPrefix("Anthropic refused this admin key: invalid x-api-key.") == true)
-    #expect(regular?.contains("regular API key") == true && regular?.contains("sk-ant-admin…") == true)
-    #expect(regular?.contains("sk-ant-api03-regular") == false)
+    #expect(regular == "Anthropic refused this admin key. The key is invalid or has been revoked. "
+      + "If it is a regular API key, use an admin key (sk-ant-admin…) instead.")
 
     let organization = await refusal(
       status: 403,
-      body: #"{"type":"error","error":{"type":"permission_error","message":"Key sk-ant-admin01-secret-test-key-0000 lacks access"}}"#,
+      body: #"{"type":"error","error":{"type":"permission_error","message":"Key sk-ant-admin01-secret lacks access"}}"#,
       key: "sk-ant-admin01-secret-test-key-0000")
-    #expect(organization?.contains("Claude Console organization") == true)
-    #expect(organization?.contains("secret-test-key") == false)
-    #expect(organization?.contains("[key]") == true)
+    #expect(organization == "Anthropic refused this admin key. The key has no access to usage and cost data. "
+      + "Admin keys work only for a Claude Console organization where you are an admin.")
 
     let silent = await refusal(status: 401, body: "", key: "sk-ant-admin01-test")
     #expect(silent == "Anthropic refused this admin key.")
+    // Every message fits the stored error limit with room to spare.
+    for message in [regular, organization, silent] { #expect((message?.count ?? 0) <= 240) }
   }
 
-  @Test func providerReasonsAreShortAndHideCredentials() {
-    let long = String(repeating: "word ", count: 80)
-    let reason = APIConsumptionClient.providerReason(
-      in: Data(#"{"message":"\#(long)"}"#.utf8), redacting: nil)
-    #expect((reason?.count ?? 0) <= 160)
-    let token = APIConsumptionClient.providerReason(
-      in: Data(#"{"error":"bad token abcdefghijklmnopqrstuvwxyz0123456789ABCD"}"#.utf8), redacting: nil)
-    #expect(token == "bad token [hidden]")
-    #expect(APIConsumptionClient.providerReason(in: Data("not json".utf8), redacting: nil) == nil)
+  /// Only a code-shaped value survives; free text, which can quote the key,
+  /// never does.
+  @Test func onlyErrorCodesAreRead() {
+    func code(_ json: String) -> String? { APIConsumptionClient.providerErrorCode(in: Data(json.utf8)) }
+    #expect(code(#"{"error":{"code":"invalid_api_key","message":"Incorrect API key sk-pr****abcd"}}"#) == "invalid_api_key")
+    #expect(code(#"{"error":{"type":"permission_error"}}"#) == "permission_error")
+    #expect(code(#"{"error":"bad key sk-abc"}"#) == nil)
+    #expect(code(#"{"error":{"code":"sk-ant-admin01-leak"}}"#) == nil)
+    #expect(code(#"{"error":{"code":"Key sk_live_abc"}}"#) == nil)
+    #expect(code("not json") == nil)
   }
 
   @Test func detailsSurviveTheCacheAndOldCachesStillLoad() throws {

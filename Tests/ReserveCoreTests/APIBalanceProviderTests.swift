@@ -176,7 +176,7 @@ struct APIBalanceProviderTests {
         Issue.record("expected unauthorized, got \(error)")
         return
       }
-      #expect(message == "\(provider.displayName) refused this api key: invalid key.")
+      #expect(message == "\(provider.displayName) refused this api key.")
       // The key never appears in what the app shows.
       #expect(!message.contains("sk-rejected-test-key"))
     } catch {
