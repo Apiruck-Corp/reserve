@@ -72,8 +72,8 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     }
   }
 
-  /// The prefix of the admin key a billing API needs, for providers whose
-  /// ordinary API keys cannot read billing. Used only to explain a refusal.
+  /// The prefix of the admin key a provider's billing API normally takes.
+  /// Used only to suggest one when a key without it is refused.
   var adminKeyPrefix: String? {
     switch self {
     case .openAI: "sk-admin-"
@@ -989,9 +989,8 @@ public struct APIConsumptionClient: Sendable {
       message += " The key is invalid or has been revoked."
     case "permission_error", "insufficient_permissions", "forbidden", "permission_denied":
       message += " The key has no access to usage and cost data."
-    case let code?:
-      message += " (\(code))"
-    case nil:
+    default:
+      // An unknown code is not shown either: only fixed sentences leave here.
       break
     }
     if let prefix = provider.adminKeyPrefix, let key {

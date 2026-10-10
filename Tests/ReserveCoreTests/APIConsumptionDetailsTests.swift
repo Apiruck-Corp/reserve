@@ -132,6 +132,10 @@ struct APIConsumptionDetailsTests {
 
     let silent = await refusal(status: 401, body: "", key: "sk-ant-admin01-test")
     #expect(silent == "Anthropic refused this admin key.")
+    // A code Reserve does not know is never repeated, whatever it holds.
+    let unknown = await refusal(
+      status: 401, body: #"{"error":{"code":"fragment_of_the_key"}}"#, key: "sk-ant-admin01-test")
+    #expect(unknown == "Anthropic refused this admin key.")
     // Every message fits the stored error limit with room to spare.
     for message in [regular, organization, silent] { #expect((message?.count ?? 0) <= 240) }
   }
