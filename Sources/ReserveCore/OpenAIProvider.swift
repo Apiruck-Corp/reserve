@@ -5,29 +5,19 @@ public struct OpenAIProvider: UsageProvider {
   static let appServerArguments = ["-s", "read-only", "-a", "never", "app-server"]
   private let environment: [String: String]
   private let includeAccountActivity: Bool
+  private let locator: @Sendable ([String: String]) -> [String]
 
   public init(environment: [String: String] = ProcessInfo.processInfo.environment,
-    includeAccountActivity: Bool = false) {
+    includeAccountActivity: Bool = false,
+    executableLocator: (@Sendable ([String: String]) -> [String])? = nil) {
     self.environment = environment
     self.includeAccountActivity = includeAccountActivity
+    self.locator = executableLocator ?? { BinaryLocator.candidates("codex", environment: $0) }
   }
 
   public func fetch() async throws -> UsageSnapshot {
-    guard let executable = BinaryLocator.find("codex", environment: self.environment) else {
-      throw UsageProviderError.executableNotFound("Codex CLI")
-    }
-
-    let rpc = try JSONRPCProcess(
-      executable: executable,
-      arguments: Self.appServerArguments,
-      environment: BinaryLocator.childEnvironment(self.environment))
+    let rpc = try await self.startAppServer()
     defer { rpc.shutdown() }
-
-    _ = try await rpc.request(
-      method: "initialize",
-      params: ["clientInfo": ["name": "reserve", "version": "1.0.0"]],
-      timeout: .seconds(8))
-    try rpc.notify(method: "initialized")
 
     let response = try await Self.readRateLimits(using: rpc)
     let selected = response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
@@ -69,6 +59,43 @@ public struct OpenAIProvider: UsageProvider {
       availableResetCount: response.rateLimitResetCredits?.availableCount,
       accountTokenActivity: activity,
       details: OpenAIDetails.details(limits: selected, account: account, activity: activity))
+  }
+
+  /// The first Codex install that starts and answers `initialize`.
+  ///
+  /// A copy that passes validation can still be broken, such as an npm wrapper
+  /// in `/opt/homebrew/bin` whose platform binary is missing. It sits in a
+  /// preferred directory, so stopping there hid a working install further
+  /// down PATH or inside ChatGPT. Only startup failures move on; once a helper
+  /// answers, its errors (signed out, no windows) are the user's real state.
+  private func startAppServer() async throws -> JSONRPCProcess {
+    let candidates = self.locator(self.environment)
+    guard !candidates.isEmpty else { throw UsageProviderError.executableNotFound("Codex CLI") }
+    var firstFailure: Error?
+    for executable in candidates {
+      try Task.checkCancellation()
+      var started: JSONRPCProcess?
+      do {
+        let rpc = try JSONRPCProcess(
+          executable: executable,
+          arguments: Self.appServerArguments,
+          environment: BinaryLocator.childEnvironment(self.environment))
+        started = rpc
+        _ = try await rpc.request(
+          method: "initialize",
+          params: ["clientInfo": ["name": "reserve", "version": "1.0.0"]],
+          timeout: .seconds(8))
+        try rpc.notify(method: "initialized")
+        return rpc
+      } catch is CancellationError {
+        started?.shutdown()
+        throw CancellationError()
+      } catch {
+        started?.shutdown()
+        if firstFailure == nil { firstFailure = error }
+      }
+    }
+    throw firstFailure!
   }
 
   static let signInMessage = "Sign in to Codex to see your plan limits."

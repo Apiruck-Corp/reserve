@@ -80,6 +80,35 @@ struct BinaryLocatorTrustTests {
         == sandbox.path("homebrew/bin/reserve-trust-codex"))
   }
 
+  @Test func candidatesKeepSearchOrderAndListEachFileOnce() throws {
+    let sandbox = try Sandbox()
+    let first = try sandbox.executable("a/bin/reserve-trust-multi")
+    let second = try sandbox.executable("b/bin/reserve-trust-multi")
+    // A second name for the first install is the same helper, not a fallback.
+    try sandbox.link("c/bin/reserve-trust-multi", to: first)
+    let path = ["a/bin", "c/bin", "b/bin"].map(sandbox.path).joined(separator: ":")
+
+    #expect(
+      BinaryLocator.candidates("reserve-trust-multi", environment: ["PATH": path])
+        == [first, second])
+    #expect(BinaryLocator.find("reserve-trust-multi", environment: ["PATH": path]) == first)
+  }
+
+  @Test func chatGPTCodexIsFoundInCurrentAndOlderLayouts() throws {
+    let sandbox = try Sandbox()
+    let applications = URL(fileURLWithPath: try sandbox.directory("Applications"))
+    let older = try sandbox.executable("Applications/ChatGPT.app/Contents/Resources/codex")
+    #expect(
+      BinaryLocator.bundledCodexExecutable(home: sandbox.root, applicationDirectories: [applications])
+        == older)
+
+    let current = try sandbox.executable(
+      "Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
+    #expect(
+      BinaryLocator.bundledCodexExecutable(home: sandbox.root, applicationDirectories: [applications])
+        == current)
+  }
+
   @Test func symlinkChainThroughADirectoryLinkIsFollowed() throws {
     // The shape of Codex's standalone installer and Claude's native installer:
     // `~/.local/bin/codex -> ~/.codex/packages/standalone/current/bin/codex`,
