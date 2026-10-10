@@ -88,12 +88,12 @@ struct PlanKeyStorage {
 /// executor. Tests pass closures and never touch the login Keychain or network.
 @MainActor
 struct APIConsumptionKeyAccess {
-  var availability: (APIConsumptionProvider) -> KeychainItemAvailability
-  var load: (APIConsumptionProvider) throws -> String
-  var save: (String, APIConsumptionProvider) throws -> Void
-  var delete: (APIConsumptionProvider) -> Void
-  var saveAsync: ((String, APIConsumptionProvider) async throws -> Void)? = nil
-  var deleteAsync: ((APIConsumptionProvider) async throws -> Void)? = nil
+  var availability: (APIAccountID) -> KeychainItemAvailability
+  var load: (APIAccountID) throws -> String
+  var save: (String, APIAccountID) throws -> Void
+  var delete: (APIAccountID) -> Void
+  var saveAsync: ((String, APIAccountID) async throws -> Void)? = nil
+  var deleteAsync: ((APIAccountID) async throws -> Void)? = nil
 }
 
 @MainActor
@@ -104,9 +104,9 @@ final class UsageStore {
   /// across the rebuilds a refresh triggers.
   private(set) var refreshStartedAt: Date?
   private(set) var isScanningLocalUsage = false
-  private(set) var apiConsumption: [APIConsumptionProvider: APIConsumptionSnapshot] = [:]
-  private(set) var apiConsumptionErrors: [APIConsumptionProvider: String] = [:]
-  private(set) var apiConsumptionRefreshing: Set<APIConsumptionProvider> = []
+  private(set) var apiConsumption: [APIAccountID: APIConsumptionSnapshot] = [:]
+  private(set) var apiConsumptionErrors: [APIAccountID: String] = [:]
+  private(set) var apiConsumptionRefreshing: Set<APIAccountID> = []
 
   /// Identifies one registered observer. Surfaces come and go, so removal has to
   /// be precise rather than "clear the callback".
@@ -286,9 +286,9 @@ final class UsageStore {
   private var pendingKeychainInteractions: Set<ProviderID> = []
   private var keychainAccessCompletions: [ProviderID: [() -> Void]] = [:]
   private var lastRefreshCompletedAt: Date?
-  private var apiConsumptionTokens: [APIConsumptionProvider: Int] = [:]
-  private var apiGenerations: [APIConsumptionProvider: Int] = [:]
-  private var apiMutationGenerations: [APIConsumptionProvider: Int] = [:]
+  private var apiConsumptionTokens: [APIAccountID: Int] = [:]
+  private var apiGenerations: [APIAccountID: Int] = [:]
+  private var apiMutationGenerations: [APIAccountID: Int] = [:]
   private var planMutationGenerations: [ProviderID: Int] = [:]
   /// A setup window can close after its Keychain save has begun. Only that
   /// canceled generation may remove its just-written, unconfirmed key; a
@@ -296,9 +296,9 @@ final class UsageStore {
   /// the older completion.
   private var planMutationsNeedingCleanup: [ProviderID: Set<Int>] = [:]
   private var planSaveCleanupEligible: [ProviderID: Set<Int>] = [:]
-  private var apiTasks: [APIConsumptionProvider: Task<Void, Never>] = [:]
+  private var apiTasks: [APIAccountID: Task<Void, Never>] = [:]
   /// Presence only. The secret itself is never cached.
-  private var apiKeyCache: [APIConsumptionProvider: SavedKeyAvailability] = [:]
+  private var apiKeyCache: [APIAccountID: SavedKeyAvailability] = [:]
   private var planKeyCache: [ProviderID: SavedKeyAvailability] = [:]
   private let injectedPlanKeys: PlanKeyStorage?
   private let injectedAPIKeys: APIConsumptionKeyAccess?
@@ -311,7 +311,7 @@ final class UsageStore {
   private var lowPowerOverride: Bool?
   private var offlineOverride: Bool?
   private var subscriptionSchedules: [ProviderID: ProviderRefreshSchedule] = [:]
-  private var apiSchedules: [APIConsumptionProvider: ProviderRefreshSchedule] = [:]
+  private var apiSchedules: [APIAccountID: ProviderRefreshSchedule] = [:]
   private var statusGenerations: [ProviderID: Int] = [:]
   private var statusTasks: [ProviderID: Task<Void, Never>] = [:]
   private var localScanGeneration = 0
@@ -319,7 +319,7 @@ final class UsageStore {
   private var localWatchTask: Task<Void, Never>?
   private var keychainProbeFailures: [String: Int] = [:]
   private var lastKeychainProbeAt: [String: Date] = [:]
-  private var apiProbeTasks: [APIConsumptionProvider: Task<Void, Never>] = [:]
+  private var apiProbeTasks: [APIAccountID: Task<Void, Never>] = [:]
   private var planProbeTasks: [ProviderID: Task<Void, Never>] = [:]
   private let subscriptionLimiter = OperationLimiter(limit: 2)
   private let apiLimiter = OperationLimiter(limit: 2)
@@ -350,7 +350,7 @@ final class UsageStore {
     }
   }
   /// The one API row whose details are open, if any.
-  var expandedAPIProvider: APIConsumptionProvider?
+  var expandedAPIProvider: APIAccountID?
   private var staleProviders: Set<ProviderID> = []
   private var incidentProviders: Set<ProviderID> = []
   private let localUsageScanInterval: TimeInterval = 30 * 60
@@ -449,6 +449,7 @@ final class UsageStore {
         ($0, ProviderViewState(provider: $0))
       })
     self.registerDefaults()
+    self.loadAPIAccounts()
     ReserveAppearance.current = self.appearanceTheme
     ReserveAppearance.mode = self.appearanceMode
     self.notifications.requestAuthorizationIfNeeded()
@@ -1898,11 +1899,11 @@ final class UsageStore {
     self.defaults.bool(forKey: "provider.\(provider.rawValue).enabled")
   }
 
-  func isAPIConsumptionEnabled(_ provider: APIConsumptionProvider) -> Bool {
+  func isAPIConsumptionEnabled(_ provider: APIAccountID) -> Bool {
     self.defaults.bool(forKey: "apiConsumption.\(provider.rawValue).enabled")
   }
 
-  func setAPIConsumptionEnabled(_ provider: APIConsumptionProvider, enabled: Bool) {
+  func setAPIConsumptionEnabled(_ provider: APIAccountID, enabled: Bool) {
     self.defaults.set(enabled, forKey: "apiConsumption.\(provider.rawValue).enabled")
     if !enabled {
       self.apiMutationGenerations[provider] = (self.apiMutationGenerations[provider] ?? 0) + 1
@@ -1913,7 +1914,7 @@ final class UsageStore {
   }
 
   func apiConsumptionKeyAvailability(
-    _ provider: APIConsumptionProvider
+    _ provider: APIAccountID
   ) -> SavedKeyAvailability {
     if let known = self.apiKeyCache[provider] { return known }
     if let injected = self.injectedAPIKeys {
@@ -1923,14 +1924,14 @@ final class UsageStore {
     return self.usesProductionKeychain ? .unknown : .missing
   }
 
-  func hasAPIConsumptionKey(_ provider: APIConsumptionProvider) -> Bool {
+  func hasAPIConsumptionKey(_ provider: APIAccountID) -> Bool {
     self.apiConsumptionKeyAvailability(provider) == .present
   }
 
   /// Stores a pasted key and turns measurement on. The key is written to
   /// Keychain only; preferences record that the option is enabled.
   /// Validation errors throw before any in-flight read is cancelled.
-  func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) throws {
+  func saveAPIConsumptionKey(_ key: String, for provider: APIAccountID) throws {
     guard let injected = self.injectedAPIKeys else {
       throw UsageProviderError.unavailable("API key storage requires the async save path.")
     }
@@ -1938,12 +1939,12 @@ final class UsageStore {
     self.adoptSavedAPIKey(provider)
   }
 
-  func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) async throws {
+  func saveAPIConsumptionKey(_ key: String, for provider: APIAccountID) async throws {
     if self.injectedAPIKeys == nil, !self.usesProductionKeychain {
       throw UsageProviderError.unavailable("API key storage is not configured.")
     }
     if self.usesProductionKeychain {
-      _ = try APIConsumptionKeychain.normalized(key, for: provider)
+      _ = try APIConsumptionKeychain.normalized(key, for: provider.provider)
     }
     let mutation = self.beginAPIKeyMutation(provider)
     do {
@@ -1962,7 +1963,7 @@ final class UsageStore {
     self.adoptSavedAPIKey(provider)
   }
 
-  func removeAPIConsumptionKey(_ provider: APIConsumptionProvider) {
+  func removeAPIConsumptionKey(_ provider: APIAccountID) {
     guard let injected = self.injectedAPIKeys else {
       self.apiConsumptionErrors[provider] = "Removing this key requires the async Keychain path."
       self.changed()
@@ -1973,7 +1974,7 @@ final class UsageStore {
     self.finishAPIKeyRemoval(provider)
   }
 
-  func removeAPIConsumptionKeyAsync(_ provider: APIConsumptionProvider) async throws {
+  func removeAPIConsumptionKeyAsync(_ provider: APIAccountID) async throws {
     let mutation = self.beginAPIKeyMutation(provider)
     do {
       if let injected = self.injectedAPIKeys {
@@ -1991,6 +1992,93 @@ final class UsageStore {
     }
     guard self.apiMutationGenerations[provider] == mutation else { throw CancellationError() }
     self.finishAPIKeyRemoval(provider)
+  }
+
+  // MARK: API accounts
+
+  /// API accounts added beside each provider's first one, in the order they
+  /// were added. Persisted as raw values; a value that no longer parses is
+  /// dropped.
+  private var addedAPIAccounts: [APIAccountID] = []
+  private static let addedAPIAccountsKey = "apiAccounts.added"
+
+  /// Every API account: each provider's first account, then the ones added
+  /// to it. This is the order of the API pane and the dashboard.
+  var apiAccounts: [APIAccountID] {
+    APIConsumptionProvider.allCases.flatMap { provider in
+      [APIAccountID(provider: provider)] + self.addedAPIAccounts.filter { $0.provider == provider }
+    }
+  }
+
+  private func loadAPIAccounts() {
+    var seen: Set<APIAccountID> = []
+    self.addedAPIAccounts = (self.defaults.stringArray(forKey: Self.addedAPIAccountsKey) ?? [])
+      .compactMap(APIAccountID.init(rawValue:))
+      .filter { $0.isAdded && seen.insert($0).inserted }
+    for account in self.apiAccounts {
+      APIAccountLabels.set(self.defaults.string(forKey: "apiConsumption.\(account.rawValue).label"), for: account)
+    }
+  }
+
+  /// Adds an API account beside the provider's first one, named "Account N"
+  /// until the person names it. It measures nothing until its key is saved.
+  @discardableResult
+  func addAPIAccount(_ provider: APIConsumptionProvider) -> APIAccountID {
+    var account = APIAccountID(provider: provider)
+    repeat {
+      let instance = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8)
+      account = APIAccountID(provider: provider, instance: String(instance)) ?? account
+    } while account.isDefault || self.addedAPIAccounts.contains(account)
+    let taken = Set(self.addedAPIAccounts.filter { $0.provider == provider }.compactMap {
+      self.defaults.object(forKey: "apiConsumption.\($0.rawValue).ordinal") as? Int
+    })
+    var ordinal = 2
+    while taken.contains(ordinal) { ordinal += 1 }
+    self.defaults.set(ordinal, forKey: "apiConsumption.\(account.rawValue).ordinal")
+    self.defaults.set("Account \(ordinal)", forKey: "apiConsumption.\(account.rawValue).label")
+    APIAccountLabels.set("Account \(ordinal)", for: account)
+    self.addedAPIAccounts.append(account)
+    self.defaults.set(self.addedAPIAccounts.map(\.rawValue), forKey: Self.addedAPIAccountsKey)
+    self.changed()
+    return account
+  }
+
+  func apiAccountLabel(for account: APIAccountID) -> String? { APIAccountLabels.label(for: account) }
+
+  /// A name the person typed. Empty clears it: the first account goes back to
+  /// the provider's name, an added one to its "Account N".
+  func setAPIAccountLabel(_ label: String, for account: APIAccountID) {
+    let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+    let key = "apiConsumption.\(account.rawValue).label"
+    if trimmed.isEmpty {
+      let neutral = (self.defaults.object(forKey: "apiConsumption.\(account.rawValue).ordinal") as? Int)
+        .map { "Account \($0)" }
+      if let neutral, account.isAdded { self.defaults.set(neutral, forKey: key) }
+      else { self.defaults.removeObject(forKey: key) }
+      APIAccountLabels.set(account.isAdded ? neutral : nil, for: account)
+    } else {
+      self.defaults.set(String(trimmed.prefix(64)), forKey: key)
+      APIAccountLabels.set(trimmed, for: account)
+    }
+    self.changed()
+  }
+
+  /// Removes an added API account and deletes its key first. When the key
+  /// cannot be deleted, or a new one was saved meanwhile, the account stays.
+  func removeAPIAccount(_ account: APIAccountID) async throws {
+    guard account.isAdded, self.addedAPIAccounts.contains(account) else { return }
+    try await self.removeAPIConsumptionKeyAsync(account)
+    self.addedAPIAccounts.removeAll { $0 == account }
+    self.defaults.set(self.addedAPIAccounts.map(\.rawValue), forKey: Self.addedAPIAccountsKey)
+    for suffix in ["enabled", "label", "ordinal"] {
+      self.defaults.removeObject(forKey: "apiConsumption.\(account.rawValue).\(suffix)")
+    }
+    self.apiKeyCache[account] = nil
+    self.apiMutationGenerations[account] = nil
+    self.apiProbeTasks.removeValue(forKey: account)?.cancel()
+    APIAccountLabels.set(nil, for: account)
+    if self.expandedAPIProvider == account { self.expandedAPIProvider = nil }
+    self.changed()
   }
 
   // MARK: Plan keys
@@ -2115,7 +2203,7 @@ final class UsageStore {
 
   @discardableResult
   func refreshAPIConsumption(
-    _ provider: APIConsumptionProvider,
+    _ provider: APIAccountID,
     trigger: RefreshTrigger = .manual
   ) -> Bool {
     self.startAPIRefresh(provider, trigger: trigger, respectingSchedule: true)
@@ -3198,7 +3286,7 @@ final class UsageStore {
   }
 
   private func performAPIConsumptionRefresh(
-    _ provider: APIConsumptionProvider,
+    _ provider: APIAccountID,
     generation: Int
   ) async {
     defer {
@@ -3290,7 +3378,7 @@ final class UsageStore {
   }
 
   private func apiAdmission(
-    _ provider: APIConsumptionProvider, trigger: RefreshTrigger, now: Date
+    _ provider: APIAccountID, trigger: RefreshTrigger, now: Date
   ) -> RefreshAdmission {
     RefreshSchedulePolicy.admit(
       state: self.apiSchedules[provider] ?? ProviderRefreshSchedule(),
@@ -3315,8 +3403,8 @@ final class UsageStore {
 
   private func dueAPIProviders(
     trigger: RefreshTrigger, now: Date
-  ) -> [APIConsumptionProvider] {
-    APIConsumptionProvider.allCases.filter { provider in
+  ) -> [APIAccountID] {
+    self.apiAccounts.filter { provider in
       guard self.isAPIConsumptionEnabled(provider), self.apiTasks[provider] == nil else { return false }
       switch self.apiConsumptionKeyAvailability(provider) {
       case .missing, .unavailable: return false
@@ -3333,7 +3421,7 @@ final class UsageStore {
   }
 
   private func hasDueKeychainProbe(trigger: RefreshTrigger, now: Date) -> Bool {
-    for provider in APIConsumptionProvider.allCases {
+    for provider in self.apiAccounts {
       if self.apiKeyCache[provider] == .unavailable,
         self.keychainProbeIsDue(id: self.apiProbeID(provider), trigger: trigger, now: now)
       {
@@ -3401,7 +3489,7 @@ final class UsageStore {
         now: now, interval: interval)
       if next < earliest { earliest = next }
     }
-    for provider in APIConsumptionProvider.allCases where self.isAPIConsumptionEnabled(provider) {
+    for provider in self.apiAccounts where self.isAPIConsumptionEnabled(provider) {
       let availability = self.apiConsumptionKeyAvailability(provider)
       if availability == .missing || availability == .unavailable { continue }
       let next = RefreshSchedulePolicy.nextEligibleAt(
@@ -3409,7 +3497,7 @@ final class UsageStore {
         now: now, interval: interval)
       if next < earliest { earliest = next }
     }
-    for provider in APIConsumptionProvider.allCases where self.apiKeyCache[provider] == .unavailable {
+    for provider in self.apiAccounts where self.apiKeyCache[provider] == .unavailable {
       if let next = self.nextKeychainProbeAt(id: self.apiProbeID(provider), now: now), next < earliest {
         earliest = next
       }
@@ -3430,7 +3518,7 @@ final class UsageStore {
   #endif
 
   private func retryLockedKeychainReads(trigger: RefreshTrigger, now: Date) {
-    for provider in APIConsumptionProvider.allCases {
+    for provider in self.apiAccounts {
       guard self.apiKeyCache[provider] == .unavailable,
         self.keychainProbeIsDue(id: self.apiProbeID(provider), trigger: trigger, now: now)
       else { continue }
@@ -3445,7 +3533,7 @@ final class UsageStore {
   }
 
   private func startAPIKeyRecoveryProbe(
-    _ provider: APIConsumptionProvider, trigger: RefreshTrigger, now: Date
+    _ provider: APIAccountID, trigger: RefreshTrigger, now: Date
   ) {
     guard self.apiProbeTasks[provider] == nil else { return }
     let mutation = self.apiMutationGenerations[provider] ?? 0
@@ -3542,21 +3630,21 @@ final class UsageStore {
     self.subscriptionSchedules[provider] = state
   }
 
-  private func recordAPISuccess(_ provider: APIConsumptionProvider) {
+  private func recordAPISuccess(_ provider: APIAccountID) {
     var state = self.apiSchedules[provider] ?? ProviderRefreshSchedule()
     let now = self.now()
     RefreshSchedulePolicy.recordSuccess(&state, now: now, interval: self.refreshInterval(now: now))
     self.apiSchedules[provider] = state
   }
 
-  private func recordAPIFailure(_ provider: APIConsumptionProvider, _ error: Error) {
+  private func recordAPIFailure(_ provider: APIAccountID, _ error: Error) {
     var state = self.apiSchedules[provider] ?? ProviderRefreshSchedule()
     RefreshSchedulePolicy.recordFailure(
       &state, now: self.now(), failure: RefreshSchedulePolicy.failureClass(for: error))
     self.apiSchedules[provider] = state
   }
 
-  private func apiProbeID(_ provider: APIConsumptionProvider) -> String {
+  private func apiProbeID(_ provider: APIAccountID) -> String {
     "api.\(provider.rawValue)"
   }
 
@@ -3564,7 +3652,7 @@ final class UsageStore {
     "plan.\(provider.rawValue)"
   }
 
-  private func invalidateAPIWork(_ provider: APIConsumptionProvider) {
+  private func invalidateAPIWork(_ provider: APIAccountID) {
     self.apiGenerations[provider] = (self.apiGenerations[provider] ?? 0) + 1
     self.apiTasks[provider]?.cancel()
     self.apiTasks[provider] = nil
@@ -3587,7 +3675,7 @@ final class UsageStore {
 
   @discardableResult
   private func startAPIRefresh(
-    _ provider: APIConsumptionProvider,
+    _ provider: APIAccountID,
     trigger: RefreshTrigger,
     respectingSchedule: Bool
   ) -> Bool {
@@ -3609,7 +3697,7 @@ final class UsageStore {
     return true
   }
 
-  private func adoptSavedAPIKey(_ provider: APIConsumptionProvider) {
+  private func adoptSavedAPIKey(_ provider: APIAccountID) {
     self.invalidateAPIWork(provider)
     self.apiKeyCache[provider] = .present
     self.apiSchedules[provider] = nil
@@ -3620,7 +3708,7 @@ final class UsageStore {
     self.startAPIRefresh(provider, trigger: .manual, respectingSchedule: false)
   }
 
-  private func finishAPIKeyRemoval(_ provider: APIConsumptionProvider) {
+  private func finishAPIKeyRemoval(_ provider: APIAccountID) {
     self.apiKeyCache[provider] = .missing
     self.apiSchedules[provider] = nil
     self.keychainProbeFailures[self.apiProbeID(provider)] = 0
@@ -3660,7 +3748,7 @@ final class UsageStore {
     }
   }
 
-  private func beginAPIKeyMutation(_ provider: APIConsumptionProvider) -> Int {
+  private func beginAPIKeyMutation(_ provider: APIAccountID) -> Int {
     let generation = (self.apiMutationGenerations[provider] ?? 0) + 1
     self.apiMutationGenerations[provider] = generation
     self.invalidateAPIWork(provider)
@@ -3702,7 +3790,7 @@ final class UsageStore {
   }
 
   private func reportAPIKeyMutationFailure(
-    _ error: Error, provider: APIConsumptionProvider
+    _ error: Error, provider: APIAccountID
   ) {
     let availability = self.injectedAPIKeys.map { SavedKeyAvailability($0.availability(provider)) }
       ?? .unavailable
@@ -3725,28 +3813,28 @@ final class UsageStore {
   }
 
   private func resolveAPIKeyAvailability(
-    _ provider: APIConsumptionProvider
+    _ provider: APIAccountID
   ) async -> KeychainItemAvailability {
     if let injected = self.injectedAPIKeys { return injected.availability(provider) }
     guard self.usesProductionKeychain else { return .missing }
     return await APIConsumptionKeychain.availability(for: provider)
   }
 
-  private func loadAPIKey(_ provider: APIConsumptionProvider) async throws -> String {
+  private func loadAPIKey(_ provider: APIAccountID) async throws -> String {
     if let injected = self.injectedAPIKeys { return try injected.load(provider) }
     return try await APIConsumptionKeychain.load(for: provider)
   }
 
   private func fetchAPIConsumption(
-    _ provider: APIConsumptionProvider, apiKey: String
+    _ provider: APIAccountID, apiKey: String
   ) async throws -> APIConsumptionSnapshot {
     if let apiConsumptionFetch {
-      return try await apiConsumptionFetch(provider, apiKey)
+      return try await apiConsumptionFetch(provider.provider, apiKey)
     }
     guard self.usesProductionKeychain else {
       throw UsageProviderError.unavailable("API consumption fixture is not configured.")
     }
-    return try await APIConsumptionClient().fetch(provider, apiKey: apiKey)
+    return try await APIConsumptionClient().fetch(provider.provider, apiKey: apiKey)
   }
 
   private func resolvePlanKeyAvailability(_ provider: ProviderID) async -> KeychainItemAvailability {
@@ -3767,7 +3855,7 @@ final class UsageStore {
     return false
   }
 
-  private func scheduleProductionAPIProbe(_ provider: APIConsumptionProvider) {
+  private func scheduleProductionAPIProbe(_ provider: APIAccountID) {
     guard self.apiProbeTasks[provider] == nil else { return }
     let mutation = self.apiMutationGenerations[provider] ?? 0
     self.apiProbeTasks[provider] = Task { [weak self] in
@@ -3838,7 +3926,7 @@ final class UsageStore {
     self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule()
   }
 
-  func apiRefreshSchedule(for provider: APIConsumptionProvider) -> ProviderRefreshSchedule {
+  func apiRefreshSchedule(for provider: APIAccountID) -> ProviderRefreshSchedule {
     self.apiSchedules[provider] ?? ProviderRefreshSchedule()
   }
 

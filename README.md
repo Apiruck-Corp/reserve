@@ -69,7 +69,7 @@ How the accounts are kept apart depends on the provider:
 | Grok | Yes | Own folder under `~/.grok-accounts/`, used as `GROK_HOME` |
 | Z.ai, Kimi | Yes | Own API key, saved in the Keychain under that account |
 | Cursor, Copilot, Gemini | No | The helper keeps one sign-in per Mac |
-| API spend (Claude API, OpenAI API, …) | One key per provider | Paste the key in **Settings > API** |
+| API spend (Claude API, OpenAI API, …) | Yes | Own key per account, saved in the Keychain under that account |
 
 For a folder-based account, Reserve opens the usual browser sign-in with the
 folder set, so the first account is left untouched. If your browser is already
@@ -87,6 +87,12 @@ its sign-in on disk; for a key plan it also deletes the key Reserve saved. To
 use an added account in your own terminal, run the helper with its variable
 (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`) pointing at its folder.
 Activity from this Mac is not yet counted for added accounts.
+
+For API spend, choosing a provider whose first key is already saved adds a
+second account in **Settings > API** with its own key field, for example a
+personal and a team Claude API organization. Once a provider has two accounts,
+each row takes a name ("Anthropic · Nimbus"). **Remove account** deletes that
+account's key from Reserve and leaves the others alone.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;

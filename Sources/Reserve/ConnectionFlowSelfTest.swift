@@ -1325,6 +1325,62 @@ enum ConnectionFlowSelfTest {
       && defaults.string(forKey: "\(codex.rawValue).configDirectory") == nil,
       "removing a Codex account did not forget it, or deleted its folder")
     try? FileManager.default.removeItem(at: home)
+    failures += await self.checkAddedAPIAccounts()
+    return failures
+  }
+
+  /// Two Claude API keys: each an account with its own key and reading, and
+  /// the first account untouched by the second.
+  private static func checkAddedAPIAccounts() async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append("added API accounts: \(message)") }
+    }
+    let suite = "Reserve.AddedAPIAccountsSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["added API accounts: preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var keys: [APIAccountID: String] = [:]
+    let access = APIConsumptionKeyAccess(
+      availability: { keys[$0] == nil ? .missing : .present },
+      load: { account in
+        guard let key = keys[account] else { throw UsageProviderError.credentialsNotFound("no key") }
+        return key
+      },
+      save: { key, account in keys[account] = key },
+      delete: { keys[$0] = nil })
+    // The reading names the key it was made with, so a mix-up shows.
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false, apiKeys: access,
+      apiConsumptionFetch: { provider, key in
+        APIConsumptionSnapshot(provider: provider, windows: [], note: APIConsumptionNote(headline: key), source: key)
+      })
+
+    try? await store.saveAPIConsumptionKey("sk-ant-admin-first-0123456789", for: .anthropic)
+    let second = store.addAPIAccount(.anthropic)
+    expect(store.apiAccounts.filter { $0.provider == .anthropic } == [.anthropic, second],
+      "the second Claude API account was not listed after the first")
+    expect(second.displayName == "Anthropic · Account 2", "the second Claude API account was not numbered")
+    try? await store.saveAPIConsumptionKey("sk-ant-admin-second-0123456789", for: second)
+    expect(keys[.anthropic] == "sk-ant-admin-first-0123456789" && keys[second] == "sk-ant-admin-second-0123456789",
+      "the second key replaced the first instead of being saved beside it")
+    store.refreshAPIConsumption(.anthropic)
+    store.refreshAPIConsumption(second)
+    await settle { store.apiConsumption[.anthropic] != nil && store.apiConsumption[second] != nil }
+    expect(store.apiConsumption[.anthropic]?.source == "sk-ant-admin-first-0123456789"
+      && store.apiConsumption[second]?.source == "sk-ant-admin-second-0123456789",
+      "a Claude API reading was made with the other account's key")
+
+    store.setAPIAccountLabel("Nimbus", for: second)
+    let reloaded = UsageStore(defaults: defaults, startAutomatically: false, apiKeys: access)
+    expect(reloaded.apiAccounts.contains(second) && second.displayName == "Anthropic · Nimbus",
+      "the second Claude API account or its name did not survive a relaunch")
+
+    try? await store.removeAPIAccount(second)
+    expect(keys[second] == nil && keys[.anthropic] != nil && !store.apiAccounts.contains(second),
+      "removing the second Claude API account did not delete only its key")
+    try? await store.removeAPIAccount(.anthropic)
+    expect(keys[.anthropic] != nil && store.apiAccounts.contains(.anthropic),
+      "the first Claude API account could be removed as an added one")
     return failures
   }
 

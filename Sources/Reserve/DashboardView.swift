@@ -15,7 +15,7 @@ struct DashboardActions {
   /// section stays out of the subscription view.
   let apiConsumptionReadings: () -> [APIConsumptionReading]
   /// Opens or closes one API row's details.
-  var toggleAPIDetail: (APIConsumptionProvider) -> Void = { _ in }
+  var toggleAPIDetail: (APIAccountID) -> Void = { _ in }
   /// Opens the sanitized share preview for the selected provider.
   var shareUsage: () -> Void = {}
   /// Toggles presentation masking. Originals stay in the store.
@@ -35,7 +35,7 @@ extension APIConsumptionSnapshot {
 }
 
 struct APIConsumptionReading {
-  let provider: APIConsumptionProvider
+  let provider: APIAccountID
   let snapshot: APIConsumptionSnapshot?
   let error: String?
   let isRefreshing: Bool
@@ -835,7 +835,7 @@ private final class APIConsumptionSection: NSView {
 
   init?(
     readings: [APIConsumptionReading], now: Date,
-    toggle: @escaping (APIConsumptionProvider) -> Void = { _ in }
+    toggle: @escaping (APIAccountID) -> Void = { _ in }
   ) {
     guard !readings.isEmpty else { return nil }
     super.init(frame: .zero)
@@ -866,7 +866,7 @@ private final class APIConsumptionSection: NSView {
   func apply(
     readings: [APIConsumptionReading],
     now: Date,
-    toggle: @escaping (APIConsumptionProvider) -> Void
+    toggle: @escaping (APIAccountID) -> Void
   ) -> Bool {
     guard Self.structureKey(readings) == self.structure else { return false }
     _ = toggle
@@ -991,9 +991,9 @@ private final class APIConsumptionSection: NSView {
 
   private static func row(
     _ reading: APIConsumptionReading, now: Date,
-    toggle: @escaping (APIConsumptionProvider) -> Void
+    toggle: @escaping (APIAccountID) -> Void
   ) -> NSView {
-    let logo = ProviderLogo(api: reading.provider)
+    let logo = ProviderLogo(api: reading.provider.provider)
     let name = ReserveLabel(
       reading.provider.displayName,
       font: ReserveFont.sans(ReserveType.body, .medium),
@@ -2476,12 +2476,12 @@ final class DetailDisclosureButton: NSButton {
 /// an API account, not to a subscription provider.
 @MainActor
 final class APIDetailDisclosureButton: NSButton {
-  private let provider: APIConsumptionProvider
-  private let handler: (APIConsumptionProvider) -> Void
+  private let provider: APIAccountID
+  private let handler: (APIAccountID) -> Void
 
   init(
-    provider: APIConsumptionProvider, isExpanded: Bool,
-    action: @escaping (APIConsumptionProvider) -> Void
+    provider: APIAccountID, isExpanded: Bool,
+    action: @escaping (APIAccountID) -> Void
   ) {
     self.provider = provider
     self.handler = action

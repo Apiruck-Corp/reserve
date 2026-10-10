@@ -297,30 +297,31 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
 public enum APIConsumptionKeychain {
   public static let service = "com.pocarles.reserve.api-consumption"
 
-  public static func account(for provider: APIConsumptionProvider) -> String {
+  /// The first account of a provider keeps the item name it always had.
+  public static func account(for provider: APIAccountID) -> String {
     "api-consumption.\(provider.rawValue)"
   }
 
-  static func store(for provider: APIConsumptionProvider) -> KeychainKeyStore {
+  static func store(for provider: APIAccountID) -> KeychainKeyStore {
     KeychainKeyStore(
       service: Self.service, account: Self.account(for: provider),
-      displayName: provider.displayName, keyKind: provider.keyKind,
-      label: "Reserve \(provider.displayName) consumption key")
+      displayName: provider.provider.displayName, keyKind: provider.keyKind,
+      label: "Reserve \(provider.provider.displayName) consumption key")
   }
 
   #if canImport(Security)
-    public static func hasKey(for provider: APIConsumptionProvider) -> Bool {
+    public static func hasKey(for provider: APIAccountID) -> Bool {
       Self.store(for: provider).hasKey()
     }
 
     public static func availability(
-      for provider: APIConsumptionProvider
+      for provider: APIAccountID
     ) -> KeychainItemAvailability {
       Self.store(for: provider).availability()
     }
 
     public static func availability(
-      for provider: APIConsumptionProvider
+      for provider: APIAccountID
     ) async -> KeychainItemAvailability {
       await Self.store(for: provider).availability()
     }
@@ -328,27 +329,27 @@ public enum APIConsumptionKeychain {
     /// Replaces any key already stored for this provider. The value never
     /// leaves this process except as an `Authorization` header on the fixed
     /// provider host.
-    public static func save(_ key: String, for provider: APIConsumptionProvider) throws {
+    public static func save(_ key: String, for provider: APIAccountID) throws {
       try Self.store(for: provider).save(key)
     }
 
-    public static func save(_ key: String, for provider: APIConsumptionProvider) async throws {
+    public static func save(_ key: String, for provider: APIAccountID) async throws {
       try await Self.store(for: provider).save(key)
     }
 
-    public static func load(for provider: APIConsumptionProvider) throws -> String {
+    public static func load(for provider: APIAccountID) throws -> String {
       try Self.store(for: provider).load()
     }
 
-    public static func load(for provider: APIConsumptionProvider) async throws -> String {
+    public static func load(for provider: APIAccountID) async throws -> String {
       try await Self.store(for: provider).load()
     }
 
-    public static func delete(for provider: APIConsumptionProvider) throws {
+    public static func delete(for provider: APIAccountID) throws {
       try Self.store(for: provider).delete()
     }
 
-    public static func delete(for provider: APIConsumptionProvider) async throws {
+    public static func delete(for provider: APIAccountID) async throws {
       try await Self.store(for: provider).delete()
     }
 

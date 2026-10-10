@@ -420,9 +420,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func apiPane() -> NSView {
     var rows: [NSView] = [self.addAccountRow()]
-    for provider in APIConsumptionProvider.allCases {
+    for provider in self.store.apiAccounts {
       rows.append(self.apiProviderRow(provider))
-      if provider != APIConsumptionProvider.allCases.last {
+      if provider != self.store.apiAccounts.last {
         rows.append(SettingsSeparator(width: SettingsLayout.contentWidth))
       }
     }
@@ -1226,7 +1226,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     return stack
   }
 
-  private func apiProviderRow(_ provider: APIConsumptionProvider) -> NSView {
+  private func apiProviderRow(_ provider: APIAccountID) -> NSView {
     let availability = self.store.apiConsumptionKeyAvailability(provider)
     let saved = availability == .present
     let writable = availability == .present || availability == .missing
@@ -1252,12 +1252,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       ?? status.stringValue
     status.lineBreakMode = .byTruncatingTail
     status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    let heading = NSStackView(views: [checkbox, SettingsProviderLogo(api: provider), name, kind, status])
+    let heading = NSStackView(views: [checkbox, SettingsProviderLogo(api: provider.provider), name, kind, status])
     heading.orientation = .horizontal
     heading.alignment = .centerY
     heading.spacing = 8
 
-    let tag = APIConsumptionProvider.allCases.firstIndex(of: provider) ?? 0
+    let tag = self.store.apiAccounts.firstIndex(of: provider) ?? 0
     var buttons: [NSButton] = [
       self.apiRowButton(
         title: saved ? "Replace" : "Save",
@@ -1302,6 +1302,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       field.placeholderString = availability == .unknown ? "Checking Keychain…" : "Keychain temporarily unavailable"
       buttons.first?.isEnabled = false
     }
+    if provider.isAdded {
+      buttons.append(
+        self.apiRowButton(
+          title: "Remove account",
+          identifier: "api-forget-\(provider.rawValue)",
+          action: #selector(self.apiAccountRemoved(_:)),
+          tag: tag,
+          toolTip: "Stop tracking this account and delete its key from Reserve",
+          accessibility: "Remove \(provider.displayName)"))
+    }
     let fields = NSStackView(views: [field] + buttons)
     fields.orientation = .horizontal
     fields.alignment = .centerY
@@ -1314,7 +1324,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
-    let row = NSStackView(views: [heading, fields])
+    var rowViews: [NSView] = [heading, fields]
+    if self.apiAccountTakesName(provider) { rowViews.append(self.apiAccountNameRow(provider)) }
+    let row = NSStackView(views: rowViews)
     row.identifier = NSUserInterfaceItemIdentifier("api-provider-\(provider.rawValue)")
     row.orientation = .vertical
     row.alignment = .leading
@@ -1580,8 +1592,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     item.target = self
     item.representedObject = provider.rawValue
     item.image = Self.menuImage(ProviderArtwork.image(for: provider))
-    let saved = self.store.apiConsumptionKeyAvailability(provider) == .present
-    let summary = saved ? "Key saved · replace it in API" : "Paste \(provider.keyKind.lowercased()) (\(provider.keyHint))"
+    let saved = self.store.apiConsumptionKeyAvailability(APIAccountID(provider: provider)) == .present
+    let summary = saved
+      ? "Add another \(provider.keyKind.lowercased()) · several accounts"
+      : "Paste \(provider.keyKind.lowercased()) (\(provider.keyHint))"
     item.toolTip = summary
     Self.setSubtitle(summary, on: item)
     item.setAccessibilityLabel("Add \(title) account")
@@ -1638,8 +1652,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let raw = sender.representedObject as? String,
       let provider = APIConsumptionProvider(rawValue: raw)
     else { return }
+    // The first account takes the first key; every later key is an account
+    // of its own beside it.
+    let first = APIAccountID(provider: provider)
+    let account = self.store.apiConsumptionKeyAvailability(first) == .present
+      ? self.store.addAPIAccount(provider) : first
     self.show(.api)
-    if let field = self.textField(identifier: "api-key-\(provider.rawValue)") {
+    self.rememberScrollOffset()
+    self.applyPane(animated: false)
+    if let field = self.textField(identifier: "api-key-\(account.rawValue)") {
       field.scrollToVisible(field.bounds)
       self.window?.makeFirstResponder(field)
     }
@@ -1823,7 +1844,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     NSWorkspace.shared.open(url)
   }
 
-  private func apiReading(for provider: APIConsumptionProvider, saved: Bool) -> String {
+  private func apiReading(for provider: APIAccountID, saved: Bool) -> String {
     switch self.store.apiConsumptionKeyAvailability(provider) {
     case .unknown: return "Checking Keychain…"
     case .unavailable: return "Keychain temporarily unavailable · retrying automatically"
@@ -2344,8 +2365,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func apiConsumptionChanged(_ sender: NSButton) {
-    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "api-enabled-", with: "")
-    guard let provider = APIConsumptionProvider(rawValue: raw) else { return }
+    guard let provider = self.apiProvider(for: sender) else { return }
     self.store.setAPIConsumptionEnabled(provider, enabled: sender.state == .on)
     self.applyPane(animated: false)
   }
@@ -2433,22 +2453,89 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
   }
 
-  private func apiProvider(for sender: NSControl) -> APIConsumptionProvider? {
+  private func apiProvider(for sender: NSControl) -> APIAccountID? {
     if let raw = sender.identifier?.rawValue {
-      for provider in APIConsumptionProvider.allCases where raw.hasSuffix("-\(provider.rawValue)") {
-        return provider
+      for prefix in ["api-enabled-", "api-key-", "api-save-", "api-remove-", "api-page-", "api-name-", "api-forget-"]
+      where raw.hasPrefix(prefix) {
+        return APIAccountID(rawValue: String(raw.dropFirst(prefix.count)))
       }
     }
     let index = sender.tag
-    return APIConsumptionProvider.allCases.indices.contains(index)
-      ? APIConsumptionProvider.allCases[index] : nil
+    return self.store.apiAccounts.indices.contains(index) ? self.store.apiAccounts[index] : nil
   }
 
-  private func clearAPICredentialFields(for provider: APIConsumptionProvider) {
+  /// Accounts are named once their provider has more than one, so two Claude
+  /// API keys read "Anthropic · Perso" and "Anthropic · Nimbus".
+  private func apiAccountTakesName(_ account: APIAccountID) -> Bool {
+    self.store.apiAccounts.filter { $0.provider == account.provider }.count > 1
+  }
+
+  private func apiAccountNameRow(_ account: APIAccountID) -> NSView {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("api-name-\(account.rawValue)")
+    field.stringValue = self.store.apiAccountLabel(for: account) ?? ""
+    field.placeholderString = account.isAdded ? "Team, client…" : "Personal…"
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.target = self
+    field.action = #selector(self.apiAccountNameSubmitted(_:))
+    field.toolTip = "A name to tell this \(account.provider.displayName) account apart. Return saves it."
+    field.setAccessibilityLabel("\(account.provider.displayName) account name")
+    field.widthAnchor.constraint(equalToConstant: 220).isActive = true
+    let caption = SettingsLabel("Name:", size: 12, color: .secondaryLabelColor)
+    let row = NSStackView(views: [caption, field])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    return row
+  }
+
+  @objc private func apiAccountNameSubmitted(_ sender: NSTextField) {
+    guard let account = self.apiProvider(for: sender) else { return }
+    self.store.setAPIAccountLabel(sender.stringValue, for: account)
+    self.uiRefresh.coalesce { [weak self] in
+      self?.rememberScrollOffset()
+      self?.applyPane(animated: false)
+    }
+  }
+
+  @objc private func apiAccountRemoved(_ sender: NSButton) {
+    guard let account = self.apiProvider(for: sender), account.isAdded, !self.keySaveInFlight else { return }
+    let alert = NSAlert()
+    alert.messageText = "Remove \(account.displayName) from Reserve?"
+    alert.informativeText = "Reserve stops measuring it and deletes its saved key from Reserve. The key itself keeps working until you revoke it at \(account.provider.displayName)."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    let remove: () -> Void = { [weak self] in
+      guard let self else { return }
+      self.keySaveInFlight = true
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        defer { self.keySaveInFlight = false }
+        do {
+          try await self.store.removeAPIAccount(account)
+        } catch is CancellationError {
+        } catch {
+          self.presentKeySaveError(error, key: "", action: "removed")
+        }
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      }
+    }
+    if let window = self.window, window.isVisible {
+      alert.beginSheetModal(for: window) { response in
+        if response == .alertFirstButtonReturn { remove() }
+      }
+    } else if alert.runModal() == .alertFirstButtonReturn {
+      remove()
+    }
+  }
+
+  private func clearAPICredentialFields(for provider: APIAccountID) {
     self.apiKeyField(for: provider)?.stringValue = ""
   }
 
-  private func apiKeyField(for provider: APIConsumptionProvider) -> NSTextField? {
+  private func apiKeyField(for provider: APIAccountID) -> NSTextField? {
     self.window?.contentView.flatMap { view in
       Self.descendants(of: view).compactMap { $0 as? NSTextField }.first {
         $0.identifier?.rawValue == "api-key-\(provider.rawValue)"
@@ -2765,8 +2852,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           "\(provider.rawValue):\(enabled):\(expanded):\(quick):\(setup?.buttonTitle ?? "-"):\(detail)")
       }
     case .api:
-      for provider in APIConsumptionProvider.allCases {
+      for provider in self.store.apiAccounts {
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
+        // The name field appears once a provider has a second account.
+        parts.append(self.apiAccountTakesName(provider) ? "named" : "-")
       }
     case .insights:
       let enabled = self.store.accounts.filter { self.store.isEnabled($0) }
@@ -2850,7 +2939,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             ?? "Never updated")
       }
     case .api:
-      for provider in APIConsumptionProvider.allCases {
+      for provider in self.store.apiAccounts {
         let saved = self.store.hasAPIConsumptionKey(provider)
         check("api-enabled-\(provider.rawValue)", self.store.isAPIConsumptionEnabled(provider))
         setText("api-status-\(provider.rawValue)", self.apiReading(for: provider, saved: saved))
@@ -3258,7 +3347,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = .api
     self.applyPane(animated: false)
     let apiIDs = identifiers()
-    let apiKeyEntryPresent = APIConsumptionProvider.allCases.allSatisfy {
+    let apiKeyEntryPresent = self.store.apiAccounts.allSatisfy {
       apiIDs.contains("api-provider-\($0.rawValue)")
         && apiIDs.contains("api-key-\($0.rawValue)")
         && apiIDs.contains("api-save-\($0.rawValue)")
@@ -3266,10 +3355,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         && apiIDs.contains("api-page-\($0.rawValue)")
     }
     // Every key page must be an https provider URL the row can hand the browser.
-    let apiKeyPagesAreHTTPS = APIConsumptionProvider.allCases.allSatisfy {
+    let apiKeyPagesAreHTTPS = self.store.apiAccounts.allSatisfy {
       $0.keySettingsURL.scheme?.lowercased() == "https" && $0.keySettingsURL.host?.isEmpty == false
     }
-    let apiMeasurementStartsOff = APIConsumptionProvider.allCases.allSatisfy {
+    let apiMeasurementStartsOff = self.store.apiAccounts.allSatisfy {
       !self.store.isAPIConsumptionEnabled($0)
     }
     let apiSuccess = apiKeyEntryPresent && apiMeasurementStartsOff && apiKeyPagesAreHTTPS

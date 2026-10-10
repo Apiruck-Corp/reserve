@@ -74,7 +74,13 @@ Every adapter names its kind in the snapshot it returns; the store credits
 each reading to the account it asked for (`UsageSnapshot.attributed(to:)`).
 `AccountAddition` holds the menu rule: an unconnected default account is
 connected first, then further accounts are added where the kind allows.
-API-spend keys (Settings > API) are still one per provider.
+API-spend accounts work the same way with `APIAccountID` (provider plus
+instance). The first account of a provider keeps its raw value, so its
+Keychain item (`api-consumption.<provider>`) and settings
+(`apiConsumption.<provider>.enabled`) are unchanged; an added account is
+`<provider>@<instance>` everywhere. Removing an added account deletes its key
+first and keeps the account when deletion fails or a newer key was saved
+meanwhile.
 
 #### Added Claude accounts, by configuration folder
 
