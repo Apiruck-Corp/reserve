@@ -511,6 +511,9 @@ final class UsageStore {
   /// added. Persisted as raw values; a value that no longer parses is dropped.
   private var addedAccounts: [ProviderID]
   private static let addedAccountsKey = "accounts.added"
+  /// The home the managed account folders and each helper's default home are
+  /// found under. Self-tests point it at a temporary folder.
+  var accountsHome = FileManager.default.homeDirectoryForCurrentUser
 
   /// Every tracked account: each kind's default account, followed by the
   /// accounts added to that kind. This is the order of every list in the app.
@@ -557,9 +560,9 @@ final class UsageStore {
     var folders: Set<String> = []
     for account in accounts {
       guard let path = defaults.string(forKey: Self.configDirectoryKey(account)),
-        let directory = ClaudeConfigDirectory(path: path)
+        let directory = AccountFolder(path: path)
       else { continue }
-      if !folders.insert(directory.resolvedPath).inserted {
+      if !folders.insert("\(account.kind.rawValue):\(directory.resolvedPath)").inserted {
         defaults.removeObject(forKey: Self.configDirectoryKey(account))
       }
     }
@@ -585,34 +588,32 @@ final class UsageStore {
     self.defaults.set(self.addedAccounts.map(\.rawValue), forKey: Self.addedAccountsKey)
   }
 
-  /// Where Reserve keeps the folders of the Claude accounts it adds. Hidden
-  /// like Claude Code's own home; Claude Code fills each one in at sign-in.
-  static func managedClaudeAccountsDirectory(
-    home: URL = FileManager.default.homeDirectoryForCurrentUser
-  ) -> URL {
-    home.appendingPathComponent(".claude-accounts", isDirectory: true)
-  }
-
-  /// Adds a Claude account with a folder of its own, enabled and named
+  /// Adds an account beside a kind's default one, enabled and named
   /// "Account N" until its organization is known or the person renames it.
-  /// The caller starts the connection; nothing is signed in here.
+  /// A helper that keeps one sign-in per folder gets a folder of its own
+  /// under `~/<managed root>/<instance>`; a key plan waits for its key. The
+  /// caller starts the connection; nothing is signed in here.
   @discardableResult
-  func addClaudeAccount() throws -> ProviderID {
-    let kind = ProviderKind.anthropic
+  func addAccount(kind: ProviderKind) throws -> ProviderID {
+    guard kind.supportsAddedAccounts else {
+      throw UsageProviderError.unavailable(
+        "\(kind.displayName) keeps one sign-in per Mac, so Reserve can track only one \(kind.displayName) account.")
+    }
     var account = ProviderID(kind: kind)
     repeat {
       let instance = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8)
       account = ProviderID(kind: kind, instance: String(instance)) ?? account
     } while account.isDefault || self.addedAccounts.contains(account)
-    let folder = Self.managedClaudeAccountsDirectory()
-      .appendingPathComponent(account.instance ?? "", isDirectory: true)
-    guard let directory = ClaudeConfigDirectory(path: folder.path) else {
-      throw UsageProviderError.unavailable("Reserve could not name a folder for this account.")
+    if let root = AccountFolder.managedRoot(for: kind, homeDirectory: self.accountsHome) {
+      let folder = root.appendingPathComponent(account.instance ?? "", isDirectory: true)
+      guard let directory = AccountFolder(path: folder.path) else {
+        throw UsageProviderError.unavailable("Reserve could not name a folder for this account.")
+      }
+      try FileManager.default.createDirectory(
+        at: directory.url, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+      self.defaults.set(directory.path, forKey: Self.configDirectoryKey(account))
     }
-    try FileManager.default.createDirectory(
-      at: directory.url, withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700])
-    self.defaults.set(directory.path, forKey: Self.configDirectoryKey(account))
     let ordinal = self.nextAccountOrdinal(for: kind)
     self.defaults.set(ordinal, forKey: "\(account.rawValue).ordinal")
     self.defaults.set("Account \(ordinal)", forKey: "\(account.rawValue).label")
@@ -623,10 +624,16 @@ final class UsageStore {
     self.defaults.set(false, forKey: "\(account.rawValue).keychainReadAllowed")
     self.addedAccounts.append(account)
     self.persistAddedAccounts()
-    self.states[account] = ProviderViewState(provider: account)
+    var state = ProviderViewState(provider: account)
+    // A key plan has nothing to read until its key is pasted.
+    if ProviderDescriptor.forKind(kind).usesAPIKey { state.requiresConnection = true }
+    self.states[account] = state
     self.changed()
     return account
   }
+
+  @discardableResult
+  func addClaudeAccount() throws -> ProviderID { try self.addAccount(kind: .anthropic) }
 
   /// Forgets an added account: its checks, consent, status line, cached
   /// usage and settings. Its folder, and the Claude Code sign-in inside it,
@@ -639,8 +646,21 @@ final class UsageStore {
       try self.setClaudePassiveUpdatesEnabled(false, for: account)
     }
     self.disconnect(account)
-    self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
-    try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: account))
+    // A key plan's key was pasted into Reserve for this account alone, so it
+    // goes with the account.
+    if ProviderDescriptor.forProvider(account).usesAPIKey {
+      self.planKeyCache[account] = nil
+      self.planMutationGenerations[account] = nil
+      if self.injectedPlanKeys != nil {
+        self.deletePlanKeyValue(account)
+      } else {
+        Task { try? await self.deletePlanKeyValue(account) }
+      }
+    }
+    if account.isAnthropic {
+      self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
+      try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: account))
+    }
     for key in [
       "provider.\(account.rawValue).enabled",
       "\(account.rawValue).keychainReadAllowed",
@@ -667,7 +687,7 @@ final class UsageStore {
       self.expandedProvider = nil
     }
     Task {
-      await AnthropicProvider.forgetAccount(account)
+      if account.isAnthropic { await AnthropicProvider.forgetAccount(account) }
       await self.persistSnapshots()
     }
     self.changed()
@@ -804,67 +824,94 @@ final class UsageStore {
     }
   }
 
-  // MARK: Added Claude accounts
+  // MARK: Added accounts' folders
 
-  /// The Claude Code configuration folder an added account reads. Nil until the
-  /// person chooses one; the first slot never has one here.
-  func claudeConfigDirectory(for provider: ProviderID) -> ClaudeConfigDirectory? {
-    guard provider.isAdded, provider.isAnthropic,
+  /// The home folder an added account's helper uses. Nil for a kind without
+  /// folders, and until the person chooses one; a default account never has
+  /// one here.
+  func accountFolder(for provider: ProviderID) -> AccountFolder? {
+    guard provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil,
       let path = self.defaults.string(forKey: Self.configDirectoryKey(provider))
     else { return nil }
-    return ClaudeConfigDirectory(path: path)
+    return AccountFolder(path: path)
   }
 
-  /// Stores the folder, normalised, and starts over for that slot: the old
-  /// folder's sign-in, consent and status line are not carried across. An
-  /// empty value clears the folder. Throws for a path that is not absolute.
+  /// The Claude Code configuration folder an added Claude account reads.
+  func claudeConfigDirectory(for provider: ProviderID) -> ClaudeConfigDirectory? {
+    guard provider.isAnthropic, let folder = self.accountFolder(for: provider) else { return nil }
+    return ClaudeConfigDirectory(path: folder.path)
+  }
+
+  /// The helper environment for an account: unchanged for a default account,
+  /// with the home variable pointing at its folder for an added one.
+  func helperEnvironment(
+    for provider: ProviderID, base: [String: String] = ProcessInfo.processInfo.environment
+  ) -> [String: String] {
+    guard let folder = self.accountFolder(for: provider) else { return base }
+    return folder.environment(for: provider.kind, from: base)
+  }
+
   @discardableResult
   func setClaudeConfigDirectory(_ input: String?, for provider: ProviderID) throws
     -> ClaudeConfigDirectory?
   {
-    guard provider.isAdded, provider.isAnthropic else { return nil }
+    guard provider.isAnthropic else { return nil }
+    return try self.setAccountFolder(input, for: provider).flatMap { ClaudeConfigDirectory(path: $0.path) }
+  }
+
+  /// Stores the folder, normalised, and starts over for that account: the old
+  /// folder's sign-in, consent and status line are not carried across. An
+  /// empty value clears the folder. Throws for a path that is not absolute.
+  @discardableResult
+  func setAccountFolder(_ input: String?, for provider: ProviderID) throws -> AccountFolder? {
+    guard provider.isAdded,
+      case .homeFolder(let variable, let defaultName, _) = ProviderDescriptor.forProvider(provider).accountIsolation
+    else { return nil }
+    let kindName = provider.kind.displayName
+    let example = "~/\(defaultName)-team"
     let trimmed = (input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    var directory: ClaudeConfigDirectory?
+    var directory: AccountFolder?
     if !trimmed.isEmpty {
-      guard let parsed = ClaudeConfigDirectory(path: trimmed) else {
+      guard let parsed = AccountFolder(path: trimmed) else {
         throw UsageProviderError.unavailable(
-          "Enter the full path of a folder, such as ~/.claude-team.")
+          "Enter the full path of a folder, such as \(example).")
       }
-      // Pointed at the default home, Claude Code would keep a second sign-in
-      // beside the first account's, in a differently named Keychain item.
-      // The first Claude card already covers that folder.
-      // The default account also reads a folder named by the environment
-      // Reserve was launched with, when there is one.
-      let environmentHome = ClaudeConfigDirectory.resolve(environment: ProcessInfo.processInfo.environment)
-      guard !parsed.isDefaultHome(), parsed.resolvedPath != environmentHome?.resolvedPath else {
+      // Pointed at the default home, the helper would sign in over the first
+      // account, which already covers that folder. The default account also
+      // reads a folder named by the environment Reserve was launched with.
+      let environmentHome = ProcessInfo.processInfo.environment[variable].flatMap(AccountFolder.init(path:))
+      guard !parsed.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome),
+        parsed.resolvedPath != environmentHome?.resolvedPath
+      else {
         throw UsageProviderError.unavailable(
-          "That is the first Claude account's folder. Choose a different folder for this account, such as ~/.claude-team.")
+          "That is the first \(kindName) account's folder. Choose a different folder for this account, such as \(example).")
       }
-      // Two cards on one folder would sign in over each other and fight for
-      // its status line.
-      if let owner = self.claudeProviders.first(where: {
-        $0 != provider && $0.isAdded
-          && self.claudeConfigDirectory(for: $0)?.resolvedPath == parsed.resolvedPath
+      // Two cards on one folder would sign in over each other.
+      if let owner = self.accounts.first(where: {
+        $0 != provider && $0.kind == provider.kind && $0.isAdded
+          && self.accountFolder(for: $0)?.resolvedPath == parsed.resolvedPath
       }) {
         throw UsageProviderError.unavailable(
           "That folder already belongs to \(owner.displayName). Choose a different folder for this account.")
       }
       directory = parsed
     }
-    let current = self.claudeConfigDirectory(for: provider)
+    let current = self.accountFolder(for: provider)
     guard directory != current else { return directory }
-    // The status line is installed in the old folder's settings file, so it
-    // comes out before the folder changes, and its cached quotas go with it:
-    // they belong to the old account.
-    if self.claudePassiveUpdatesEnabled(for: provider) {
-      try self.setClaudePassiveUpdatesEnabled(false, for: provider)
+    if provider.isAnthropic {
+      // The status line is installed in the old folder's settings file, so it
+      // comes out before the folder changes, and its cached quotas go with
+      // it: they belong to the old account.
+      if self.claudePassiveUpdatesEnabled(for: provider) {
+        try self.setClaudePassiveUpdatesEnabled(false, for: provider)
+      }
+      try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: provider))
     }
-    try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: provider))
     self.cancelConnection(provider)
     // Back-off and renewal cooldown earned by the old sign-in must not hold
     // the new one back.
     self.subscriptionSchedules[provider] = nil
-    Task { await AnthropicProvider.forgetAccount(provider) }
+    if provider.isAnthropic { Task { await AnthropicProvider.forgetAccount(provider) } }
     // Consent was given for the old folder's Keychain item. The new item asks
     // again, exactly like a first connection.
     self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
@@ -895,15 +942,15 @@ final class UsageStore {
     "\(provider.rawValue).configDirectory"
   }
 
-  /// Marks the slot as waiting for its folder. Returns true when it is.
+  /// Marks the account as waiting for its folder. Returns true when it is.
   private func noteMissingConfigDirectory(_ provider: ProviderID) -> Bool {
-    guard provider.isAdded, provider.isAnthropic,
-      self.claudeConfigDirectory(for: provider) == nil
+    guard provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil,
+      self.accountFolder(for: provider) == nil
     else { return false }
     self.states[provider]?.requiresConfigDirectory = true
     self.states[provider]?.requiresConnection = false
     self.states[provider]?.requiresKeychainAccess = false
-    self.states[provider]?.error = AnthropicProvider.configDirectoryMissing.localizedDescription
+    self.states[provider]?.error = AccountFolder.missing(for: provider.kind).localizedDescription
     return true
   }
 
@@ -1521,10 +1568,10 @@ final class UsageStore {
       // Cursor documents this switch so the host app owns the browser handoff.
       process.environment?["NO_OPEN_BROWSER"] = "1"
     }
-    if let directory = self.claudeConfigDirectory(for: provider) {
-      // Claude Code keys the sign-in to this folder, which keeps the first
-      // slot's account untouched even when both use the same email address.
-      process.environment?[ClaudeConfigDirectory.environmentKey] = directory.path
+    if let environment = process.environment {
+      // The helper keys the sign-in to this account's folder, which keeps the
+      // default account untouched even when both use the same email address.
+      process.environment = self.helperEnvironment(for: provider, base: environment)
     }
     process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     let input = Pipe()
@@ -2922,7 +2969,8 @@ final class UsageStore {
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
     let fetcher: any UsageProvider =
       switch provider.kind {
-      case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
+      case .openAI:
+        OpenAIProvider(environment: self.helperEnvironment(for: provider), includeAccountActivity: includeInsights)
       case .anthropic:
         AnthropicProvider(
           id: provider,
@@ -2930,15 +2978,15 @@ final class UsageStore {
           allowKeychainRead: self.keychainReadAllowed(for: provider),
           allowKeychainInteraction: allowKeychainInteraction,
           passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider))
-      case .grok: GrokProvider()
+      case .grok: GrokProvider(environment: self.helperEnvironment(for: provider))
       case .cursor:
         CursorProvider(
           allowKeychainRead: self.cursorKeychainReadAllowed,
           allowKeychainInteraction: allowKeychainInteraction,
           includeAccountUsage: includeInsights)
       case .copilot: CopilotProvider()
-      case .zai: ZaiProvider()
-      case .kimi: KimiProvider()
+      case .zai: ZaiProvider(id: provider)
+      case .kimi: KimiProvider(id: provider)
       case .gemini: GeminiProvider()
       }
     var providerFetchSucceeded = false
@@ -2951,7 +2999,7 @@ final class UsageStore {
         fetched = try await fetcher.fetch()
       }
       guard isCurrent() else { return }
-      let snapshot = fetched.withFallbackPlanName(previous?.planName)
+      let snapshot = fetched.attributed(to: provider).withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
       self.adoptAutomaticLabel(for: provider, from: snapshot)
       self.states[provider]?.error = nil

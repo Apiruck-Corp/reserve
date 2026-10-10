@@ -51,29 +51,42 @@ closes on its own once Reserve reads fresh usage, or explains why it could not.
 Cursor, Copilot, Gemini, Z.ai and Kimi start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
-### Several Claude accounts
+### Several accounts per provider
 
-Reserve can track more than one Claude subscription, for example a team
+Choose **Add Account…** at the top of **Settings > Providers** (or
+**Settings > API**). The menu lists every provider Reserve supports, grouped
+as subscriptions, coding plans and API spend, and each entry says how it
+connects. If a provider's first card is not connected yet, the entry connects
+that one; otherwise it adds another account beside it, for example a team
 account next to a personal one, even when both use the same email address.
-Open the Claude card in **Settings > Providers** and choose **Add Claude
-account**. Reserve gives the new account a folder of its own under
-`~/.claude-accounts/`, opens the usual browser sign-in with that folder set as
-Claude Code's `CLAUDE_CONFIG_DIR`, and names the card after the organization
-it finds ("Claude · Nimbus"); you can rename it in the card, and **Hide
-personal info** shows a neutral "Account 2" instead. Claude Code keeps
-a separate sign-in per configuration folder, so each added account has its
-own Keychain item and the first account is left untouched. Pick the
-organization for the account on Claude's sign-in page.
 
-An added account reads only its folder: no fallback to `~/.claude`, which is
-refused as a folder since the first card already covers it. To attach an
+How the accounts are kept apart depends on the provider:
+
+| Provider | Several accounts | How |
+|---|---|---|
+| Claude | Yes | Own folder under `~/.claude-accounts/`, used as `CLAUDE_CONFIG_DIR` |
+| OpenAI (Codex) | Yes | Own folder under `~/.codex-accounts/`, used as `CODEX_HOME` |
+| Grok | Yes | Own folder under `~/.grok-accounts/`, used as `GROK_HOME` |
+| Z.ai, Kimi | Yes | Own API key, saved in the Keychain under that account |
+| Cursor, Copilot, Gemini | No | The helper keeps one sign-in per Mac |
+| API spend (Claude API, OpenAI API, …) | One key per provider | Paste the key in **Settings > API** |
+
+For a folder-based account, Reserve opens the usual browser sign-in with the
+folder set, so the first account is left untouched. If your browser is already
+signed in to the other account, switch accounts on the sign-in page. Added
+Claude accounts are named after the organization they find ("Claude ·
+Nimbus"); every other added account starts as "Account 2". You can rename any
+of them in the card, and **Hide personal info** shows the neutral name.
+
+An added account reads only its folder: no fallback to the default home, which
+is refused as a folder since the first card already covers it. To attach an
 account you already signed in from a terminal, change the card's folder to
-that `CLAUDE_CONFIG_DIR`, spelled the same way; changing the folder starts the
-card over, including its usage-access permission. **Remove account** forgets
-the card and its settings but leaves the folder and its sign-in on disk. To
-use an added account in your own terminal, run Claude Code with
-`CLAUDE_CONFIG_DIR` pointing at its folder. Activity from this Mac is not yet
-counted for added accounts.
+that folder, spelled the same way; changing the folder starts the card over.
+**Remove account** forgets the card and its settings but leaves the folder and
+its sign-in on disk; for a key plan it also deletes the key Reserve saved. To
+use an added account in your own terminal, run the helper with its variable
+(`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`) pointing at its folder.
+Activity from this Mac is not yet counted for added accounts.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;

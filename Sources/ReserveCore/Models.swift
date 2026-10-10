@@ -19,10 +19,12 @@ public enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable 
     ProviderDescriptor.forKind(self).displayName
   }
 
-  /// Kinds whose helper keeps one sign-in per configuration folder, so Reserve
-  /// can track several accounts of them side by side. Claude Code keys its
-  /// sign-in to `CLAUDE_CONFIG_DIR`.
-  public var supportsAddedAccounts: Bool { self == .anthropic }
+  /// Kinds that can hold several accounts side by side: a helper that keeps
+  /// one sign-in per home folder, or a plan read with a pasted key. The
+  /// descriptor says how each one keeps its accounts apart.
+  public var supportsAddedAccounts: Bool {
+    ProviderDescriptor.forKind(self).accountIsolation != .single
+  }
 }
 
 /// One tracked account: a provider kind, and for an added account an instance
@@ -561,9 +563,20 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   /// provider supplies a replacement; usage, resets and spend remain live.
   public func withFallbackPlanName(_ fallback: String?) -> UsageSnapshot {
     guard self.planName == nil, let fallback, !fallback.isEmpty else { return self }
-    return UsageSnapshot(
-      provider: self.provider,
-      planName: fallback,
+    return self.copy(provider: self.provider, planName: fallback)
+  }
+
+  /// The same reading, credited to the account that was asked for it. Every
+  /// account of a kind shares one adapter, and the adapter names the kind.
+  public func attributed(to provider: ProviderID) -> UsageSnapshot {
+    guard self.provider != provider else { return self }
+    return self.copy(provider: provider, planName: self.planName)
+  }
+
+  private func copy(provider: ProviderID, planName: String?) -> UsageSnapshot {
+    UsageSnapshot(
+      provider: provider,
+      planName: planName,
       windows: self.windows,
       fetchedAt: self.fetchedAt,
       source: self.source,

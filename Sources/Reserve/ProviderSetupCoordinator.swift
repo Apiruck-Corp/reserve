@@ -284,13 +284,13 @@ final class ProviderSetupCoordinator {
         }
       }
     case .needsConfigDirectory:
-      ClaudeConfigDirectoryPicker.choose(
-        current: self.store.claudeConfigDirectory(for: provider), from: self.panel
+      AccountFolderPicker.choose(
+        for: provider, current: self.store.accountFolder(for: provider), from: self.panel
       ) { [weak self] url in
         guard let self, self.generation == generation, let url else { return }
         // The picker only returns absolute paths, so this cannot throw for a
         // real choice; a refused one is simply checked again.
-        _ = try? self.store.setClaudeConfigDirectory(url.path, for: provider)
+        _ = try? self.store.setAccountFolder(url.path, for: provider)
         self.check()
       }
     case .connected:
@@ -537,8 +537,9 @@ final class ProviderConnectionPanel: NSPanel {
       self.privacy.stringValue = "Keep Reserve open until installation finishes."
       busy = true
     case .needsConfigDirectory:
-      self.heading.stringValue = "Choose this account's Claude Code folder"
-      self.message.stringValue = "Claude Code keeps a separate sign-in for each configuration folder. Choose the folder for this account, for example ~/.claude-team. Reserve signs in there with CLAUDE_CONFIG_DIR set, so your other Claude account is left alone."
+      let helper = AccountFolderCopy.helperName(self.provider)
+      self.heading.stringValue = "Choose this account's \(helper) folder"
+      self.message.stringValue = "\(helper) keeps a separate sign-in for each folder. Choose the folder for this account, for example \(AccountFolderCopy.example(self.provider)). Reserve signs in there with \(AccountFolderCopy.variable(self.provider)) set, so your other \(self.provider.kind.displayName) account is left alone."
       self.privacy.stringValue = "Both accounts can use the same email address; the folder is what keeps them apart. You can change it later in Settings > Providers."
       action = "Choose folder…"
     case .needsSignIn:
@@ -549,6 +550,10 @@ final class ProviderConnectionPanel: NSPanel {
       if ProviderSetupCoordinator.asksBeforeSignIn(self.provider) {
         // Said before the button, because starting sign-in is what replaces it.
         self.privacy.stringValue = "Signing in here replaces the \(signInHelperName) sign-in on this Mac. Your password stays with \(name)."
+      } else if self.provider.isAdded {
+        // The browser keeps its own session, which is usually the first
+        // account's: accepting it would sign this folder in to that account.
+        self.privacy.stringValue = "If your browser is already signed in to another \(self.provider.kind.displayName) account, switch to the right one on the sign-in page."
       }
       action = "Continue in browser"
     case .signingIn:

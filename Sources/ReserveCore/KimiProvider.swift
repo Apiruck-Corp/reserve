@@ -17,7 +17,7 @@ import Foundation
 /// This is Kimi Code, not the Moonshot open platform: the key and host differ
 /// from the Moonshot API account Reserve can also read.
 public struct KimiProvider: UsageProvider {
-  public let id: ProviderID = .kimi
+  public let id: ProviderID
   public static let endpointHost = "api.kimi.com"
   static let usagePath = "/coding/v1/usages"
 
@@ -25,9 +25,10 @@ public struct KimiProvider: UsageProvider {
   private let transport: APIKeyPlanTransport
   private let now: @Sendable () -> Date
 
-  public init(session: URLSession? = nil) {
-    self.loadKey = { try PlanKeyKeychain.load(for: .kimi) }
-    self.transport = APIKeyPlanTransport(provider: .kimi, host: Self.endpointHost, session: session)
+  public init(id: ProviderID = .kimi, session: URLSession? = nil) {
+    self.id = id
+    self.loadKey = { try PlanKeyKeychain.load(for: id) }
+    self.transport = APIKeyPlanTransport(provider: id, host: Self.endpointHost, session: session)
     self.now = Date.init
   }
 
@@ -36,6 +37,7 @@ public struct KimiProvider: UsageProvider {
     requestHandler: @escaping APIKeyPlanTransport.RequestHandler,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
+    self.id = .kimi
     self.loadKey = { apiKey }
     self.transport = APIKeyPlanTransport(
       provider: .kimi, host: Self.endpointHost, requestHandler: requestHandler)
@@ -43,7 +45,7 @@ public struct KimiProvider: UsageProvider {
   }
 
   public func fetch() async throws -> UsageSnapshot {
-    let key = try PlanKeyKeychain.normalized(try self.loadKey(), for: .kimi)
+    let key = try PlanKeyKeychain.normalized(try self.loadKey(), for: self.id)
     let data = try await self.transport.get(path: Self.usagePath, authorization: "Bearer \(key)")
     return try Self.decode(data, now: self.now())
   }

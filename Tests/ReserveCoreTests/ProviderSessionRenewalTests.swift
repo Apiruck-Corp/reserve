@@ -134,6 +134,25 @@ private actor GrokBillingProbe {
 
 @Suite
 struct ProviderSessionRenewalTests {
+  /// Two Grok accounts live in two homes. One account's renewal must not use
+  /// up the other's cooldown; a second renewal of the same home still waits.
+  @Test
+  func grokRenewalCooldownIsKeptPerAccountHome() async {
+    let renewer = GrokSessionRenewer()
+    let probe = RunnerProbe()
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let run: @Sendable (String, [String], [String: String], Duration) async throws -> Void = {
+      try await probe.run(executable: $0, arguments: $1, environment: $2, timeout: $3)
+    }
+    await renewer.renew(executable: "/usr/bin/true", environment: ["GROK_HOME": "/tmp/grok-one"], now: now, runner: run)
+    await renewer.renew(executable: "/usr/bin/true", environment: ["GROK_HOME": "/tmp/grok-two"], now: now, runner: run)
+    await renewer.renew(
+      executable: "/usr/bin/true", environment: ["GROK_HOME": "/tmp/grok-one"], now: now.addingTimeInterval(5),
+      runner: run)
+    #expect(await probe.callCount == 2)
+    #expect(await probe.environments.map { $0["GROK_HOME"] } == ["/tmp/grok-one", "/tmp/grok-two"])
+  }
+
   // MARK: - Grok
 
   @Test

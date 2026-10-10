@@ -14,7 +14,7 @@ import Foundation
 /// belong to `open.bigmodel.cn`, which is a separate account system; those
 /// keys are not sent anywhere else.
 public struct ZaiProvider: UsageProvider {
-  public let id: ProviderID = .zai
+  public let id: ProviderID
   public static let endpointHost = "api.z.ai"
   static let quotaPath = "/api/monitor/usage/quota/limit"
 
@@ -23,9 +23,10 @@ public struct ZaiProvider: UsageProvider {
   private let now: @Sendable () -> Date
 
   /// Reads the key from Reserve's Keychain item at fetch time; nothing is retained.
-  public init(session: URLSession? = nil) {
-    self.loadKey = { try PlanKeyKeychain.load(for: .zai) }
-    self.transport = APIKeyPlanTransport(provider: .zai, host: Self.endpointHost, session: session)
+  public init(id: ProviderID = .zai, session: URLSession? = nil) {
+    self.id = id
+    self.loadKey = { try PlanKeyKeychain.load(for: id) }
+    self.transport = APIKeyPlanTransport(provider: id, host: Self.endpointHost, session: session)
     self.now = Date.init
   }
 
@@ -34,6 +35,7 @@ public struct ZaiProvider: UsageProvider {
     requestHandler: @escaping APIKeyPlanTransport.RequestHandler,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
+    self.id = .zai
     self.loadKey = { apiKey }
     self.transport = APIKeyPlanTransport(
       provider: .zai, host: Self.endpointHost, requestHandler: requestHandler)
@@ -41,7 +43,7 @@ public struct ZaiProvider: UsageProvider {
   }
 
   public func fetch() async throws -> UsageSnapshot {
-    let key = try PlanKeyKeychain.normalized(try self.loadKey(), for: .zai)
+    let key = try PlanKeyKeychain.normalized(try self.loadKey(), for: self.id)
     // Z.ai's own coding-plan tooling sends the key without a scheme. The
     // server also accepts "Bearer <key>" (CodexBar uses that form); the raw
     // form is kept because it is what Z.ai's clients send.
