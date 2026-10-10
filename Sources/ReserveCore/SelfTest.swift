@@ -914,7 +914,7 @@ public enum ReserveSelfTests {
     // the application bundle rather than adding it to PATH.
     let fakeApplications = fakeHome.appendingPathComponent("Applications", isDirectory: true)
     let bundledCodex = fakeApplications.appendingPathComponent(
-      "ChatGPT.app/Contents/Resources/codex")
+      "ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
     try FileManager.default.createDirectory(
       at: bundledCodex.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o755])
