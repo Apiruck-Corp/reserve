@@ -51,6 +51,13 @@ import Testing
     #expect(folder.environment(for: .openAI, from: ["PATH": "/bin"])
       == ["PATH": "/bin", "CODEX_HOME": "/Users/example/.codex-accounts/ab12cd34"])
     #expect(folder.environment(for: .cursor, from: ["PATH": "/bin"]) == ["PATH": "/bin"])
+    // An inherited credential-file override would put every Grok account on
+    // the same sign-in, so it never reaches an added account's helper.
+    let grok = try #require(AccountFolder(path: "/Users/example/.grok-accounts/ab12cd34"))
+    let grokEnvironment = grok.environment(for: .grok, from: ["GROK_AUTH_PATH": "/Users/example/.grok/auth.json"])
+    #expect(grokEnvironment["GROK_AUTH_PATH"] == nil)
+    #expect(GrokCredentialLoader.authFileURL(environment: grokEnvironment).path
+      == "/Users/example/.grok-accounts/ab12cd34/auth.json")
     #expect(!folder.isDefaultHome(for: .openAI, homeDirectory: self.home))
     #expect(try #require(AccountFolder(path: "/Users/example/.codex")).isDefaultHome(for: .openAI, homeDirectory: self.home))
     #expect(try #require(AccountFolder(path: "/Users/example/.grok/")).isDefaultHome(for: .grok, homeDirectory: self.home))

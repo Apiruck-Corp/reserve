@@ -646,17 +646,7 @@ final class UsageStore {
       try self.setClaudePassiveUpdatesEnabled(false, for: account)
     }
     self.disconnect(account)
-    // A key plan's key was pasted into Reserve for this account alone, so it
-    // goes with the account.
-    if ProviderDescriptor.forProvider(account).usesAPIKey {
-      self.planKeyCache[account] = nil
-      self.planMutationGenerations[account] = nil
-      if self.injectedPlanKeys != nil {
-        self.deletePlanKeyValue(account)
-      } else {
-        Task { try? await self.deletePlanKeyValue(account) }
-      }
-    }
+    self.planKeyCache[account] = nil
     if account.isAnthropic {
       self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
       try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: account))
@@ -691,6 +681,18 @@ final class UsageStore {
       await self.persistSnapshots()
     }
     self.changed()
+  }
+
+  /// Removes an account, deleting a key plan's key first: the key was pasted
+  /// into Reserve for this account alone. When the key cannot be deleted the
+  /// account stays, so the removal can be tried again.
+  func removeAccountAndKey(_ account: ProviderID) async throws {
+    guard account.isAdded, self.addedAccounts.contains(account) else { return }
+    if ProviderDescriptor.forProvider(account).usesAPIKey {
+      _ = self.beginPlanKeyMutation(account)
+      try await self.deletePlanKeyValue(account)
+    }
+    try self.removeAccount(account)
   }
 
   func accountLabel(for account: ProviderID) -> String? {
@@ -942,15 +944,41 @@ final class UsageStore {
     "\(provider.rawValue).configDirectory"
   }
 
-  /// Marks the account as waiting for its folder. Returns true when it is.
+  /// Why an added account's folder cannot be used right now, or nil. A folder
+  /// accepted earlier can since have been replaced by a link to the default
+  /// home or to another account's folder, so it is checked before each use.
+  private func accountFolderConflict(_ provider: ProviderID) -> String? {
+    guard let folder = self.accountFolder(for: provider) else { return nil }
+    let resolved = folder.resolvedPath
+    if folder.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome) {
+      return "This account's folder now leads to the first \(provider.kind.displayName) account's folder. Choose a different folder in Settings > Providers."
+    }
+    if let owner = self.accounts.first(where: {
+      $0 != provider && $0.kind == provider.kind && $0.isAdded && self.accountFolder(for: $0)?.resolvedPath == resolved
+    }) {
+      return "This account's folder now leads to \(owner.displayName)'s folder. Choose a different folder in Settings > Providers."
+    }
+    return nil
+  }
+
+  /// Marks the account as waiting for its folder, or for a usable one.
+  /// Returns true when nothing may be launched for it.
   private func noteMissingConfigDirectory(_ provider: ProviderID) -> Bool {
-    guard provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil,
-      self.accountFolder(for: provider) == nil
-    else { return false }
+    guard provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil else {
+      return false
+    }
+    let message: String
+    if self.accountFolder(for: provider) == nil {
+      message = AccountFolder.missing(for: provider.kind).localizedDescription
+    } else if let conflict = self.accountFolderConflict(provider) {
+      message = conflict
+    } else {
+      return false
+    }
     self.states[provider]?.requiresConfigDirectory = true
     self.states[provider]?.requiresConnection = false
     self.states[provider]?.requiresKeychainAccess = false
-    self.states[provider]?.error = AccountFolder.missing(for: provider.kind).localizedDescription
+    self.states[provider]?.error = message
     return true
   }
 

@@ -1302,7 +1302,23 @@ enum ConnectionFlowSelfTest {
     expect(Set([codex, codexTwo, grok, zai]).isSubset(of: Set(reloaded.accounts)),
       "added accounts did not survive a relaunch")
 
-    try? store.removeAccount(zai)
+    // A folder accepted earlier and later replaced by a link to the default
+    // home must not be launched with.
+    if let twoFolder = try? store.setAccountFolder(home.appendingPathComponent("codex-two").path, for: codexTwo) {
+      let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+      try? FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+      try? FileManager.default.removeItem(at: twoFolder.url)
+      try? FileManager.default.createSymbolicLink(at: twoFolder.url, withDestinationURL: codexHome)
+      store.setEnabled(codexTwo, enabled: true)
+      store.connect(codexTwo)
+      expect(store.states[codexTwo]?.requiresConfigDirectory == true
+        && store.states[codexTwo]?.error?.contains("first OpenAI account") == true,
+        "an added Codex account whose folder became a link to ~/.codex was still used")
+    } else {
+      failures.append("added accounts: a fresh Codex folder was refused")
+    }
+
+    try? await store.removeAccountAndKey(zai)
     expect(savedPlanKeys[zai] == nil && !store.accounts.contains(zai), "removing a Z.ai account kept its key")
     try? store.removeAccount(codex)
     expect(!store.accounts.contains(codex) && FileManager.default.fileExists(atPath: codexFolder)

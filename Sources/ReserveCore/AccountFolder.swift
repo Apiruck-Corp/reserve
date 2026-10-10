@@ -32,9 +32,17 @@ public struct AccountFolder: Sendable, Equatable, Hashable {
     return self == home || self.resolvedPath == home.resolvedPath
   }
 
-  /// The helper's environment with its home variable pointing here.
+  /// Variables that name a credential file directly and would win over the
+  /// home folder, so an inherited one would put every account on one sign-in.
+  static func overridingKeys(for kind: ProviderKind) -> [String] {
+    kind == .grok ? ["GROK_AUTH_PATH"] : []
+  }
+
+  /// The helper's environment with its home variable pointing here, and any
+  /// inherited override of the credential file removed.
   public func environment(for kind: ProviderKind, from base: [String: String]) -> [String: String] {
     var environment = base
+    for key in Self.overridingKeys(for: kind) { environment.removeValue(forKey: key) }
     if let key = ProviderDescriptor.forKind(kind).homeFolderEnvironmentKey {
       environment[key] = self.path
     }

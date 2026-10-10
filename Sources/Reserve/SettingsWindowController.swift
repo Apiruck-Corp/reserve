@@ -1552,7 +1552,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func addAccountItem(_ kind: ProviderKind) -> NSMenuItem {
     let defaultAccount = ProviderID(kind: kind)
-    let action = AccountAddition.action(for: kind, defaultConnected: self.store.isEnabled(defaultAccount))
+    let action = AccountAddition.action(for: kind, defaultConnected: self.isConnected(defaultAccount))
     let item = NSMenuItem(
       title: kind.displayName, action: #selector(self.addAccountChosen(_:)), keyEquivalent: "")
     item.target = self
@@ -1588,6 +1588,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     return item
   }
 
+  /// Turned on and holding a sign-in or key Reserve could read. An enabled
+  /// card still waiting for its sign-in is not one: the menu connects it
+  /// rather than adding another empty account beside it.
+  private func isConnected(_ provider: ProviderID) -> Bool {
+    guard self.store.isEnabled(provider), let state = self.store.states[provider] else { return false }
+    return state.snapshot != nil && !state.requiresConnection && !state.requiresConfigDirectory
+  }
+
   private static func menuImage(_ image: NSImage) -> NSImage {
     let sized = image.copy() as? NSImage ?? image
     sized.size = NSSize(width: 16, height: 16)
@@ -1601,7 +1609,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   @objc private func addAccountChosen(_ sender: NSMenuItem) {
     guard let raw = sender.representedObject as? String, let kind = ProviderKind(rawValue: raw) else { return }
     let defaultAccount = ProviderID(kind: kind)
-    switch AccountAddition.action(for: kind, defaultConnected: self.store.isEnabled(defaultAccount)) {
+    switch AccountAddition.action(for: kind, defaultConnected: self.isConnected(defaultAccount)) {
     case .connectDefault:
       self.show(.providers)
       self.expandedProviders.insert(defaultAccount)
@@ -1659,22 +1667,24 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       : "Reserve stops tracking it and forgets its settings. The account's folder and its \(AccountFolderCopy.helperName(provider)) sign-in stay on this Mac."
     alert.addButton(withTitle: "Remove")
     alert.addButton(withTitle: "Cancel")
-    let remove = { [weak self] in
-      guard let self else { return }
-      do {
-        try self.store.removeAccount(provider)
-        self.expandedProviders.remove(provider)
-        self.rememberScrollOffset()
-        self.applyPane(animated: false)
-      } catch {
-        let failure = NSAlert()
-        failure.messageText = "The account could not be removed"
-        failure.informativeText = error.localizedDescription
-        failure.addButton(withTitle: "OK")
-        if let window = self.window, window.isVisible {
-          failure.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-          failure.runModal()
+    let remove: () -> Void = { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        do {
+          try await self.store.removeAccountAndKey(provider)
+          self.expandedProviders.remove(provider)
+          self.rememberScrollOffset()
+          self.applyPane(animated: false)
+        } catch {
+          let failure = NSAlert()
+          failure.messageText = "The account could not be removed"
+          failure.informativeText = error.localizedDescription
+          failure.addButton(withTitle: "OK")
+          if let window = self.window, window.isVisible {
+            failure.beginSheetModal(for: window, completionHandler: nil)
+          } else {
+            failure.runModal()
+          }
         }
       }
     }
