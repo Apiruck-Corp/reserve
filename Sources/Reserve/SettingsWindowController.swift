@@ -1326,6 +1326,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     var rowViews: [NSView] = [heading, fields]
     if self.apiAccountTakesName(provider) { rowViews.append(self.apiAccountNameRow(provider)) }
+    // Why the provider refused or failed, in full: the status line above has
+    // room only for "Needs attention".
+    if let error = self.store.apiConsumptionErrors[provider] {
+      let reason = NSTextField(wrappingLabelWithString: error)
+      reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
+      reason.font = .systemFont(ofSize: 11)
+      reason.textColor = .secondaryLabelColor
+      reason.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+      rowViews.append(reason)
+    }
     let row = NSStackView(views: rowViews)
     row.identifier = NSUserInterfaceItemIdentifier("api-provider-\(provider.rawValue)")
     row.orientation = .vertical
@@ -2856,6 +2866,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
         // The name field appears once a provider has a second account.
         parts.append(self.apiAccountTakesName(provider) ? "named" : "-")
+        parts.append(self.store.apiConsumptionErrors[provider] ?? "-")
       }
     case .insights:
       let enabled = self.store.accounts.filter { self.store.isEnabled($0) }

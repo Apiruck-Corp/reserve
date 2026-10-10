@@ -72,6 +72,16 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     }
   }
 
+  /// The prefix of the admin key a billing API needs, for providers whose
+  /// ordinary API keys cannot read billing. Used only to explain a refusal.
+  var adminKeyPrefix: String? {
+    switch self {
+    case .openAI: "sk-admin-"
+    case .anthropic: "sk-ant-admin"
+    default: nil
+    }
+  }
+
   var endpointHost: String {
     switch self {
     case .openAI: "api.openai.com"
@@ -942,7 +952,9 @@ public struct APIConsumptionClient: Sendable {
     case 200: return data
     case 401, 403:
       throw UsageProviderError.unauthorized(
-        "\(provider.displayName) refused this \(provider.keyKind.lowercased()).")
+        Self.refusalMessage(
+          provider: provider, status: http.statusCode, body: data,
+          key: Self.credential(in: request)))
     case 429:
       throw UsageProviderError.rateLimited(
         retryAt: HTTPRetryAfter.deadline(
@@ -954,6 +966,59 @@ public struct APIConsumptionClient: Sendable {
       throw UsageProviderError.unavailable(
         "\(provider.displayName) consumption request returned HTTP \(http.statusCode).")
     }
+  }
+
+  /// The key the request carried, only so it can be kept out of messages.
+  private static func credential(in request: URLRequest) -> String? {
+    if let key = request.value(forHTTPHeaderField: "x-api-key") { return key }
+    guard let authorization = request.value(forHTTPHeaderField: "Authorization") else { return nil }
+    return authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst(7)) : authorization
+  }
+
+  /// Says why a key was refused: the provider's own reason when it gives one
+  /// ("API key is invalid."), and, when the key is not the kind the billing
+  /// API takes, which kind it needs. The key never appears in the message.
+  static func refusalMessage(
+    provider: APIConsumptionProvider, status: Int, body: Data, key: String?
+  ) -> String {
+    var message = "\(provider.displayName) refused this \(provider.keyKind.lowercased())"
+    if let reason = Self.providerReason(in: body, redacting: key) {
+      message += ": \(reason)"
+      if !message.hasSuffix(".") { message += "." }
+    } else {
+      message += "."
+    }
+    if let prefix = provider.adminKeyPrefix, let key {
+      if !key.hasPrefix(prefix) {
+        message += " This looks like a regular API key; \(provider.displayName) usage needs an "
+          + "\(provider.keyKind.lowercased()) (\(provider.keyHint))."
+      } else if provider == .anthropic, status == 403 {
+        message += " Admin keys work only for a Claude Console organization where you are an admin; "
+          + "individual accounts and Claude Enterprise plans cannot read the Cost API."
+      }
+    }
+    return message
+  }
+
+  /// The provider's error message from a JSON error body, made safe to show:
+  /// one line, at most 160 characters, with the key and anything shaped like
+  /// a long credential removed.
+  static func providerReason(in body: Data, redacting key: String?) -> String? {
+    guard body.count <= 16_384, let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+    else { return nil }
+    let error = root["error"]
+    let candidates: [Any?] = [
+      (error as? [String: Any])?["message"], error, root["message"], root["detail"],
+    ]
+    guard var text = candidates.lazy.compactMap({ $0 as? String }).first else { return nil }
+    if let key, key.count >= 4 { text = text.replacingOccurrences(of: key, with: "[key]") }
+    if let expression = try? NSRegularExpression(pattern: #"[A-Za-z0-9_\-]{32,}"#) {
+      text = expression.stringByReplacingMatches(
+        in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "[hidden]")
+    }
+    text = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+    guard !text.isEmpty else { return nil }
+    return text.count > 160 ? String(text.prefix(159)) + "…" : text
   }
 
   private static func decode<Response: Decodable>(

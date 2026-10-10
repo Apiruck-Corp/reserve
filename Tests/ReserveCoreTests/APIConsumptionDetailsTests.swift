@@ -98,6 +98,55 @@ struct APIConsumptionDetailsTests {
     #expect(self.byLabel(snapshot)["claude-opus-5"] == "$2.50")
   }
 
+  /// A refused Claude API key says why, in Anthropic's words, and which key
+  /// the Cost API needs, without ever repeating the key.
+  @Test func aRefusedAnthropicKeyExplainsItself() async throws {
+    func refusal(status: Int, body: String, key: String) async -> String? {
+      let client = APIConsumptionClient(
+        requestHandler: { request in
+          (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        },
+        now: { Self.now })
+      do {
+        _ = try await client.fetch(.anthropic, apiKey: key)
+        return nil
+      } catch UsageProviderError.unauthorized(let message) {
+        return message
+      } catch {
+        return "unexpected \(error)"
+      }
+    }
+    let regular = await refusal(
+      status: 401,
+      body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+      key: "sk-ant-api03-regular-test-key-000000")
+    #expect(regular?.hasPrefix("Anthropic refused this admin key: invalid x-api-key.") == true)
+    #expect(regular?.contains("regular API key") == true && regular?.contains("sk-ant-admin…") == true)
+    #expect(regular?.contains("sk-ant-api03-regular") == false)
+
+    let organization = await refusal(
+      status: 403,
+      body: #"{"type":"error","error":{"type":"permission_error","message":"Key sk-ant-admin01-secret-test-key-0000 lacks access"}}"#,
+      key: "sk-ant-admin01-secret-test-key-0000")
+    #expect(organization?.contains("Claude Console organization") == true)
+    #expect(organization?.contains("secret-test-key") == false)
+    #expect(organization?.contains("[key]") == true)
+
+    let silent = await refusal(status: 401, body: "", key: "sk-ant-admin01-test")
+    #expect(silent == "Anthropic refused this admin key.")
+  }
+
+  @Test func providerReasonsAreShortAndHideCredentials() {
+    let long = String(repeating: "word ", count: 80)
+    let reason = APIConsumptionClient.providerReason(
+      in: Data(#"{"message":"\#(long)"}"#.utf8), redacting: nil)
+    #expect((reason?.count ?? 0) <= 160)
+    let token = APIConsumptionClient.providerReason(
+      in: Data(#"{"error":"bad token abcdefghijklmnopqrstuvwxyz0123456789ABCD"}"#.utf8), redacting: nil)
+    #expect(token == "bad token [hidden]")
+    #expect(APIConsumptionClient.providerReason(in: Data("not json".utf8), redacting: nil) == nil)
+  }
+
   @Test func detailsSurviveTheCacheAndOldCachesStillLoad() throws {
     let snapshot = APIConsumptionSnapshot(
       provider: .openRouter, windows: [], source: "test",
