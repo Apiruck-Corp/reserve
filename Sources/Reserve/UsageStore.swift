@@ -2075,7 +2075,10 @@ final class UsageStore {
     }
     self.apiKeyCache[account] = nil
     self.apiMutationGenerations[account] = nil
+    self.apiGenerations[account] = nil
     self.apiProbeTasks.removeValue(forKey: account)?.cancel()
+    self.keychainProbeFailures[self.apiProbeID(account)] = nil
+    self.lastKeychainProbeAt[self.apiProbeID(account)] = nil
     APIAccountLabels.set(nil, for: account)
     if self.expandedAPIProvider == account { self.expandedAPIProvider = nil }
     self.changed()

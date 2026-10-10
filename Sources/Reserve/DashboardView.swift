@@ -158,6 +158,8 @@ final class DashboardViewController: NSViewController {
     for reading in apiReadings {
       parts.append("api")
       parts.append(reading.provider.rawValue)
+      // A renamed account rebuilds its row so the new name shows.
+      parts.append(reading.provider.displayName)
       parts.append(reading.error ?? "-")
       parts.append(reading.isRefreshing ? "measuring" : "-")
       parts.append(reading.snapshot.map { String($0.primary?.usedMinorUnits ?? 0) } ?? "-")
@@ -899,6 +901,7 @@ private final class APIConsumptionSection: NSView {
       let expandedError = reading.isExpanded ? (reading.error ?? "") : ""
       return [
         reading.provider.rawValue,
+        reading.provider.displayName,
         reading.isExpanded ? "open" : "closed",
         reading.hidesPersonalInfo ? "private" : "plain",
         details,
@@ -994,11 +997,14 @@ private final class APIConsumptionSection: NSView {
     toggle: @escaping (APIAccountID) -> Void
   ) -> NSView {
     let logo = ProviderLogo(api: reading.provider.provider)
+    // The logo already names the provider, so a named account shows its name
+    // alone ("Nimbus"): the narrow column would cut "Anthropic · Nimbus".
     let name = ReserveLabel(
-      reading.provider.displayName,
+      APIAccountLabels.label(for: reading.provider) ?? reading.provider.provider.displayName,
       font: ReserveFont.sans(ReserveType.body, .medium),
       color: ReserveColor.text
     ).width(84)
+    name.toolTip = reading.provider.displayName
     let presented = Self.presented(reading, now: now)
     let amount = ReserveLabel(
       presented.value, font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
