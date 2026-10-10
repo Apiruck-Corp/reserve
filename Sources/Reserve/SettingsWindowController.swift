@@ -1675,6 +1675,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           self.expandedProviders.remove(provider)
           self.rememberScrollOffset()
           self.applyPane(animated: false)
+        } catch is CancellationError {
+          // A new key was saved meanwhile; the account stays with it.
+          self.applyPane(animated: false)
         } catch {
           let failure = NSAlert()
           failure.messageText = "The account could not be removed"

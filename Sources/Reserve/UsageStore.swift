@@ -689,8 +689,11 @@ final class UsageStore {
   func removeAccountAndKey(_ account: ProviderID) async throws {
     guard account.isAdded, self.addedAccounts.contains(account) else { return }
     if ProviderDescriptor.forProvider(account).usesAPIKey {
-      _ = self.beginPlanKeyMutation(account)
+      let mutation = self.beginPlanKeyMutation(account)
       try await self.deletePlanKeyValue(account)
+      // A key saved while the deletion waited is the person's newer choice:
+      // the account stays, with that key.
+      guard self.planMutationGenerations[account] == mutation else { throw CancellationError() }
     }
     try self.removeAccount(account)
   }
@@ -773,6 +776,15 @@ final class UsageStore {
 
   func setClaudePassiveUpdatesEnabled(_ enabled: Bool, for provider: ProviderID) throws {
     guard provider.isAnthropic else { return }
+    // A folder that now leads into another account's folder holds that
+    // account's status line, which this one must not install or remove.
+    if provider.isAdded, let conflict = self.accountFolderConflict(provider) {
+      guard !enabled else { throw UsageProviderError.unavailable(conflict) }
+      self.claudeQuotaWatchers.removeValue(forKey: provider)?.stop()
+      self.defaults.set(false, forKey: "\(provider.rawValue).passiveStatusline")
+      self.changed()
+      return
+    }
     let settingsURL = try self.claudeStatuslineSettingsURL(for: provider)
     var watcher: QuotaFileWatcher?
     if enabled {
@@ -950,7 +962,13 @@ final class UsageStore {
   private func accountFolderConflict(_ provider: ProviderID) -> String? {
     guard let folder = self.accountFolder(for: provider) else { return nil }
     let resolved = folder.resolvedPath
-    if folder.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome) {
+    // The default account reads the helper's default home, or the folder the
+    // environment Reserve was launched with names.
+    let environmentHome = ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey
+      .flatMap { ProcessInfo.processInfo.environment[$0] }.flatMap(AccountFolder.init(path:))
+    if folder.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome)
+      || resolved == environmentHome?.resolvedPath
+    {
       return "This account's folder now leads to the first \(provider.kind.displayName) account's folder. Choose a different folder in Settings > Providers."
     }
     if let owner = self.accounts.first(where: {
@@ -2993,6 +3011,12 @@ final class UsageStore {
     guard await self.subscriptionLimiter.acquire() else { return }
     defer { self.subscriptionLimiter.release() }
     guard isCurrent() else { return }
+    // Checked again right before the launch: the folder may have changed
+    // while this read waited for its turn.
+    if self.noteMissingConfigDirectory(provider) {
+      self.changed()
+      return
+    }
 
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
     let fetcher: any UsageProvider =
