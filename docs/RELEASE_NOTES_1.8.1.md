@@ -1,4 +1,4 @@
-# Reserve 1.8.0
+# Reserve 1.8.1
 
 Adding an account now works the same way for every provider. Choose
 **Add Account…** at the top of Settings > Providers or Settings > API, and pick
@@ -20,3 +20,9 @@ A refused API key now tells you why: the key is invalid or revoked, it has no
 access to usage data, or it isn't an admin key. Claude's Cost API needs an
 admin key (sk-ant-admin…) from a Claude Console organization. Reserve never
 repeats the provider's own error text, because it can quote your key.
+
+OpenAI usage shows up again with ChatGPT 26.10, which moved its built-in Codex
+helper; Reserve now looks in the new place first. If one Codex install on your
+Mac is broken, Reserve tries the next one instead of leaving the card empty.
+
+1.8.0 was tagged but not published; 1.8.1 carries its changes.
