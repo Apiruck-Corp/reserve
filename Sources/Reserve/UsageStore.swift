@@ -88,12 +88,12 @@ struct PlanKeyStorage {
 /// executor. Tests pass closures and never touch the login Keychain or network.
 @MainActor
 struct APIConsumptionKeyAccess {
-  var availability: (APIConsumptionProvider) -> KeychainItemAvailability
-  var load: (APIConsumptionProvider) throws -> String
-  var save: (String, APIConsumptionProvider) throws -> Void
-  var delete: (APIConsumptionProvider) -> Void
-  var saveAsync: ((String, APIConsumptionProvider) async throws -> Void)? = nil
-  var deleteAsync: ((APIConsumptionProvider) async throws -> Void)? = nil
+  var availability: (APIAccountID) -> KeychainItemAvailability
+  var load: (APIAccountID) throws -> String
+  var save: (String, APIAccountID) throws -> Void
+  var delete: (APIAccountID) -> Void
+  var saveAsync: ((String, APIAccountID) async throws -> Void)? = nil
+  var deleteAsync: ((APIAccountID) async throws -> Void)? = nil
 }
 
 @MainActor
@@ -104,9 +104,9 @@ final class UsageStore {
   /// across the rebuilds a refresh triggers.
   private(set) var refreshStartedAt: Date?
   private(set) var isScanningLocalUsage = false
-  private(set) var apiConsumption: [APIConsumptionProvider: APIConsumptionSnapshot] = [:]
-  private(set) var apiConsumptionErrors: [APIConsumptionProvider: String] = [:]
-  private(set) var apiConsumptionRefreshing: Set<APIConsumptionProvider> = []
+  private(set) var apiConsumption: [APIAccountID: APIConsumptionSnapshot] = [:]
+  private(set) var apiConsumptionErrors: [APIAccountID: String] = [:]
+  private(set) var apiConsumptionRefreshing: Set<APIAccountID> = []
 
   /// Identifies one registered observer. Surfaces come and go, so removal has to
   /// be precise rather than "clear the callback".
@@ -286,9 +286,9 @@ final class UsageStore {
   private var pendingKeychainInteractions: Set<ProviderID> = []
   private var keychainAccessCompletions: [ProviderID: [() -> Void]] = [:]
   private var lastRefreshCompletedAt: Date?
-  private var apiConsumptionTokens: [APIConsumptionProvider: Int] = [:]
-  private var apiGenerations: [APIConsumptionProvider: Int] = [:]
-  private var apiMutationGenerations: [APIConsumptionProvider: Int] = [:]
+  private var apiConsumptionTokens: [APIAccountID: Int] = [:]
+  private var apiGenerations: [APIAccountID: Int] = [:]
+  private var apiMutationGenerations: [APIAccountID: Int] = [:]
   private var planMutationGenerations: [ProviderID: Int] = [:]
   /// A setup window can close after its Keychain save has begun. Only that
   /// canceled generation may remove its just-written, unconfirmed key; a
@@ -296,9 +296,9 @@ final class UsageStore {
   /// the older completion.
   private var planMutationsNeedingCleanup: [ProviderID: Set<Int>] = [:]
   private var planSaveCleanupEligible: [ProviderID: Set<Int>] = [:]
-  private var apiTasks: [APIConsumptionProvider: Task<Void, Never>] = [:]
+  private var apiTasks: [APIAccountID: Task<Void, Never>] = [:]
   /// Presence only. The secret itself is never cached.
-  private var apiKeyCache: [APIConsumptionProvider: SavedKeyAvailability] = [:]
+  private var apiKeyCache: [APIAccountID: SavedKeyAvailability] = [:]
   private var planKeyCache: [ProviderID: SavedKeyAvailability] = [:]
   private let injectedPlanKeys: PlanKeyStorage?
   private let injectedAPIKeys: APIConsumptionKeyAccess?
@@ -311,7 +311,7 @@ final class UsageStore {
   private var lowPowerOverride: Bool?
   private var offlineOverride: Bool?
   private var subscriptionSchedules: [ProviderID: ProviderRefreshSchedule] = [:]
-  private var apiSchedules: [APIConsumptionProvider: ProviderRefreshSchedule] = [:]
+  private var apiSchedules: [APIAccountID: ProviderRefreshSchedule] = [:]
   private var statusGenerations: [ProviderID: Int] = [:]
   private var statusTasks: [ProviderID: Task<Void, Never>] = [:]
   private var localScanGeneration = 0
@@ -319,7 +319,7 @@ final class UsageStore {
   private var localWatchTask: Task<Void, Never>?
   private var keychainProbeFailures: [String: Int] = [:]
   private var lastKeychainProbeAt: [String: Date] = [:]
-  private var apiProbeTasks: [APIConsumptionProvider: Task<Void, Never>] = [:]
+  private var apiProbeTasks: [APIAccountID: Task<Void, Never>] = [:]
   private var planProbeTasks: [ProviderID: Task<Void, Never>] = [:]
   private let subscriptionLimiter = OperationLimiter(limit: 2)
   private let apiLimiter = OperationLimiter(limit: 2)
@@ -350,7 +350,7 @@ final class UsageStore {
     }
   }
   /// The one API row whose details are open, if any.
-  var expandedAPIProvider: APIConsumptionProvider?
+  var expandedAPIProvider: APIAccountID?
   private var staleProviders: Set<ProviderID> = []
   private var incidentProviders: Set<ProviderID> = []
   private let localUsageScanInterval: TimeInterval = 30 * 60
@@ -449,6 +449,7 @@ final class UsageStore {
         ($0, ProviderViewState(provider: $0))
       })
     self.registerDefaults()
+    self.loadAPIAccounts()
     ReserveAppearance.current = self.appearanceTheme
     ReserveAppearance.mode = self.appearanceMode
     self.notifications.requestAuthorizationIfNeeded()
@@ -511,6 +512,9 @@ final class UsageStore {
   /// added. Persisted as raw values; a value that no longer parses is dropped.
   private var addedAccounts: [ProviderID]
   private static let addedAccountsKey = "accounts.added"
+  /// The home the managed account folders and each helper's default home are
+  /// found under. Self-tests point it at a temporary folder.
+  var accountsHome = FileManager.default.homeDirectoryForCurrentUser
 
   /// Every tracked account: each kind's default account, followed by the
   /// accounts added to that kind. This is the order of every list in the app.
@@ -557,9 +561,9 @@ final class UsageStore {
     var folders: Set<String> = []
     for account in accounts {
       guard let path = defaults.string(forKey: Self.configDirectoryKey(account)),
-        let directory = ClaudeConfigDirectory(path: path)
+        let directory = AccountFolder(path: path)
       else { continue }
-      if !folders.insert(directory.resolvedPath).inserted {
+      if !folders.insert("\(account.kind.rawValue):\(directory.resolvedPath)").inserted {
         defaults.removeObject(forKey: Self.configDirectoryKey(account))
       }
     }
@@ -585,34 +589,32 @@ final class UsageStore {
     self.defaults.set(self.addedAccounts.map(\.rawValue), forKey: Self.addedAccountsKey)
   }
 
-  /// Where Reserve keeps the folders of the Claude accounts it adds. Hidden
-  /// like Claude Code's own home; Claude Code fills each one in at sign-in.
-  static func managedClaudeAccountsDirectory(
-    home: URL = FileManager.default.homeDirectoryForCurrentUser
-  ) -> URL {
-    home.appendingPathComponent(".claude-accounts", isDirectory: true)
-  }
-
-  /// Adds a Claude account with a folder of its own, enabled and named
+  /// Adds an account beside a kind's default one, enabled and named
   /// "Account N" until its organization is known or the person renames it.
-  /// The caller starts the connection; nothing is signed in here.
+  /// A helper that keeps one sign-in per folder gets a folder of its own
+  /// under `~/<managed root>/<instance>`; a key plan waits for its key. The
+  /// caller starts the connection; nothing is signed in here.
   @discardableResult
-  func addClaudeAccount() throws -> ProviderID {
-    let kind = ProviderKind.anthropic
+  func addAccount(kind: ProviderKind) throws -> ProviderID {
+    guard kind.supportsAddedAccounts else {
+      throw UsageProviderError.unavailable(
+        "\(kind.displayName) keeps one sign-in per Mac, so Reserve can track only one \(kind.displayName) account.")
+    }
     var account = ProviderID(kind: kind)
     repeat {
       let instance = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8)
       account = ProviderID(kind: kind, instance: String(instance)) ?? account
     } while account.isDefault || self.addedAccounts.contains(account)
-    let folder = Self.managedClaudeAccountsDirectory()
-      .appendingPathComponent(account.instance ?? "", isDirectory: true)
-    guard let directory = ClaudeConfigDirectory(path: folder.path) else {
-      throw UsageProviderError.unavailable("Reserve could not name a folder for this account.")
+    if let root = AccountFolder.managedRoot(for: kind, homeDirectory: self.accountsHome) {
+      let folder = root.appendingPathComponent(account.instance ?? "", isDirectory: true)
+      guard let directory = AccountFolder(path: folder.path) else {
+        throw UsageProviderError.unavailable("Reserve could not name a folder for this account.")
+      }
+      try FileManager.default.createDirectory(
+        at: directory.url, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+      self.defaults.set(directory.path, forKey: Self.configDirectoryKey(account))
     }
-    try FileManager.default.createDirectory(
-      at: directory.url, withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700])
-    self.defaults.set(directory.path, forKey: Self.configDirectoryKey(account))
     let ordinal = self.nextAccountOrdinal(for: kind)
     self.defaults.set(ordinal, forKey: "\(account.rawValue).ordinal")
     self.defaults.set("Account \(ordinal)", forKey: "\(account.rawValue).label")
@@ -623,10 +625,16 @@ final class UsageStore {
     self.defaults.set(false, forKey: "\(account.rawValue).keychainReadAllowed")
     self.addedAccounts.append(account)
     self.persistAddedAccounts()
-    self.states[account] = ProviderViewState(provider: account)
+    var state = ProviderViewState(provider: account)
+    // A key plan has nothing to read until its key is pasted.
+    if ProviderDescriptor.forKind(kind).usesAPIKey { state.requiresConnection = true }
+    self.states[account] = state
     self.changed()
     return account
   }
+
+  @discardableResult
+  func addClaudeAccount() throws -> ProviderID { try self.addAccount(kind: .anthropic) }
 
   /// Forgets an added account: its checks, consent, status line, cached
   /// usage and settings. Its folder, and the Claude Code sign-in inside it,
@@ -639,8 +647,11 @@ final class UsageStore {
       try self.setClaudePassiveUpdatesEnabled(false, for: account)
     }
     self.disconnect(account)
-    self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
-    try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: account))
+    self.planKeyCache[account] = nil
+    if account.isAnthropic {
+      self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
+      try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: account))
+    }
     for key in [
       "provider.\(account.rawValue).enabled",
       "\(account.rawValue).keychainReadAllowed",
@@ -667,10 +678,25 @@ final class UsageStore {
       self.expandedProvider = nil
     }
     Task {
-      await AnthropicProvider.forgetAccount(account)
+      if account.isAnthropic { await AnthropicProvider.forgetAccount(account) }
       await self.persistSnapshots()
     }
     self.changed()
+  }
+
+  /// Removes an account, deleting a key plan's key first: the key was pasted
+  /// into Reserve for this account alone. When the key cannot be deleted the
+  /// account stays, so the removal can be tried again.
+  func removeAccountAndKey(_ account: ProviderID) async throws {
+    guard account.isAdded, self.addedAccounts.contains(account) else { return }
+    if ProviderDescriptor.forProvider(account).usesAPIKey {
+      let mutation = self.beginPlanKeyMutation(account)
+      try await self.deletePlanKeyValue(account)
+      // A key saved while the deletion waited is the person's newer choice:
+      // the account stays, with that key.
+      guard self.planMutationGenerations[account] == mutation else { throw CancellationError() }
+    }
+    try self.removeAccount(account)
   }
 
   func accountLabel(for account: ProviderID) -> String? {
@@ -751,6 +777,15 @@ final class UsageStore {
 
   func setClaudePassiveUpdatesEnabled(_ enabled: Bool, for provider: ProviderID) throws {
     guard provider.isAnthropic else { return }
+    // A folder that now leads into another account's folder holds that
+    // account's status line, which this one must not install or remove.
+    if provider.isAdded, let conflict = self.accountFolderConflict(provider) {
+      guard !enabled else { throw UsageProviderError.unavailable(conflict) }
+      self.claudeQuotaWatchers.removeValue(forKey: provider)?.stop()
+      self.defaults.set(false, forKey: "\(provider.rawValue).passiveStatusline")
+      self.changed()
+      return
+    }
     let settingsURL = try self.claudeStatuslineSettingsURL(for: provider)
     var watcher: QuotaFileWatcher?
     if enabled {
@@ -804,67 +839,94 @@ final class UsageStore {
     }
   }
 
-  // MARK: Added Claude accounts
+  // MARK: Added accounts' folders
 
-  /// The Claude Code configuration folder an added account reads. Nil until the
-  /// person chooses one; the first slot never has one here.
-  func claudeConfigDirectory(for provider: ProviderID) -> ClaudeConfigDirectory? {
-    guard provider.isAdded, provider.isAnthropic,
+  /// The home folder an added account's helper uses. Nil for a kind without
+  /// folders, and until the person chooses one; a default account never has
+  /// one here.
+  func accountFolder(for provider: ProviderID) -> AccountFolder? {
+    guard provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil,
       let path = self.defaults.string(forKey: Self.configDirectoryKey(provider))
     else { return nil }
-    return ClaudeConfigDirectory(path: path)
+    return AccountFolder(path: path)
   }
 
-  /// Stores the folder, normalised, and starts over for that slot: the old
-  /// folder's sign-in, consent and status line are not carried across. An
-  /// empty value clears the folder. Throws for a path that is not absolute.
+  /// The Claude Code configuration folder an added Claude account reads.
+  func claudeConfigDirectory(for provider: ProviderID) -> ClaudeConfigDirectory? {
+    guard provider.isAnthropic, let folder = self.accountFolder(for: provider) else { return nil }
+    return ClaudeConfigDirectory(path: folder.path)
+  }
+
+  /// The helper environment for an account: unchanged for a default account,
+  /// with the home variable pointing at its folder for an added one.
+  func helperEnvironment(
+    for provider: ProviderID, base: [String: String] = ProcessInfo.processInfo.environment
+  ) -> [String: String] {
+    guard let folder = self.accountFolder(for: provider) else { return base }
+    return folder.environment(for: provider.kind, from: base)
+  }
+
   @discardableResult
   func setClaudeConfigDirectory(_ input: String?, for provider: ProviderID) throws
     -> ClaudeConfigDirectory?
   {
-    guard provider.isAdded, provider.isAnthropic else { return nil }
+    guard provider.isAnthropic else { return nil }
+    return try self.setAccountFolder(input, for: provider).flatMap { ClaudeConfigDirectory(path: $0.path) }
+  }
+
+  /// Stores the folder, normalised, and starts over for that account: the old
+  /// folder's sign-in, consent and status line are not carried across. An
+  /// empty value clears the folder. Throws for a path that is not absolute.
+  @discardableResult
+  func setAccountFolder(_ input: String?, for provider: ProviderID) throws -> AccountFolder? {
+    guard provider.isAdded,
+      case .homeFolder(let variable, let defaultName, _) = ProviderDescriptor.forProvider(provider).accountIsolation
+    else { return nil }
+    let kindName = provider.kind.displayName
+    let example = "~/\(defaultName)-team"
     let trimmed = (input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    var directory: ClaudeConfigDirectory?
+    var directory: AccountFolder?
     if !trimmed.isEmpty {
-      guard let parsed = ClaudeConfigDirectory(path: trimmed) else {
+      guard let parsed = AccountFolder(path: trimmed) else {
         throw UsageProviderError.unavailable(
-          "Enter the full path of a folder, such as ~/.claude-team.")
+          "Enter the full path of a folder, such as \(example).")
       }
-      // Pointed at the default home, Claude Code would keep a second sign-in
-      // beside the first account's, in a differently named Keychain item.
-      // The first Claude card already covers that folder.
-      // The default account also reads a folder named by the environment
-      // Reserve was launched with, when there is one.
-      let environmentHome = ClaudeConfigDirectory.resolve(environment: ProcessInfo.processInfo.environment)
-      guard !parsed.isDefaultHome(), parsed.resolvedPath != environmentHome?.resolvedPath else {
+      // Pointed at the default home, the helper would sign in over the first
+      // account, which already covers that folder. The default account also
+      // reads a folder named by the environment Reserve was launched with.
+      let environmentHome = ProcessInfo.processInfo.environment[variable].flatMap(AccountFolder.init(path:))
+      guard !parsed.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome),
+        parsed.resolvedPath != environmentHome?.resolvedPath
+      else {
         throw UsageProviderError.unavailable(
-          "That is the first Claude account's folder. Choose a different folder for this account, such as ~/.claude-team.")
+          "That is the first \(kindName) account's folder. Choose a different folder for this account, such as \(example).")
       }
-      // Two cards on one folder would sign in over each other and fight for
-      // its status line.
-      if let owner = self.claudeProviders.first(where: {
-        $0 != provider && $0.isAdded
-          && self.claudeConfigDirectory(for: $0)?.resolvedPath == parsed.resolvedPath
+      // Two cards on one folder would sign in over each other.
+      if let owner = self.accounts.first(where: {
+        $0 != provider && $0.kind == provider.kind && $0.isAdded
+          && self.accountFolder(for: $0)?.resolvedPath == parsed.resolvedPath
       }) {
         throw UsageProviderError.unavailable(
           "That folder already belongs to \(owner.displayName). Choose a different folder for this account.")
       }
       directory = parsed
     }
-    let current = self.claudeConfigDirectory(for: provider)
+    let current = self.accountFolder(for: provider)
     guard directory != current else { return directory }
-    // The status line is installed in the old folder's settings file, so it
-    // comes out before the folder changes, and its cached quotas go with it:
-    // they belong to the old account.
-    if self.claudePassiveUpdatesEnabled(for: provider) {
-      try self.setClaudePassiveUpdatesEnabled(false, for: provider)
+    if provider.isAnthropic {
+      // The status line is installed in the old folder's settings file, so it
+      // comes out before the folder changes, and its cached quotas go with
+      // it: they belong to the old account.
+      if self.claudePassiveUpdatesEnabled(for: provider) {
+        try self.setClaudePassiveUpdatesEnabled(false, for: provider)
+      }
+      try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: provider))
     }
-    try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: provider))
     self.cancelConnection(provider)
     // Back-off and renewal cooldown earned by the old sign-in must not hold
     // the new one back.
     self.subscriptionSchedules[provider] = nil
-    Task { await AnthropicProvider.forgetAccount(provider) }
+    if provider.isAnthropic { Task { await AnthropicProvider.forgetAccount(provider) } }
     // Consent was given for the old folder's Keychain item. The new item asks
     // again, exactly like a first connection.
     self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
@@ -895,15 +957,47 @@ final class UsageStore {
     "\(provider.rawValue).configDirectory"
   }
 
-  /// Marks the slot as waiting for its folder. Returns true when it is.
+  /// Why an added account's folder cannot be used right now, or nil. A folder
+  /// accepted earlier can since have been replaced by a link to the default
+  /// home or to another account's folder, so it is checked before each use.
+  private func accountFolderConflict(_ provider: ProviderID) -> String? {
+    guard let folder = self.accountFolder(for: provider) else { return nil }
+    let resolved = folder.resolvedPath
+    // The default account reads the helper's default home, or the folder the
+    // environment Reserve was launched with names.
+    let environmentHome = ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey
+      .flatMap { ProcessInfo.processInfo.environment[$0] }.flatMap(AccountFolder.init(path:))
+    if folder.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome)
+      || resolved == environmentHome?.resolvedPath
+    {
+      return "This account's folder now leads to the first \(provider.kind.displayName) account's folder. Choose a different folder in Settings > Providers."
+    }
+    if let owner = self.accounts.first(where: {
+      $0 != provider && $0.kind == provider.kind && $0.isAdded && self.accountFolder(for: $0)?.resolvedPath == resolved
+    }) {
+      return "This account's folder now leads to \(owner.displayName)'s folder. Choose a different folder in Settings > Providers."
+    }
+    return nil
+  }
+
+  /// Marks the account as waiting for its folder, or for a usable one.
+  /// Returns true when nothing may be launched for it.
   private func noteMissingConfigDirectory(_ provider: ProviderID) -> Bool {
-    guard provider.isAdded, provider.isAnthropic,
-      self.claudeConfigDirectory(for: provider) == nil
-    else { return false }
+    guard provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil else {
+      return false
+    }
+    let message: String
+    if self.accountFolder(for: provider) == nil {
+      message = AccountFolder.missing(for: provider.kind).localizedDescription
+    } else if let conflict = self.accountFolderConflict(provider) {
+      message = conflict
+    } else {
+      return false
+    }
     self.states[provider]?.requiresConfigDirectory = true
     self.states[provider]?.requiresConnection = false
     self.states[provider]?.requiresKeychainAccess = false
-    self.states[provider]?.error = AnthropicProvider.configDirectoryMissing.localizedDescription
+    self.states[provider]?.error = message
     return true
   }
 
@@ -1521,10 +1615,10 @@ final class UsageStore {
       // Cursor documents this switch so the host app owns the browser handoff.
       process.environment?["NO_OPEN_BROWSER"] = "1"
     }
-    if let directory = self.claudeConfigDirectory(for: provider) {
-      // Claude Code keys the sign-in to this folder, which keeps the first
-      // slot's account untouched even when both use the same email address.
-      process.environment?[ClaudeConfigDirectory.environmentKey] = directory.path
+    if let environment = process.environment {
+      // The helper keys the sign-in to this account's folder, which keeps the
+      // default account untouched even when both use the same email address.
+      process.environment = self.helperEnvironment(for: provider, base: environment)
     }
     process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     let input = Pipe()
@@ -1805,11 +1899,11 @@ final class UsageStore {
     self.defaults.bool(forKey: "provider.\(provider.rawValue).enabled")
   }
 
-  func isAPIConsumptionEnabled(_ provider: APIConsumptionProvider) -> Bool {
+  func isAPIConsumptionEnabled(_ provider: APIAccountID) -> Bool {
     self.defaults.bool(forKey: "apiConsumption.\(provider.rawValue).enabled")
   }
 
-  func setAPIConsumptionEnabled(_ provider: APIConsumptionProvider, enabled: Bool) {
+  func setAPIConsumptionEnabled(_ provider: APIAccountID, enabled: Bool) {
     self.defaults.set(enabled, forKey: "apiConsumption.\(provider.rawValue).enabled")
     if !enabled {
       self.apiMutationGenerations[provider] = (self.apiMutationGenerations[provider] ?? 0) + 1
@@ -1820,7 +1914,7 @@ final class UsageStore {
   }
 
   func apiConsumptionKeyAvailability(
-    _ provider: APIConsumptionProvider
+    _ provider: APIAccountID
   ) -> SavedKeyAvailability {
     if let known = self.apiKeyCache[provider] { return known }
     if let injected = self.injectedAPIKeys {
@@ -1830,14 +1924,14 @@ final class UsageStore {
     return self.usesProductionKeychain ? .unknown : .missing
   }
 
-  func hasAPIConsumptionKey(_ provider: APIConsumptionProvider) -> Bool {
+  func hasAPIConsumptionKey(_ provider: APIAccountID) -> Bool {
     self.apiConsumptionKeyAvailability(provider) == .present
   }
 
   /// Stores a pasted key and turns measurement on. The key is written to
   /// Keychain only; preferences record that the option is enabled.
   /// Validation errors throw before any in-flight read is cancelled.
-  func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) throws {
+  func saveAPIConsumptionKey(_ key: String, for provider: APIAccountID) throws {
     guard let injected = self.injectedAPIKeys else {
       throw UsageProviderError.unavailable("API key storage requires the async save path.")
     }
@@ -1845,12 +1939,12 @@ final class UsageStore {
     self.adoptSavedAPIKey(provider)
   }
 
-  func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) async throws {
+  func saveAPIConsumptionKey(_ key: String, for provider: APIAccountID) async throws {
     if self.injectedAPIKeys == nil, !self.usesProductionKeychain {
       throw UsageProviderError.unavailable("API key storage is not configured.")
     }
     if self.usesProductionKeychain {
-      _ = try APIConsumptionKeychain.normalized(key, for: provider)
+      _ = try APIConsumptionKeychain.normalized(key, for: provider.provider)
     }
     let mutation = self.beginAPIKeyMutation(provider)
     do {
@@ -1869,7 +1963,7 @@ final class UsageStore {
     self.adoptSavedAPIKey(provider)
   }
 
-  func removeAPIConsumptionKey(_ provider: APIConsumptionProvider) {
+  func removeAPIConsumptionKey(_ provider: APIAccountID) {
     guard let injected = self.injectedAPIKeys else {
       self.apiConsumptionErrors[provider] = "Removing this key requires the async Keychain path."
       self.changed()
@@ -1880,7 +1974,7 @@ final class UsageStore {
     self.finishAPIKeyRemoval(provider)
   }
 
-  func removeAPIConsumptionKeyAsync(_ provider: APIConsumptionProvider) async throws {
+  func removeAPIConsumptionKeyAsync(_ provider: APIAccountID) async throws {
     let mutation = self.beginAPIKeyMutation(provider)
     do {
       if let injected = self.injectedAPIKeys {
@@ -1898,6 +1992,96 @@ final class UsageStore {
     }
     guard self.apiMutationGenerations[provider] == mutation else { throw CancellationError() }
     self.finishAPIKeyRemoval(provider)
+  }
+
+  // MARK: API accounts
+
+  /// API accounts added beside each provider's first one, in the order they
+  /// were added. Persisted as raw values; a value that no longer parses is
+  /// dropped.
+  private var addedAPIAccounts: [APIAccountID] = []
+  private static let addedAPIAccountsKey = "apiAccounts.added"
+
+  /// Every API account: each provider's first account, then the ones added
+  /// to it. This is the order of the API pane and the dashboard.
+  var apiAccounts: [APIAccountID] {
+    APIConsumptionProvider.allCases.flatMap { provider in
+      [APIAccountID(provider: provider)] + self.addedAPIAccounts.filter { $0.provider == provider }
+    }
+  }
+
+  private func loadAPIAccounts() {
+    var seen: Set<APIAccountID> = []
+    self.addedAPIAccounts = (self.defaults.stringArray(forKey: Self.addedAPIAccountsKey) ?? [])
+      .compactMap(APIAccountID.init(rawValue:))
+      .filter { $0.isAdded && seen.insert($0).inserted }
+    for account in self.apiAccounts {
+      APIAccountLabels.set(self.defaults.string(forKey: "apiConsumption.\(account.rawValue).label"), for: account)
+    }
+  }
+
+  /// Adds an API account beside the provider's first one, named "Account N"
+  /// until the person names it. It measures nothing until its key is saved.
+  @discardableResult
+  func addAPIAccount(_ provider: APIConsumptionProvider) -> APIAccountID {
+    var account = APIAccountID(provider: provider)
+    repeat {
+      let instance = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8)
+      account = APIAccountID(provider: provider, instance: String(instance)) ?? account
+    } while account.isDefault || self.addedAPIAccounts.contains(account)
+    let taken = Set(self.addedAPIAccounts.filter { $0.provider == provider }.compactMap {
+      self.defaults.object(forKey: "apiConsumption.\($0.rawValue).ordinal") as? Int
+    })
+    var ordinal = 2
+    while taken.contains(ordinal) { ordinal += 1 }
+    self.defaults.set(ordinal, forKey: "apiConsumption.\(account.rawValue).ordinal")
+    self.defaults.set("Account \(ordinal)", forKey: "apiConsumption.\(account.rawValue).label")
+    APIAccountLabels.set("Account \(ordinal)", for: account)
+    self.addedAPIAccounts.append(account)
+    self.defaults.set(self.addedAPIAccounts.map(\.rawValue), forKey: Self.addedAPIAccountsKey)
+    self.changed()
+    return account
+  }
+
+  func apiAccountLabel(for account: APIAccountID) -> String? { APIAccountLabels.label(for: account) }
+
+  /// A name the person typed. Empty clears it: the first account goes back to
+  /// the provider's name, an added one to its "Account N".
+  func setAPIAccountLabel(_ label: String, for account: APIAccountID) {
+    let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+    let key = "apiConsumption.\(account.rawValue).label"
+    if trimmed.isEmpty {
+      let neutral = (self.defaults.object(forKey: "apiConsumption.\(account.rawValue).ordinal") as? Int)
+        .map { "Account \($0)" }
+      if let neutral, account.isAdded { self.defaults.set(neutral, forKey: key) }
+      else { self.defaults.removeObject(forKey: key) }
+      APIAccountLabels.set(account.isAdded ? neutral : nil, for: account)
+    } else {
+      self.defaults.set(String(trimmed.prefix(64)), forKey: key)
+      APIAccountLabels.set(trimmed, for: account)
+    }
+    self.changed()
+  }
+
+  /// Removes an added API account and deletes its key first. When the key
+  /// cannot be deleted, or a new one was saved meanwhile, the account stays.
+  func removeAPIAccount(_ account: APIAccountID) async throws {
+    guard account.isAdded, self.addedAPIAccounts.contains(account) else { return }
+    try await self.removeAPIConsumptionKeyAsync(account)
+    self.addedAPIAccounts.removeAll { $0 == account }
+    self.defaults.set(self.addedAPIAccounts.map(\.rawValue), forKey: Self.addedAPIAccountsKey)
+    for suffix in ["enabled", "label", "ordinal"] {
+      self.defaults.removeObject(forKey: "apiConsumption.\(account.rawValue).\(suffix)")
+    }
+    self.apiKeyCache[account] = nil
+    self.apiMutationGenerations[account] = nil
+    self.apiGenerations[account] = nil
+    self.apiProbeTasks.removeValue(forKey: account)?.cancel()
+    self.keychainProbeFailures[self.apiProbeID(account)] = nil
+    self.lastKeychainProbeAt[self.apiProbeID(account)] = nil
+    APIAccountLabels.set(nil, for: account)
+    if self.expandedAPIProvider == account { self.expandedAPIProvider = nil }
+    self.changed()
   }
 
   // MARK: Plan keys
@@ -2022,7 +2206,7 @@ final class UsageStore {
 
   @discardableResult
   func refreshAPIConsumption(
-    _ provider: APIConsumptionProvider,
+    _ provider: APIAccountID,
     trigger: RefreshTrigger = .manual
   ) -> Bool {
     self.startAPIRefresh(provider, trigger: trigger, respectingSchedule: true)
@@ -2918,11 +3102,18 @@ final class UsageStore {
     guard await self.subscriptionLimiter.acquire() else { return }
     defer { self.subscriptionLimiter.release() }
     guard isCurrent() else { return }
+    // Checked again right before the launch: the folder may have changed
+    // while this read waited for its turn.
+    if self.noteMissingConfigDirectory(provider) {
+      self.changed()
+      return
+    }
 
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
     let fetcher: any UsageProvider =
       switch provider.kind {
-      case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
+      case .openAI:
+        OpenAIProvider(environment: self.helperEnvironment(for: provider), includeAccountActivity: includeInsights)
       case .anthropic:
         AnthropicProvider(
           id: provider,
@@ -2930,15 +3121,15 @@ final class UsageStore {
           allowKeychainRead: self.keychainReadAllowed(for: provider),
           allowKeychainInteraction: allowKeychainInteraction,
           passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider))
-      case .grok: GrokProvider()
+      case .grok: GrokProvider(environment: self.helperEnvironment(for: provider))
       case .cursor:
         CursorProvider(
           allowKeychainRead: self.cursorKeychainReadAllowed,
           allowKeychainInteraction: allowKeychainInteraction,
           includeAccountUsage: includeInsights)
       case .copilot: CopilotProvider()
-      case .zai: ZaiProvider()
-      case .kimi: KimiProvider()
+      case .zai: ZaiProvider(id: provider)
+      case .kimi: KimiProvider(id: provider)
       case .gemini: GeminiProvider()
       }
     var providerFetchSucceeded = false
@@ -2951,7 +3142,7 @@ final class UsageStore {
         fetched = try await fetcher.fetch()
       }
       guard isCurrent() else { return }
-      let snapshot = fetched.withFallbackPlanName(previous?.planName)
+      let snapshot = fetched.attributed(to: provider).withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
       self.adoptAutomaticLabel(for: provider, from: snapshot)
       self.states[provider]?.error = nil
@@ -3098,7 +3289,7 @@ final class UsageStore {
   }
 
   private func performAPIConsumptionRefresh(
-    _ provider: APIConsumptionProvider,
+    _ provider: APIAccountID,
     generation: Int
   ) async {
     defer {
@@ -3190,7 +3381,7 @@ final class UsageStore {
   }
 
   private func apiAdmission(
-    _ provider: APIConsumptionProvider, trigger: RefreshTrigger, now: Date
+    _ provider: APIAccountID, trigger: RefreshTrigger, now: Date
   ) -> RefreshAdmission {
     RefreshSchedulePolicy.admit(
       state: self.apiSchedules[provider] ?? ProviderRefreshSchedule(),
@@ -3215,8 +3406,8 @@ final class UsageStore {
 
   private func dueAPIProviders(
     trigger: RefreshTrigger, now: Date
-  ) -> [APIConsumptionProvider] {
-    APIConsumptionProvider.allCases.filter { provider in
+  ) -> [APIAccountID] {
+    self.apiAccounts.filter { provider in
       guard self.isAPIConsumptionEnabled(provider), self.apiTasks[provider] == nil else { return false }
       switch self.apiConsumptionKeyAvailability(provider) {
       case .missing, .unavailable: return false
@@ -3233,7 +3424,7 @@ final class UsageStore {
   }
 
   private func hasDueKeychainProbe(trigger: RefreshTrigger, now: Date) -> Bool {
-    for provider in APIConsumptionProvider.allCases {
+    for provider in self.apiAccounts {
       if self.apiKeyCache[provider] == .unavailable,
         self.keychainProbeIsDue(id: self.apiProbeID(provider), trigger: trigger, now: now)
       {
@@ -3301,7 +3492,7 @@ final class UsageStore {
         now: now, interval: interval)
       if next < earliest { earliest = next }
     }
-    for provider in APIConsumptionProvider.allCases where self.isAPIConsumptionEnabled(provider) {
+    for provider in self.apiAccounts where self.isAPIConsumptionEnabled(provider) {
       let availability = self.apiConsumptionKeyAvailability(provider)
       if availability == .missing || availability == .unavailable { continue }
       let next = RefreshSchedulePolicy.nextEligibleAt(
@@ -3309,7 +3500,7 @@ final class UsageStore {
         now: now, interval: interval)
       if next < earliest { earliest = next }
     }
-    for provider in APIConsumptionProvider.allCases where self.apiKeyCache[provider] == .unavailable {
+    for provider in self.apiAccounts where self.apiKeyCache[provider] == .unavailable {
       if let next = self.nextKeychainProbeAt(id: self.apiProbeID(provider), now: now), next < earliest {
         earliest = next
       }
@@ -3330,7 +3521,7 @@ final class UsageStore {
   #endif
 
   private func retryLockedKeychainReads(trigger: RefreshTrigger, now: Date) {
-    for provider in APIConsumptionProvider.allCases {
+    for provider in self.apiAccounts {
       guard self.apiKeyCache[provider] == .unavailable,
         self.keychainProbeIsDue(id: self.apiProbeID(provider), trigger: trigger, now: now)
       else { continue }
@@ -3345,7 +3536,7 @@ final class UsageStore {
   }
 
   private func startAPIKeyRecoveryProbe(
-    _ provider: APIConsumptionProvider, trigger: RefreshTrigger, now: Date
+    _ provider: APIAccountID, trigger: RefreshTrigger, now: Date
   ) {
     guard self.apiProbeTasks[provider] == nil else { return }
     let mutation = self.apiMutationGenerations[provider] ?? 0
@@ -3442,21 +3633,21 @@ final class UsageStore {
     self.subscriptionSchedules[provider] = state
   }
 
-  private func recordAPISuccess(_ provider: APIConsumptionProvider) {
+  private func recordAPISuccess(_ provider: APIAccountID) {
     var state = self.apiSchedules[provider] ?? ProviderRefreshSchedule()
     let now = self.now()
     RefreshSchedulePolicy.recordSuccess(&state, now: now, interval: self.refreshInterval(now: now))
     self.apiSchedules[provider] = state
   }
 
-  private func recordAPIFailure(_ provider: APIConsumptionProvider, _ error: Error) {
+  private func recordAPIFailure(_ provider: APIAccountID, _ error: Error) {
     var state = self.apiSchedules[provider] ?? ProviderRefreshSchedule()
     RefreshSchedulePolicy.recordFailure(
       &state, now: self.now(), failure: RefreshSchedulePolicy.failureClass(for: error))
     self.apiSchedules[provider] = state
   }
 
-  private func apiProbeID(_ provider: APIConsumptionProvider) -> String {
+  private func apiProbeID(_ provider: APIAccountID) -> String {
     "api.\(provider.rawValue)"
   }
 
@@ -3464,7 +3655,7 @@ final class UsageStore {
     "plan.\(provider.rawValue)"
   }
 
-  private func invalidateAPIWork(_ provider: APIConsumptionProvider) {
+  private func invalidateAPIWork(_ provider: APIAccountID) {
     self.apiGenerations[provider] = (self.apiGenerations[provider] ?? 0) + 1
     self.apiTasks[provider]?.cancel()
     self.apiTasks[provider] = nil
@@ -3487,7 +3678,7 @@ final class UsageStore {
 
   @discardableResult
   private func startAPIRefresh(
-    _ provider: APIConsumptionProvider,
+    _ provider: APIAccountID,
     trigger: RefreshTrigger,
     respectingSchedule: Bool
   ) -> Bool {
@@ -3509,7 +3700,7 @@ final class UsageStore {
     return true
   }
 
-  private func adoptSavedAPIKey(_ provider: APIConsumptionProvider) {
+  private func adoptSavedAPIKey(_ provider: APIAccountID) {
     self.invalidateAPIWork(provider)
     self.apiKeyCache[provider] = .present
     self.apiSchedules[provider] = nil
@@ -3520,7 +3711,7 @@ final class UsageStore {
     self.startAPIRefresh(provider, trigger: .manual, respectingSchedule: false)
   }
 
-  private func finishAPIKeyRemoval(_ provider: APIConsumptionProvider) {
+  private func finishAPIKeyRemoval(_ provider: APIAccountID) {
     self.apiKeyCache[provider] = .missing
     self.apiSchedules[provider] = nil
     self.keychainProbeFailures[self.apiProbeID(provider)] = 0
@@ -3560,7 +3751,7 @@ final class UsageStore {
     }
   }
 
-  private func beginAPIKeyMutation(_ provider: APIConsumptionProvider) -> Int {
+  private func beginAPIKeyMutation(_ provider: APIAccountID) -> Int {
     let generation = (self.apiMutationGenerations[provider] ?? 0) + 1
     self.apiMutationGenerations[provider] = generation
     self.invalidateAPIWork(provider)
@@ -3602,7 +3793,7 @@ final class UsageStore {
   }
 
   private func reportAPIKeyMutationFailure(
-    _ error: Error, provider: APIConsumptionProvider
+    _ error: Error, provider: APIAccountID
   ) {
     let availability = self.injectedAPIKeys.map { SavedKeyAvailability($0.availability(provider)) }
       ?? .unavailable
@@ -3625,28 +3816,28 @@ final class UsageStore {
   }
 
   private func resolveAPIKeyAvailability(
-    _ provider: APIConsumptionProvider
+    _ provider: APIAccountID
   ) async -> KeychainItemAvailability {
     if let injected = self.injectedAPIKeys { return injected.availability(provider) }
     guard self.usesProductionKeychain else { return .missing }
     return await APIConsumptionKeychain.availability(for: provider)
   }
 
-  private func loadAPIKey(_ provider: APIConsumptionProvider) async throws -> String {
+  private func loadAPIKey(_ provider: APIAccountID) async throws -> String {
     if let injected = self.injectedAPIKeys { return try injected.load(provider) }
     return try await APIConsumptionKeychain.load(for: provider)
   }
 
   private func fetchAPIConsumption(
-    _ provider: APIConsumptionProvider, apiKey: String
+    _ provider: APIAccountID, apiKey: String
   ) async throws -> APIConsumptionSnapshot {
     if let apiConsumptionFetch {
-      return try await apiConsumptionFetch(provider, apiKey)
+      return try await apiConsumptionFetch(provider.provider, apiKey)
     }
     guard self.usesProductionKeychain else {
       throw UsageProviderError.unavailable("API consumption fixture is not configured.")
     }
-    return try await APIConsumptionClient().fetch(provider, apiKey: apiKey)
+    return try await APIConsumptionClient().fetch(provider.provider, apiKey: apiKey)
   }
 
   private func resolvePlanKeyAvailability(_ provider: ProviderID) async -> KeychainItemAvailability {
@@ -3667,7 +3858,7 @@ final class UsageStore {
     return false
   }
 
-  private func scheduleProductionAPIProbe(_ provider: APIConsumptionProvider) {
+  private func scheduleProductionAPIProbe(_ provider: APIAccountID) {
     guard self.apiProbeTasks[provider] == nil else { return }
     let mutation = self.apiMutationGenerations[provider] ?? 0
     self.apiProbeTasks[provider] = Task { [weak self] in
@@ -3738,7 +3929,7 @@ final class UsageStore {
     self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule()
   }
 
-  func apiRefreshSchedule(for provider: APIConsumptionProvider) -> ProviderRefreshSchedule {
+  func apiRefreshSchedule(for provider: APIAccountID) -> ProviderRefreshSchedule {
     self.apiSchedules[provider] ?? ProviderRefreshSchedule()
   }
 

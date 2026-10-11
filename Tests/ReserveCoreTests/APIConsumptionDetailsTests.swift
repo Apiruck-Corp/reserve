@@ -98,6 +98,60 @@ struct APIConsumptionDetailsTests {
     #expect(self.byLabel(snapshot)["claude-opus-5"] == "$2.50")
   }
 
+  /// A refused Claude API key says why, in Anthropic's words, and which key
+  /// the Cost API needs, without ever repeating the key.
+  @Test func aRefusedAnthropicKeyExplainsItself() async throws {
+    func refusal(status: Int, body: String, key: String) async -> String? {
+      let client = APIConsumptionClient(
+        requestHandler: { request in
+          (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        },
+        now: { Self.now })
+      do {
+        _ = try await client.fetch(.anthropic, apiKey: key)
+        return nil
+      } catch UsageProviderError.unauthorized(let message) {
+        return message
+      } catch {
+        return "unexpected \(error)"
+      }
+    }
+    let regular = await refusal(
+      status: 401,
+      body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-api03-regular"}}"#,
+      key: "sk-ant-api03-regular-test-key-000000")
+    #expect(regular == "Anthropic refused this admin key. The key is invalid or has been revoked. "
+      + "If it is a regular API key, use an admin key (sk-ant-admin…) instead.")
+
+    let organization = await refusal(
+      status: 403,
+      body: #"{"type":"error","error":{"type":"permission_error","message":"Key sk-ant-admin01-secret lacks access"}}"#,
+      key: "sk-ant-admin01-secret-test-key-0000")
+    #expect(organization == "Anthropic refused this admin key. The key has no access to usage and cost data. "
+      + "Admin keys work only for a Claude Console organization where you are an admin.")
+
+    let silent = await refusal(status: 401, body: "", key: "sk-ant-admin01-test")
+    #expect(silent == "Anthropic refused this admin key.")
+    // A code Reserve does not know is never repeated, whatever it holds.
+    let unknown = await refusal(
+      status: 401, body: #"{"error":{"code":"fragment_of_the_key"}}"#, key: "sk-ant-admin01-test")
+    #expect(unknown == "Anthropic refused this admin key.")
+    // Every message fits the stored error limit with room to spare.
+    for message in [regular, organization, silent] { #expect((message?.count ?? 0) <= 240) }
+  }
+
+  /// Only a code-shaped value survives; free text, which can quote the key,
+  /// never does.
+  @Test func onlyErrorCodesAreRead() {
+    func code(_ json: String) -> String? { APIConsumptionClient.providerErrorCode(in: Data(json.utf8)) }
+    #expect(code(#"{"error":{"code":"invalid_api_key","message":"Incorrect API key sk-pr****abcd"}}"#) == "invalid_api_key")
+    #expect(code(#"{"error":{"type":"permission_error"}}"#) == "permission_error")
+    #expect(code(#"{"error":"bad key sk-abc"}"#) == nil)
+    #expect(code(#"{"error":{"code":"sk-ant-admin01-leak"}}"#) == nil)
+    #expect(code(#"{"error":{"code":"Key sk_live_abc"}}"#) == nil)
+    #expect(code("not json") == nil)
+  }
+
   @Test func detailsSurviveTheCacheAndOldCachesStillLoad() throws {
     let snapshot = APIConsumptionSnapshot(
       provider: .openRouter, windows: [], source: "test",

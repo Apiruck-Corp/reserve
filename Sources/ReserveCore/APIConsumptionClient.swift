@@ -72,6 +72,16 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     }
   }
 
+  /// The prefix of the admin key a provider's billing API normally takes.
+  /// Used only to suggest one when a key without it is refused.
+  var adminKeyPrefix: String? {
+    switch self {
+    case .openAI: "sk-admin-"
+    case .anthropic: "sk-ant-admin"
+    default: nil
+    }
+  }
+
   var endpointHost: String {
     switch self {
     case .openAI: "api.openai.com"
@@ -297,30 +307,31 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
 public enum APIConsumptionKeychain {
   public static let service = "com.pocarles.reserve.api-consumption"
 
-  public static func account(for provider: APIConsumptionProvider) -> String {
+  /// The first account of a provider keeps the item name it always had.
+  public static func account(for provider: APIAccountID) -> String {
     "api-consumption.\(provider.rawValue)"
   }
 
-  static func store(for provider: APIConsumptionProvider) -> KeychainKeyStore {
+  static func store(for provider: APIAccountID) -> KeychainKeyStore {
     KeychainKeyStore(
       service: Self.service, account: Self.account(for: provider),
-      displayName: provider.displayName, keyKind: provider.keyKind,
-      label: "Reserve \(provider.displayName) consumption key")
+      displayName: provider.provider.displayName, keyKind: provider.keyKind,
+      label: "Reserve \(provider.provider.displayName) consumption key")
   }
 
   #if canImport(Security)
-    public static func hasKey(for provider: APIConsumptionProvider) -> Bool {
+    public static func hasKey(for provider: APIAccountID) -> Bool {
       Self.store(for: provider).hasKey()
     }
 
     public static func availability(
-      for provider: APIConsumptionProvider
+      for provider: APIAccountID
     ) -> KeychainItemAvailability {
       Self.store(for: provider).availability()
     }
 
     public static func availability(
-      for provider: APIConsumptionProvider
+      for provider: APIAccountID
     ) async -> KeychainItemAvailability {
       await Self.store(for: provider).availability()
     }
@@ -328,27 +339,27 @@ public enum APIConsumptionKeychain {
     /// Replaces any key already stored for this provider. The value never
     /// leaves this process except as an `Authorization` header on the fixed
     /// provider host.
-    public static func save(_ key: String, for provider: APIConsumptionProvider) throws {
+    public static func save(_ key: String, for provider: APIAccountID) throws {
       try Self.store(for: provider).save(key)
     }
 
-    public static func save(_ key: String, for provider: APIConsumptionProvider) async throws {
+    public static func save(_ key: String, for provider: APIAccountID) async throws {
       try await Self.store(for: provider).save(key)
     }
 
-    public static func load(for provider: APIConsumptionProvider) throws -> String {
+    public static func load(for provider: APIAccountID) throws -> String {
       try Self.store(for: provider).load()
     }
 
-    public static func load(for provider: APIConsumptionProvider) async throws -> String {
+    public static func load(for provider: APIAccountID) async throws -> String {
       try await Self.store(for: provider).load()
     }
 
-    public static func delete(for provider: APIConsumptionProvider) throws {
+    public static func delete(for provider: APIAccountID) throws {
       try Self.store(for: provider).delete()
     }
 
-    public static func delete(for provider: APIConsumptionProvider) async throws {
+    public static func delete(for provider: APIAccountID) async throws {
       try await Self.store(for: provider).delete()
     }
 
@@ -941,7 +952,9 @@ public struct APIConsumptionClient: Sendable {
     case 200: return data
     case 401, 403:
       throw UsageProviderError.unauthorized(
-        "\(provider.displayName) refused this \(provider.keyKind.lowercased()).")
+        Self.refusalMessage(
+          provider: provider, status: http.statusCode, body: data,
+          key: Self.credential(in: request)))
     case 429:
       throw UsageProviderError.rateLimited(
         retryAt: HTTPRetryAfter.deadline(
@@ -952,6 +965,54 @@ public struct APIConsumptionClient: Sendable {
     default:
       throw UsageProviderError.unavailable(
         "\(provider.displayName) consumption request returned HTTP \(http.statusCode).")
+    }
+  }
+
+  /// The key the request carried, only to tell an admin key from another.
+  private static func credential(in request: URLRequest) -> String? {
+    if let key = request.value(forHTTPHeaderField: "x-api-key") { return key }
+    guard let authorization = request.value(forHTTPHeaderField: "Authorization") else { return nil }
+    return authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst(7)) : authorization
+  }
+
+  /// Says why a key was refused, from the provider's error code only
+  /// (`authentication_error`, `invalid_api_key`, `permission_error`), mapped
+  /// to a fixed sentence. The provider's free text is never shown: it can
+  /// echo part of the key. When an OpenAI or Anthropic key lacks the admin
+  /// prefix, it also says which key the billing API normally takes.
+  static func refusalMessage(
+    provider: APIConsumptionProvider, status: Int, body: Data, key: String?
+  ) -> String {
+    var message = "\(provider.displayName) refused this \(provider.keyKind.lowercased())."
+    switch Self.providerErrorCode(in: body) {
+    case "authentication_error", "invalid_api_key", "invalid_key", "unauthorized":
+      message += " The key is invalid or has been revoked."
+    case "permission_error", "insufficient_permissions", "forbidden", "permission_denied":
+      message += " The key has no access to usage and cost data."
+    default:
+      // An unknown code is not shown either: only fixed sentences leave here.
+      break
+    }
+    if let prefix = provider.adminKeyPrefix, let key {
+      if !key.hasPrefix(prefix) {
+        message += " If it is a regular API key, use an \(provider.keyKind.lowercased()) (\(provider.keyHint)) instead."
+      } else if provider == .anthropic, status == 403 {
+        message += " Admin keys work only for a Claude Console organization where you are an admin."
+      }
+    }
+    return message
+  }
+
+  /// The provider's machine-readable error code, kept only when it looks like
+  /// one: lowercase letters and underscores, 3 to 40 characters. Anything
+  /// else, including free text that could quote the key, is dropped.
+  static func providerErrorCode(in body: Data) -> String? {
+    guard body.count <= 16_384, let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+    else { return nil }
+    let error = root["error"] as? [String: Any]
+    let candidates: [Any?] = [error?["code"], error?["type"], root["code"]]
+    return candidates.lazy.compactMap { $0 as? String }.first { code in
+      (3...40).contains(code.count) && code.allSatisfy { $0 == "_" || ($0.isASCII && $0.isLowercase) }
     }
   }
 

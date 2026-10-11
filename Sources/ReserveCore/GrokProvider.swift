@@ -470,7 +470,9 @@ actor GrokSessionRenewer {
   static let shared = GrokSessionRenewer()
   static let timeout: Duration = .seconds(45)
   static let cooldown: TimeInterval = 60
-  private var lastAttemptAt: Date?
+  /// Keyed by the credential file, so one account's renewal never holds back
+  /// another account's, kept in a folder of its own.
+  private var lastAttemptAt: [String: Date] = [:]
 
   func renew(
     executable: String,
@@ -483,12 +485,11 @@ actor GrokSessionRenewer {
         standardInput: FileHandle.nullDevice, timeout: timeout)
     }
   ) async {
-    if let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < Self.cooldown,
-      now >= lastAttemptAt
-    {
+    let file = GrokCredentialLoader.authFileURL(environment: environment).path
+    if let last = self.lastAttemptAt[file], now.timeIntervalSince(last) < Self.cooldown, now >= last {
       return
     }
-    self.lastAttemptAt = now
+    self.lastAttemptAt[file] = now
     // `grok models` is public, prints a short model list, and exits quickly.
     // Its output is never read: the renewed session is read back from
     // auth.json, and the exit status says nothing about renewal. The helper

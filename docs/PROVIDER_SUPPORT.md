@@ -48,6 +48,40 @@ browser sign-in is never proposed for a session Claude Code is still using.
 A rejected usage request triggers at most one renewal and one retry.
 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 
+#### Several accounts of any provider
+
+`ProviderDescriptor.accountIsolation` says how a kind keeps accounts apart,
+and every add, folder and launch path reads it instead of naming a provider:
+
+- `homeFolder(environmentKey:defaultFolderName:managedFolderName:)`: the
+  helper keeps one sign-in per home folder. Claude (`CLAUDE_CONFIG_DIR`,
+  below), Codex (`CODEX_HOME`: `auth.json`, or a Keychain item whose account
+  name hashes the folder path when the keyring store is configured) and Grok
+  (`GROK_HOME`: `auth.json` only). **Add Account…** creates
+  `~/<managedFolderName>/<instance>` (mode 0700), and every helper launch for
+  the account (usage read, sign-in, renewal) carries the variable. The kind's
+  default home is refused, including through a link, and so is another
+  account's folder of the same kind. Grok's renewal cooldown is kept per
+  credential file, so one account's renewal never holds back another's.
+- `apiKey`: Z.ai and Kimi. Each account's key is its own Keychain item
+  (`plan-key.<account raw value>`); removing the account deletes it.
+- `single`: Cursor (fixed Keychain names `cursor-access-token` /
+  `cursor-refresh-token`), Copilot (`COPILOT_HOME` moves its files but its
+  Keychain item stays shared per GitHub user) and Antigravity (no home
+  variable). The menu says these keep one sign-in per Mac.
+
+Every adapter names its kind in the snapshot it returns; the store credits
+each reading to the account it asked for (`UsageSnapshot.attributed(to:)`).
+`AccountAddition` holds the menu rule: an unconnected default account is
+connected first, then further accounts are added where the kind allows.
+API-spend accounts work the same way with `APIAccountID` (provider plus
+instance). The first account of a provider keeps its raw value, so its
+Keychain item (`api-consumption.<provider>`) and settings
+(`apiConsumption.<provider>.enabled`) are unchanged; an added account is
+`<provider>@<instance>` everywhere. Removing an added account deletes its key
+first and keeps the account when deletion fails or a newer key was saved
+meanwhile.
+
 #### Added Claude accounts, by configuration folder
 
 Claude Code scopes its sign-in to the configuration folder named by
@@ -63,7 +97,7 @@ Accounts are `ProviderID` values: a kind plus, for an added account, an
 instance (`anthropic@1f3c9a2b`). The kind's default account keeps the bare
 raw value, so every setting, cache and history key written before accounts
 existed still names the same thing; added accounts derive their keys from
-their raw value. **Add Claude account** creates a folder under
+their raw value. **Add Account… > Claude** creates a folder under
 `~/.claude-accounts/<instance>` (mode 0700), stores it as the account's folder,
 and starts the connection; the folder can be changed to any absolute path,
 normalised once (tilde expanded, `.` and `..` collapsed, trailing slash

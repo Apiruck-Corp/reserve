@@ -546,6 +546,7 @@ enum ConnectionFlowSelfTest {
     failures += self.checkPhaseTable()
     failures += self.checkDashboardHotKeyRegistration()
     failures += self.checkAdaptiveRefresh(in: directory)
+    failures += await self.checkAddedAccounts(in: directory)
 
     // Render actual native controls for each step, with no real credentials.
     let preview = ProviderConnectionPanel(provider: .anthropic)
@@ -1222,6 +1223,167 @@ enum ConnectionFlowSelfTest {
 
   /// Which window each failed check opens. Built through the same state
   /// update a real refresh applies, one row per `UsageProviderError`.
+  /// Adding accounts follows each kind's descriptor: a folder of its own for
+  /// a helper that keeps one sign-in per folder, a key of its own for a key
+  /// plan, and a refusal for a helper with one sign-in per Mac. Folders are
+  /// made under a temporary home, never the real one.
+  private static func checkAddedAccounts(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append("added accounts: \(message)") }
+    }
+    let suite = "Reserve.AddedAccountsSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["added accounts: preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let home = directory.appendingPathComponent("added-accounts-home-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    var savedPlanKeys: [ProviderID: String] = [:]
+    let keys = PlanKeyStorage(
+      hasKey: { savedPlanKeys[$0] != nil },
+      save: { key, provider in savedPlanKeys[provider] = key },
+      delete: { savedPlanKeys[$0] = nil })
+    // Every adapter names its kind; the store credits the account it asked.
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false,
+      cache: SnapshotCache(fileURL: home.appendingPathComponent("snapshots.json")),
+      fetchOverride: { provider, _ in
+        UsageSnapshot(
+          provider: ProviderID(kind: provider.kind), windows: [
+            UsageWindow(id: "test", label: "Test", usedPercent: 10, resetsAt: nil)
+          ], source: "Test")
+      },
+      planKeys: keys)
+    store.accountsHome = home
+
+    expect((try? store.addAccount(kind: .cursor)) == nil, "Cursor added a second account it cannot keep apart")
+    expect(AccountAddition.action(for: .cursor, defaultConnected: true) != .addAccount,
+      "Cursor offered a second account")
+    expect(AccountAddition.action(for: .openAI, defaultConnected: false) == .connectDefault,
+      "an unconnected OpenAI default was skipped in favour of a second account")
+
+    guard let codex = try? store.addAccount(kind: .openAI), let codexTwo = try? store.addAccount(kind: .openAI),
+      let grok = try? store.addAccount(kind: .grok), let zai = try? store.addAccount(kind: .zai)
+    else { return failures + ["added accounts: an account could not be added"] }
+
+    let codexFolder = home.appendingPathComponent(".codex-accounts/\(codex.instance ?? "")").path
+    expect(store.accountFolder(for: codex)?.path == codexFolder, "Codex account folder is not under ~/.codex-accounts")
+    let permissions = (try? FileManager.default.attributesOfItem(atPath: codexFolder))?[.posixPermissions] as? Int
+    expect(permissions == 0o700, "Codex account folder is not private")
+    expect(store.helperEnvironment(for: codex, base: [:])["CODEX_HOME"] == codexFolder,
+      "Codex launches for the added account do not carry CODEX_HOME")
+    expect(store.helperEnvironment(for: .openAI, base: [:])["CODEX_HOME"] == nil,
+      "the default OpenAI account was pointed at a folder")
+    expect(store.helperEnvironment(for: grok, base: [:])["GROK_HOME"] == store.accountFolder(for: grok)?.path
+      && store.accountFolder(for: grok)?.path.contains("/.grok-accounts/") == true,
+      "Grok launches for the added account do not carry GROK_HOME")
+    expect(store.accountFolder(for: zai) == nil && savedPlanKeys.isEmpty,
+      "a key plan account got a folder or a key it was not given")
+    expect(ProviderAccountLabels.neutralLabel(for: codex) == "Account 2"
+      && ProviderAccountLabels.neutralLabel(for: codexTwo) == "Account 3"
+      && ProviderAccountLabels.neutralLabel(for: grok) == "Account 2",
+      "added accounts were not numbered per provider")
+
+    expect((try? store.setAccountFolder(home.appendingPathComponent(".codex").path, for: codex)) == nil,
+      "an added Codex account accepted Codex's default home")
+    expect((try? store.setAccountFolder(codexFolder, for: codexTwo)) == nil,
+      "two Codex accounts were allowed to share one folder")
+
+    if let state = store.states[zai] {
+      expect(ProviderSetupCoordinator.phase(after: state) == .needsKey, "an added Z.ai account did not ask for its key")
+    }
+    try? await store.savePlanKey("test-zai-added-key-0123456789", for: zai)
+    await settle { store.states[zai]?.snapshot != nil }
+    expect(savedPlanKeys[zai] != nil && savedPlanKeys[.zai] == nil,
+      "the added Z.ai key was not saved under its own account")
+    expect(store.states[zai]?.snapshot?.provider == zai,
+      "the added account's reading was credited to the default account")
+
+    let reloaded = UsageStore(defaults: defaults, startAutomatically: false, planKeys: keys)
+    expect(Set([codex, codexTwo, grok, zai]).isSubset(of: Set(reloaded.accounts)),
+      "added accounts did not survive a relaunch")
+
+    // A folder accepted earlier and later replaced by a link to the default
+    // home must not be launched with.
+    if let twoFolder = try? store.setAccountFolder(home.appendingPathComponent("codex-two").path, for: codexTwo) {
+      let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+      try? FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+      try? FileManager.default.removeItem(at: twoFolder.url)
+      try? FileManager.default.createSymbolicLink(at: twoFolder.url, withDestinationURL: codexHome)
+      store.setEnabled(codexTwo, enabled: true)
+      store.connect(codexTwo)
+      expect(store.states[codexTwo]?.requiresConfigDirectory == true
+        && store.states[codexTwo]?.error?.contains("first OpenAI account") == true,
+        "an added Codex account whose folder became a link to ~/.codex was still used")
+    } else {
+      failures.append("added accounts: a fresh Codex folder was refused")
+    }
+
+    try? await store.removeAccountAndKey(zai)
+    expect(savedPlanKeys[zai] == nil && !store.accounts.contains(zai), "removing a Z.ai account kept its key")
+    try? store.removeAccount(codex)
+    expect(!store.accounts.contains(codex) && FileManager.default.fileExists(atPath: codexFolder)
+      && defaults.string(forKey: "\(codex.rawValue).configDirectory") == nil,
+      "removing a Codex account did not forget it, or deleted its folder")
+    try? FileManager.default.removeItem(at: home)
+    failures += await self.checkAddedAPIAccounts()
+    return failures
+  }
+
+  /// Two Claude API keys: each an account with its own key and reading, and
+  /// the first account untouched by the second.
+  private static func checkAddedAPIAccounts() async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append("added API accounts: \(message)") }
+    }
+    let suite = "Reserve.AddedAPIAccountsSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["added API accounts: preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var keys: [APIAccountID: String] = [:]
+    let access = APIConsumptionKeyAccess(
+      availability: { keys[$0] == nil ? .missing : .present },
+      load: { account in
+        guard let key = keys[account] else { throw UsageProviderError.credentialsNotFound("no key") }
+        return key
+      },
+      save: { key, account in keys[account] = key },
+      delete: { keys[$0] = nil })
+    // The reading names the key it was made with, so a mix-up shows.
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false, apiKeys: access,
+      apiConsumptionFetch: { provider, key in
+        APIConsumptionSnapshot(provider: provider, windows: [], note: APIConsumptionNote(headline: key), source: key)
+      })
+
+    try? await store.saveAPIConsumptionKey("sk-ant-admin-first-0123456789", for: .anthropic)
+    let second = store.addAPIAccount(.anthropic)
+    expect(store.apiAccounts.filter { $0.provider == .anthropic } == [.anthropic, second],
+      "the second Claude API account was not listed after the first")
+    expect(second.displayName == "Anthropic · Account 2", "the second Claude API account was not numbered")
+    try? await store.saveAPIConsumptionKey("sk-ant-admin-second-0123456789", for: second)
+    expect(keys[.anthropic] == "sk-ant-admin-first-0123456789" && keys[second] == "sk-ant-admin-second-0123456789",
+      "the second key replaced the first instead of being saved beside it")
+    store.refreshAPIConsumption(.anthropic)
+    store.refreshAPIConsumption(second)
+    await settle { store.apiConsumption[.anthropic] != nil && store.apiConsumption[second] != nil }
+    expect(store.apiConsumption[.anthropic]?.source == "sk-ant-admin-first-0123456789"
+      && store.apiConsumption[second]?.source == "sk-ant-admin-second-0123456789",
+      "a Claude API reading was made with the other account's key")
+
+    store.setAPIAccountLabel("Nimbus", for: second)
+    let reloaded = UsageStore(defaults: defaults, startAutomatically: false, apiKeys: access)
+    expect(reloaded.apiAccounts.contains(second) && second.displayName == "Anthropic · Nimbus",
+      "the second Claude API account or its name did not survive a relaunch")
+
+    try? await store.removeAPIAccount(second)
+    expect(keys[second] == nil && keys[.anthropic] != nil && !store.apiAccounts.contains(second),
+      "removing the second Claude API account did not delete only its key")
+    try? await store.removeAPIAccount(.anthropic)
+    expect(keys[.anthropic] != nil && store.apiAccounts.contains(.anthropic),
+      "the first Claude API account could be removed as an added one")
+    return failures
+  }
+
   private static func checkPhaseTable() -> [String] {
     var failures: [String] = []
     typealias Phase = ProviderSetupCoordinator.Phase

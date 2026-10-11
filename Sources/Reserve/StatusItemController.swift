@@ -1420,7 +1420,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// Insights lives in the Settings window. Opened from the dashboard it must
   /// come in front of the popover exactly as Settings does, or it lands behind.
   private func apiConsumptionReadings() -> [APIConsumptionReading] {
-    APIConsumptionProvider.allCases.compactMap { provider in
+    self.store.apiAccounts.compactMap { provider in
       // An unavailable Keychain does not hide the last known reading.
       guard self.store.isAPIConsumptionEnabled(provider) else { return nil }
       return APIConsumptionReading(

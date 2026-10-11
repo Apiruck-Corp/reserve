@@ -8,7 +8,7 @@ import ReserveCore
 /// where you are.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, NSToolbarDelegate,
-  NSWindowDelegate
+  NSWindowDelegate, NSMenuDelegate
 {
   enum Pane: String, CaseIterable {
     case general
@@ -397,7 +397,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func providersPane() -> NSView {
-    var rows: [NSView] = []
+    var rows: [NSView] = [self.addAccountRow()]
     for provider in self.store.accounts {
       rows.append(self.providerRow(provider))
       if self.expandedProviders.contains(provider) {
@@ -419,10 +419,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func apiPane() -> NSView {
-    var rows: [NSView] = []
-    for provider in APIConsumptionProvider.allCases {
+    var rows: [NSView] = [self.addAccountRow()]
+    for provider in self.store.apiAccounts {
       rows.append(self.apiProviderRow(provider))
-      if provider != APIConsumptionProvider.allCases.last {
+      if provider != self.store.apiAccounts.last {
         rows.append(SettingsSeparator(width: SettingsLayout.contentWidth))
       }
     }
@@ -1060,10 +1060,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if self.store.canNameAccount(provider) {
       rows.append(self.formRow("Name:", self.accountNameControls(provider), labelWidth: 92))
     }
-    if provider.isAdded {
+    if provider.isAdded, ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey != nil {
       rows.append(self.formRow("Folder:", self.configDirectoryControls(provider), labelWidth: 92))
       rows.append(SettingsLabel(
-        "Claude Code keeps one sign-in per folder · the same email on several accounts is fine",
+        "\(AccountFolderCopy.helperName(provider)) keeps one sign-in per folder · the same email on several accounts is fine",
         size: 11, color: .secondaryLabelColor))
     }
     if provider.isAnthropic || provider == .cursor {
@@ -1103,21 +1103,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       setup.toolTip = setupAction.toolTip(for: provider)
       rows.append(self.formRow("", setup, labelWidth: 92))
     }
-    if provider.isDefault, provider.kind.supportsAddedAccounts {
-      let add = NSButton(
-        title: "Add \(provider.displayName) account", target: self,
-        action: #selector(self.addAccountClicked(_:)))
-      add.identifier = NSUserInterfaceItemIdentifier("provider-add-account-\(provider.rawValue)")
-      add.bezelStyle = .rounded
-      add.toolTip = "Track another \(provider.displayName) subscription beside this one. Reserve gives it a folder of its own and signs it in there, so this account stays untouched."
-      rows.append(self.formRow("", add, labelWidth: 92))
-    }
     if provider.isAdded {
       let remove = NSButton(
         title: "Remove account", target: self, action: #selector(self.removeAccountClicked(_:)))
       remove.identifier = NSUserInterfaceItemIdentifier("provider-remove-account-\(provider.rawValue)")
       remove.bezelStyle = .rounded
-      remove.toolTip = "Stops tracking this account and forgets its settings. Its folder and sign-in stay on disk."
+      remove.toolTip = ProviderDescriptor.forProvider(provider).usesAPIKey
+        ? "Stops tracking this account and deletes its saved key from Reserve."
+        : "Stops tracking this account and forgets its settings. Its folder and sign-in stay on disk."
       rows.append(self.formRow("", remove, labelWidth: 92))
     }
     // A key-connected plan disconnects by removing its key, next to the field.
@@ -1233,7 +1226,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     return stack
   }
 
-  private func apiProviderRow(_ provider: APIConsumptionProvider) -> NSView {
+  private func apiProviderRow(_ provider: APIAccountID) -> NSView {
     let availability = self.store.apiConsumptionKeyAvailability(provider)
     let saved = availability == .present
     let writable = availability == .present || availability == .missing
@@ -1259,12 +1252,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       ?? status.stringValue
     status.lineBreakMode = .byTruncatingTail
     status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    let heading = NSStackView(views: [checkbox, SettingsProviderLogo(api: provider), name, kind, status])
+    let heading = NSStackView(views: [checkbox, SettingsProviderLogo(api: provider.provider), name, kind, status])
     heading.orientation = .horizontal
     heading.alignment = .centerY
     heading.spacing = 8
 
-    let tag = APIConsumptionProvider.allCases.firstIndex(of: provider) ?? 0
+    let tag = self.store.apiAccounts.firstIndex(of: provider) ?? 0
     var buttons: [NSButton] = [
       self.apiRowButton(
         title: saved ? "Replace" : "Save",
@@ -1309,6 +1302,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       field.placeholderString = availability == .unknown ? "Checking Keychain…" : "Keychain temporarily unavailable"
       buttons.first?.isEnabled = false
     }
+    if provider.isAdded {
+      buttons.append(
+        self.apiRowButton(
+          title: "Remove account",
+          identifier: "api-forget-\(provider.rawValue)",
+          action: #selector(self.apiAccountRemoved(_:)),
+          tag: tag,
+          toolTip: "Stop tracking this account and delete its key from Reserve",
+          accessibility: "Remove \(provider.displayName)"))
+    }
     let fields = NSStackView(views: [field] + buttons)
     fields.orientation = .horizontal
     fields.alignment = .centerY
@@ -1321,7 +1324,19 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
-    let row = NSStackView(views: [heading, fields])
+    var rowViews: [NSView] = [heading, fields]
+    if self.apiAccountTakesName(provider) { rowViews.append(self.apiAccountNameRow(provider)) }
+    // Why the provider refused or failed, in full: the status line above has
+    // room only for "Needs attention".
+    if let error = self.store.apiConsumptionErrors[provider] {
+      let reason = NSTextField(wrappingLabelWithString: error)
+      reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
+      reason.font = .systemFont(ofSize: 11)
+      reason.textColor = .secondaryLabelColor
+      reason.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+      rowViews.append(reason)
+    }
+    let row = NSStackView(views: rowViews)
     row.identifier = NSUserInterfaceItemIdentifier("api-provider-\(provider.rawValue)")
     row.orientation = .vertical
     row.alignment = .leading
@@ -1398,8 +1413,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private func configDirectoryControls(_ provider: ProviderID) -> NSView {
     let field = NSTextField()
     field.identifier = NSUserInterfaceItemIdentifier("config-dir-\(provider.rawValue)")
-    field.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
-    field.placeholderString = "~/.claude-team"
+    field.stringValue = self.store.accountFolder(for: provider)?.path ?? ""
+    field.placeholderString = AccountFolderCopy.example(provider)
     field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
     field.isBezeled = true
     field.bezelStyle = .roundedBezel
@@ -1410,7 +1425,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     field.target = self
     field.delegate = self
     field.action = #selector(self.configDirectorySubmitted(_:))
-    field.toolTip = "The folder Claude Code uses for this account (its CLAUDE_CONFIG_DIR). Return saves it."
+    field.toolTip = "The folder \(AccountFolderCopy.helperName(provider)) uses for this account (its \(AccountFolderCopy.variable(provider))). Return saves it."
     field.setAccessibilityLabel("\(provider.displayName) configuration folder")
     field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
     field.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1418,7 +1433,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       title: "Choose…",
       identifier: "config-dir-choose-\(provider.rawValue)",
       action: #selector(self.chooseConfigDirectoryClicked(_:)), tag: 0,
-      toolTip: "Pick the folder in Finder. A new folder is filled in by Claude Code at sign-in.",
+      toolTip: "Pick the folder in Finder. A new folder is filled in by \(AccountFolderCopy.helperName(provider)) at sign-in.",
       accessibility: "Choose the \(provider.displayName) configuration folder")
     choose.setContentHuggingPriority(.required, for: .horizontal)
     choose.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -1433,7 +1448,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let raw = sender.identifier?.rawValue else { return nil }
     for prefix in ["config-dir-choose-", "config-dir-"] where raw.hasPrefix(prefix) {
       let provider = ProviderID(rawValue: String(raw.dropFirst(prefix.count)))
-      return provider.flatMap { $0.isAdded && $0.isAnthropic ? $0 : nil }
+      return provider.flatMap {
+        $0.isAdded && ProviderDescriptor.forProvider($0).homeFolderEnvironmentKey != nil ? $0 : nil
+      }
     }
     return nil
   }
@@ -1508,25 +1525,166 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
   }
 
-  @objc private func addAccountClicked(_ sender: NSButton) {
-    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "provider-add-account-", with: "")
-    guard let provider = ProviderID(rawValue: raw), provider.kind.supportsAddedAccounts else { return }
-    do {
-      let account = try self.store.addClaudeAccount()
-      self.expandedProviders.insert(account)
+  /// One entry point for every account Reserve can track: subscriptions
+  /// signed in with the provider's helper, plans read with a key, and API
+  /// spend. Each entry follows the provider's descriptor, so a new provider
+  /// shows up here with the right behaviour.
+  private func addAccountRow() -> NSView {
+    let button = NSPopUpButton(frame: .zero, pullsDown: true)
+    button.identifier = NSUserInterfaceItemIdentifier("settings-add-account-\(self.pane.rawValue)")
+    button.controlSize = .regular
+    button.setAccessibilityLabel("Add an account")
+    button.toolTip = "Track another subscription, coding plan or API account"
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    // Filled each time it opens, so every entry reflects what is connected now.
+    menu.delegate = self
+    self.fillAddAccountMenu(menu)
+    button.menu = menu
+    let note = SettingsLabel(
+      self.pane == .api ? "API spend and balances" : "Subscriptions and coding plans", size: 12,
+      color: .secondaryLabelColor)
+    let spacer = NSView()
+    spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let row = NSStackView(views: [note, spacer, button])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    return row
+  }
+
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    guard menu.items.first?.title == Self.addAccountTitle else { return }
+    self.fillAddAccountMenu(menu)
+  }
+
+  private static let addAccountTitle = "Add Account…"
+
+  private func fillAddAccountMenu(_ menu: NSMenu) {
+    menu.removeAllItems()
+    // A pull-down shows its first item as the button title.
+    menu.addItem(withTitle: Self.addAccountTitle, action: nil, keyEquivalent: "")
+    menu.addItem(.sectionHeader(title: "Subscriptions"))
+    for kind in AccountAddition.subscriptionKinds { menu.addItem(self.addAccountItem(kind)) }
+    menu.addItem(.sectionHeader(title: "Coding plans"))
+    for kind in AccountAddition.keyPlanKinds { menu.addItem(self.addAccountItem(kind)) }
+    menu.addItem(.sectionHeader(title: "API spend"))
+    for provider in APIConsumptionProvider.allCases { menu.addItem(self.addAPIAccountItem(provider)) }
+  }
+
+  private func addAccountItem(_ kind: ProviderKind) -> NSMenuItem {
+    let defaultAccount = ProviderID(kind: kind)
+    let action = AccountAddition.action(for: kind, defaultConnected: self.isConnected(defaultAccount))
+    let item = NSMenuItem(
+      title: kind.displayName, action: #selector(self.addAccountChosen(_:)), keyEquivalent: "")
+    item.target = self
+    item.representedObject = kind.rawValue
+    item.image = Self.menuImage(ProviderArtwork.image(for: defaultAccount))
+    let summary = AccountAddition.summary(for: kind)
+    switch action {
+    case .connectDefault, .addAccount:
+      item.isEnabled = true
+      item.toolTip = summary
+      Self.setSubtitle(summary, on: item)
+    case .unavailable(let reason):
+      item.isEnabled = false
+      item.toolTip = reason
+      Self.setSubtitle("Connected · one account per Mac", on: item)
+    }
+    item.setAccessibilityLabel("Add \(kind.displayName) account")
+    return item
+  }
+
+  private func addAPIAccountItem(_ provider: APIConsumptionProvider) -> NSMenuItem {
+    let title = provider == .anthropic ? "Claude API (Anthropic)" : "\(provider.displayName) API"
+    let item = NSMenuItem(
+      title: title, action: #selector(self.addAPIAccountChosen(_:)), keyEquivalent: "")
+    item.target = self
+    item.representedObject = provider.rawValue
+    item.image = Self.menuImage(ProviderArtwork.image(for: provider))
+    let saved = self.store.apiConsumptionKeyAvailability(APIAccountID(provider: provider)) == .present
+    let summary = saved
+      ? "Add another \(provider.keyKind.lowercased()) · several accounts"
+      : "Paste \(provider.keyKind.lowercased()) (\(provider.keyHint))"
+    item.toolTip = summary
+    Self.setSubtitle(summary, on: item)
+    item.setAccessibilityLabel("Add \(title) account")
+    return item
+  }
+
+  /// Turned on and holding a sign-in or key Reserve could read. An enabled
+  /// card still waiting for its sign-in is not one: the menu connects it
+  /// rather than adding another empty account beside it.
+  private func isConnected(_ provider: ProviderID) -> Bool {
+    guard self.store.isEnabled(provider), let state = self.store.states[provider] else { return false }
+    return state.snapshot != nil && !state.requiresConnection && !state.requiresConfigDirectory
+  }
+
+  private static func menuImage(_ image: NSImage) -> NSImage {
+    let sized = image.copy() as? NSImage ?? image
+    sized.size = NSSize(width: 16, height: 16)
+    return sized
+  }
+
+  private static func setSubtitle(_ subtitle: String, on item: NSMenuItem) {
+    if #available(macOS 14.4, *) { item.subtitle = subtitle }
+  }
+
+  @objc private func addAccountChosen(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let kind = ProviderKind(rawValue: raw) else { return }
+    let defaultAccount = ProviderID(kind: kind)
+    switch AccountAddition.action(for: kind, defaultConnected: self.isConnected(defaultAccount)) {
+    case .connectDefault:
+      self.show(.providers)
+      self.expandedProviders.insert(defaultAccount)
       self.rememberScrollOffset()
       self.applyPane(animated: false)
-      self.setupProvider(account)
-    } catch {
-      let alert = NSAlert()
-      alert.messageText = "The account could not be added"
-      alert.informativeText = error.localizedDescription
-      alert.addButton(withTitle: "OK")
-      if let window = self.window, window.isVisible {
-        alert.beginSheetModal(for: window, completionHandler: nil)
-      } else {
-        alert.runModal()
+      self.setupProvider(defaultAccount)
+    case .addAccount:
+      do {
+        let account = try self.store.addAccount(kind: kind)
+        self.show(.providers)
+        self.expandedProviders.insert(account)
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+        self.setupProvider(account)
+      } catch {
+        self.presentAlert("The account could not be added", error.localizedDescription)
       }
+    case .unavailable(let reason):
+      self.presentAlert("\(kind.displayName) is already connected", reason)
+    }
+  }
+
+  /// API accounts are measured from the API pane; the entry takes the person
+  /// to that provider's key field.
+  @objc private func addAPIAccountChosen(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String,
+      let provider = APIConsumptionProvider(rawValue: raw)
+    else { return }
+    // The first account takes the first key; every later key is an account
+    // of its own beside it.
+    let first = APIAccountID(provider: provider)
+    let account = self.store.apiConsumptionKeyAvailability(first) == .present
+      ? self.store.addAPIAccount(provider) : first
+    self.show(.api)
+    self.rememberScrollOffset()
+    self.applyPane(animated: false)
+    if let field = self.textField(identifier: "api-key-\(account.rawValue)") {
+      field.scrollToVisible(field.bounds)
+      self.window?.makeFirstResponder(field)
+    }
+  }
+
+  private func presentAlert(_ title: String, _ message: String) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = message
+    alert.addButton(withTitle: "OK")
+    if let window = self.window, window.isVisible {
+      alert.beginSheetModal(for: window, completionHandler: nil)
+    } else {
+      alert.runModal()
     }
   }
 
@@ -1535,25 +1693,32 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let provider = ProviderID(rawValue: raw), provider.isAdded else { return }
     let alert = NSAlert()
     alert.messageText = "Remove \(provider.displayName) from Reserve?"
-    alert.informativeText = "Reserve stops tracking it and forgets its settings. The account's folder and its Claude Code sign-in stay on this Mac."
+    alert.informativeText = ProviderDescriptor.forProvider(provider).usesAPIKey
+      ? "Reserve stops tracking it, forgets its settings and deletes its saved key from Reserve. The key itself keeps working until you revoke it at \(provider.kind.displayName)."
+      : "Reserve stops tracking it and forgets its settings. The account's folder and its \(AccountFolderCopy.helperName(provider)) sign-in stay on this Mac."
     alert.addButton(withTitle: "Remove")
     alert.addButton(withTitle: "Cancel")
-    let remove = { [weak self] in
-      guard let self else { return }
-      do {
-        try self.store.removeAccount(provider)
-        self.expandedProviders.remove(provider)
-        self.rememberScrollOffset()
-        self.applyPane(animated: false)
-      } catch {
-        let failure = NSAlert()
-        failure.messageText = "The account could not be removed"
-        failure.informativeText = error.localizedDescription
-        failure.addButton(withTitle: "OK")
-        if let window = self.window, window.isVisible {
-          failure.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-          failure.runModal()
+    let remove: () -> Void = { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        do {
+          try await self.store.removeAccountAndKey(provider)
+          self.expandedProviders.remove(provider)
+          self.rememberScrollOffset()
+          self.applyPane(animated: false)
+        } catch is CancellationError {
+          // A new key was saved meanwhile; the account stays with it.
+          self.applyPane(animated: false)
+        } catch {
+          let failure = NSAlert()
+          failure.messageText = "The account could not be removed"
+          failure.informativeText = error.localizedDescription
+          failure.addButton(withTitle: "OK")
+          if let window = self.window, window.isVisible {
+            failure.beginSheetModal(for: window, completionHandler: nil)
+          } else {
+            failure.runModal()
+          }
         }
       }
     }
@@ -1583,8 +1748,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   @objc private func chooseConfigDirectoryClicked(_ sender: NSButton) {
     guard let provider = self.configDirectoryProvider(for: sender) else { return }
-    ClaudeConfigDirectoryPicker.choose(
-      current: self.store.claudeConfigDirectory(for: provider), from: self.window
+    AccountFolderPicker.choose(
+      for: provider, current: self.store.accountFolder(for: provider), from: self.window
     ) { [weak self] url in
       guard let self, let url else { return }
       self.saveConfigDirectory(url.path, for: provider)
@@ -1594,13 +1759,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private func saveConfigDirectory(_ value: String, for provider: ProviderID) {
     let field = self.textField(identifier: "config-dir-\(provider.rawValue)")
     do {
-      let directory = try self.store.setClaudeConfigDirectory(value, for: provider)
+      let directory = try self.store.setAccountFolder(value, for: provider)
       field?.stringValue = directory?.path ?? ""
       // The folder is part of the control structure, so the live update
       // rebuilds the card once AppKit has released the field editor.
       self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
     } catch {
-      field?.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
+      field?.stringValue = self.store.accountFolder(for: provider)?.path ?? ""
       let alert = NSAlert()
       alert.messageText = "That folder cannot be used"
       alert.informativeText = error.localizedDescription
@@ -1689,7 +1854,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     NSWorkspace.shared.open(url)
   }
 
-  private func apiReading(for provider: APIConsumptionProvider, saved: Bool) -> String {
+  private func apiReading(for provider: APIAccountID, saved: Bool) -> String {
     switch self.store.apiConsumptionKeyAvailability(provider) {
     case .unknown: return "Checking Keychain…"
     case .unavailable: return "Keychain temporarily unavailable · retrying automatically"
@@ -2210,8 +2375,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func apiConsumptionChanged(_ sender: NSButton) {
-    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "api-enabled-", with: "")
-    guard let provider = APIConsumptionProvider(rawValue: raw) else { return }
+    guard let provider = self.apiProvider(for: sender) else { return }
     self.store.setAPIConsumptionEnabled(provider, enabled: sender.state == .on)
     self.applyPane(animated: false)
   }
@@ -2299,22 +2463,89 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
   }
 
-  private func apiProvider(for sender: NSControl) -> APIConsumptionProvider? {
+  private func apiProvider(for sender: NSControl) -> APIAccountID? {
     if let raw = sender.identifier?.rawValue {
-      for provider in APIConsumptionProvider.allCases where raw.hasSuffix("-\(provider.rawValue)") {
-        return provider
+      for prefix in ["api-enabled-", "api-key-", "api-save-", "api-remove-", "api-page-", "api-name-", "api-forget-"]
+      where raw.hasPrefix(prefix) {
+        return APIAccountID(rawValue: String(raw.dropFirst(prefix.count)))
       }
     }
     let index = sender.tag
-    return APIConsumptionProvider.allCases.indices.contains(index)
-      ? APIConsumptionProvider.allCases[index] : nil
+    return self.store.apiAccounts.indices.contains(index) ? self.store.apiAccounts[index] : nil
   }
 
-  private func clearAPICredentialFields(for provider: APIConsumptionProvider) {
+  /// Accounts are named once their provider has more than one, so two Claude
+  /// API keys read "Anthropic · Perso" and "Anthropic · Nimbus".
+  private func apiAccountTakesName(_ account: APIAccountID) -> Bool {
+    self.store.apiAccounts.filter { $0.provider == account.provider }.count > 1
+  }
+
+  private func apiAccountNameRow(_ account: APIAccountID) -> NSView {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("api-name-\(account.rawValue)")
+    field.stringValue = self.store.apiAccountLabel(for: account) ?? ""
+    field.placeholderString = account.isAdded ? "Team, client…" : "Personal…"
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.target = self
+    field.action = #selector(self.apiAccountNameSubmitted(_:))
+    field.toolTip = "A name to tell this \(account.provider.displayName) account apart. Return saves it."
+    field.setAccessibilityLabel("\(account.provider.displayName) account name")
+    field.widthAnchor.constraint(equalToConstant: 220).isActive = true
+    let caption = SettingsLabel("Name:", size: 12, color: .secondaryLabelColor)
+    let row = NSStackView(views: [caption, field])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    return row
+  }
+
+  @objc private func apiAccountNameSubmitted(_ sender: NSTextField) {
+    guard let account = self.apiProvider(for: sender) else { return }
+    self.store.setAPIAccountLabel(sender.stringValue, for: account)
+    self.uiRefresh.coalesce { [weak self] in
+      self?.rememberScrollOffset()
+      self?.applyPane(animated: false)
+    }
+  }
+
+  @objc private func apiAccountRemoved(_ sender: NSButton) {
+    guard let account = self.apiProvider(for: sender), account.isAdded, !self.keySaveInFlight else { return }
+    let alert = NSAlert()
+    alert.messageText = "Remove \(account.displayName) from Reserve?"
+    alert.informativeText = "Reserve stops measuring it and deletes its saved key from Reserve. The key itself keeps working until you revoke it at \(account.provider.displayName)."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    let remove: () -> Void = { [weak self] in
+      guard let self else { return }
+      self.keySaveInFlight = true
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        defer { self.keySaveInFlight = false }
+        do {
+          try await self.store.removeAPIAccount(account)
+        } catch is CancellationError {
+        } catch {
+          self.presentKeySaveError(error, key: "", action: "removed")
+        }
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      }
+    }
+    if let window = self.window, window.isVisible {
+      alert.beginSheetModal(for: window) { response in
+        if response == .alertFirstButtonReturn { remove() }
+      }
+    } else if alert.runModal() == .alertFirstButtonReturn {
+      remove()
+    }
+  }
+
+  private func clearAPICredentialFields(for provider: APIAccountID) {
     self.apiKeyField(for: provider)?.stringValue = ""
   }
 
-  private func apiKeyField(for provider: APIConsumptionProvider) -> NSTextField? {
+  private func apiKeyField(for provider: APIAccountID) -> NSTextField? {
     self.window?.contentView.flatMap { view in
       Self.descendants(of: view).compactMap { $0 as? NSTextField }.first {
         $0.identifier?.rawValue == "api-key-\(provider.rawValue)"
@@ -2618,7 +2849,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           // An added account's folder decides which controls are live (its
           // passive-updates checkbox waits for one).
           let folder = provider.isAdded
-            ? (self.store.claudeConfigDirectory(for: provider) != nil ? "folder" : "no-folder") : "-"
+            ? (self.store.accountFolder(for: provider) != nil ? "folder" : "no-folder") : "-"
           detail = [
             reportedRenewal ? "reported" : "manual",
             planKey ? "key" : "-",
@@ -2631,8 +2862,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           "\(provider.rawValue):\(enabled):\(expanded):\(quick):\(setup?.buttonTitle ?? "-"):\(detail)")
       }
     case .api:
-      for provider in APIConsumptionProvider.allCases {
+      for provider in self.store.apiAccounts {
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
+        // The name field appears once a provider has a second account.
+        parts.append(self.apiAccountTakesName(provider) ? "named" : "-")
+        parts.append(self.store.apiConsumptionErrors[provider] ?? "-")
       }
     case .insights:
       let enabled = self.store.accounts.filter { self.store.isEnabled($0) }
@@ -2716,7 +2950,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             ?? "Never updated")
       }
     case .api:
-      for provider in APIConsumptionProvider.allCases {
+      for provider in self.store.apiAccounts {
         let saved = self.store.hasAPIConsumptionKey(provider)
         check("api-enabled-\(provider.rawValue)", self.store.isAPIConsumptionEnabled(provider))
         setText("api-status-\(provider.rawValue)", self.apiReading(for: provider, saved: saved))
@@ -3124,7 +3358,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = .api
     self.applyPane(animated: false)
     let apiIDs = identifiers()
-    let apiKeyEntryPresent = APIConsumptionProvider.allCases.allSatisfy {
+    let apiKeyEntryPresent = self.store.apiAccounts.allSatisfy {
       apiIDs.contains("api-provider-\($0.rawValue)")
         && apiIDs.contains("api-key-\($0.rawValue)")
         && apiIDs.contains("api-save-\($0.rawValue)")
@@ -3132,10 +3366,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         && apiIDs.contains("api-page-\($0.rawValue)")
     }
     // Every key page must be an https provider URL the row can hand the browser.
-    let apiKeyPagesAreHTTPS = APIConsumptionProvider.allCases.allSatisfy {
+    let apiKeyPagesAreHTTPS = self.store.apiAccounts.allSatisfy {
       $0.keySettingsURL.scheme?.lowercased() == "https" && $0.keySettingsURL.host?.isEmpty == false
     }
-    let apiMeasurementStartsOff = APIConsumptionProvider.allCases.allSatisfy {
+    let apiMeasurementStartsOff = self.store.apiAccounts.allSatisfy {
       !self.store.isAPIConsumptionEnabled($0)
     }
     let apiSuccess = apiKeyEntryPresent && apiMeasurementStartsOff && apiKeyPagesAreHTTPS

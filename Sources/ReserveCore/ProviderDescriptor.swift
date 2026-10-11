@@ -20,6 +20,20 @@ public struct ProviderDescriptor: Sendable {
     public static let limitMeters = Self(rawValue: 1 << 4)
   }
 
+  /// How one Mac keeps several accounts of a kind apart.
+  public enum AccountIsolation: Sendable, Equatable {
+    /// The helper keeps one sign-in per home folder, named by an environment
+    /// variable. Each added account gets a folder of its own under
+    /// `~/<managedFolderName>/`, and every launch for that account carries the
+    /// variable, so the helper's default home (`~/<defaultFolderName>`) and the
+    /// account it holds are never touched.
+    case homeFolder(environmentKey: String, defaultFolderName: String, managedFolderName: String)
+    /// Each account is its own pasted key, saved under the account's name.
+    case apiKey
+    /// The helper keeps one sign-in per Mac user, so there is one account.
+    case single
+  }
+
   /// How a person obtains and pastes the key for an `apiKey` provider.
   public struct APIKeyConnection: Sendable, Equatable {
     /// What the pasted key looks like, shown as the field placeholder.
@@ -64,6 +78,36 @@ public struct ProviderDescriptor: Sendable {
     !self.usesAPIKey && self.helper != nil && self.loginArguments.isEmpty
   }
   public var usesAPIKey: Bool { self.authenticationStrategy == .apiKey }
+
+  /// Key plans keep their accounts apart by key; helpers by home folder when
+  /// they support one; every other helper holds a single sign-in.
+  public var accountIsolation: AccountIsolation {
+    if self.usesAPIKey { return .apiKey }
+    return switch self.id.kind {
+    case .anthropic:
+      .homeFolder(
+        environmentKey: ClaudeConfigDirectory.environmentKey, defaultFolderName: ".claude",
+        managedFolderName: ".claude-accounts")
+    // Codex keeps auth.json, or its Keychain item when configured to, per
+    // CODEX_HOME: the item's account name hashes the folder path.
+    case .openAI:
+      .homeFolder(environmentKey: "CODEX_HOME", defaultFolderName: ".codex", managedFolderName: ".codex-accounts")
+    // Grok keeps auth.json in GROK_HOME and nothing in the Keychain.
+    case .grok:
+      .homeFolder(environmentKey: "GROK_HOME", defaultFolderName: ".grok", managedFolderName: ".grok-accounts")
+    // Cursor's Keychain item names are fixed and Antigravity has no home
+    // variable. Copilot's COPILOT_HOME leaves its Keychain item shared
+    // between folders, so it is not counted as separate until verified.
+    case .cursor, .copilot, .gemini, .zai, .kimi: .single
+    }
+  }
+
+  /// The environment variable that points an added account's helper at its
+  /// folder, or nil for a kind that does not use one.
+  public var homeFolderEnvironmentKey: String? {
+    guard case .homeFolder(let key, _, _) = self.accountIsolation else { return nil }
+    return key
+  }
 
   /// Every account of a kind shares the kind's descriptor. An added account's
   /// session transcripts are not scanned yet, so it reports no local history

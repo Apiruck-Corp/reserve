@@ -15,7 +15,7 @@ struct DashboardActions {
   /// section stays out of the subscription view.
   let apiConsumptionReadings: () -> [APIConsumptionReading]
   /// Opens or closes one API row's details.
-  var toggleAPIDetail: (APIConsumptionProvider) -> Void = { _ in }
+  var toggleAPIDetail: (APIAccountID) -> Void = { _ in }
   /// Opens the sanitized share preview for the selected provider.
   var shareUsage: () -> Void = {}
   /// Toggles presentation masking. Originals stay in the store.
@@ -35,7 +35,7 @@ extension APIConsumptionSnapshot {
 }
 
 struct APIConsumptionReading {
-  let provider: APIConsumptionProvider
+  let provider: APIAccountID
   let snapshot: APIConsumptionSnapshot?
   let error: String?
   let isRefreshing: Bool
@@ -158,6 +158,8 @@ final class DashboardViewController: NSViewController {
     for reading in apiReadings {
       parts.append("api")
       parts.append(reading.provider.rawValue)
+      // A renamed account rebuilds its row so the new name shows.
+      parts.append(reading.provider.displayName)
       parts.append(reading.error ?? "-")
       parts.append(reading.isRefreshing ? "measuring" : "-")
       parts.append(reading.snapshot.map { String($0.primary?.usedMinorUnits ?? 0) } ?? "-")
@@ -835,7 +837,7 @@ private final class APIConsumptionSection: NSView {
 
   init?(
     readings: [APIConsumptionReading], now: Date,
-    toggle: @escaping (APIConsumptionProvider) -> Void = { _ in }
+    toggle: @escaping (APIAccountID) -> Void = { _ in }
   ) {
     guard !readings.isEmpty else { return nil }
     super.init(frame: .zero)
@@ -866,7 +868,7 @@ private final class APIConsumptionSection: NSView {
   func apply(
     readings: [APIConsumptionReading],
     now: Date,
-    toggle: @escaping (APIConsumptionProvider) -> Void
+    toggle: @escaping (APIAccountID) -> Void
   ) -> Bool {
     guard Self.structureKey(readings) == self.structure else { return false }
     _ = toggle
@@ -899,6 +901,7 @@ private final class APIConsumptionSection: NSView {
       let expandedError = reading.isExpanded ? (reading.error ?? "") : ""
       return [
         reading.provider.rawValue,
+        reading.provider.displayName,
         reading.isExpanded ? "open" : "closed",
         reading.hidesPersonalInfo ? "private" : "plain",
         details,
@@ -991,14 +994,17 @@ private final class APIConsumptionSection: NSView {
 
   private static func row(
     _ reading: APIConsumptionReading, now: Date,
-    toggle: @escaping (APIConsumptionProvider) -> Void
+    toggle: @escaping (APIAccountID) -> Void
   ) -> NSView {
-    let logo = ProviderLogo(api: reading.provider)
+    let logo = ProviderLogo(api: reading.provider.provider)
+    // The logo already names the provider, so a named account shows its name
+    // alone ("Nimbus"): the narrow column would cut "Anthropic · Nimbus".
     let name = ReserveLabel(
-      reading.provider.displayName,
+      APIAccountLabels.label(for: reading.provider) ?? reading.provider.provider.displayName,
       font: ReserveFont.sans(ReserveType.body, .medium),
       color: ReserveColor.text
     ).width(84)
+    name.toolTip = reading.provider.displayName
     let presented = Self.presented(reading, now: now)
     let amount = ReserveLabel(
       presented.value, font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
@@ -2476,12 +2482,12 @@ final class DetailDisclosureButton: NSButton {
 /// an API account, not to a subscription provider.
 @MainActor
 final class APIDetailDisclosureButton: NSButton {
-  private let provider: APIConsumptionProvider
-  private let handler: (APIConsumptionProvider) -> Void
+  private let provider: APIAccountID
+  private let handler: (APIAccountID) -> Void
 
   init(
-    provider: APIConsumptionProvider, isExpanded: Bool,
-    action: @escaping (APIConsumptionProvider) -> Void
+    provider: APIAccountID, isExpanded: Bool,
+    action: @escaping (APIAccountID) -> Void
   ) {
     self.provider = provider
     self.handler = action
