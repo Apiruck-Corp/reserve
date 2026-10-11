@@ -22,6 +22,19 @@ public enum BinaryLocator {
   public static func find(
     _ name: String, environment: [String: String] = ProcessInfo.processInfo.environment
   ) -> String? {
+    Self.candidates(name, environment: environment).first
+  }
+
+  /// Every trusted install of `name`, in the order `find` would pick them.
+  ///
+  /// A CLI can pass validation and still fail to start: an npm wrapper whose
+  /// platform binary was never installed, or a stale copy left in a preferred
+  /// directory by an old install. A caller that starts a helper can try the next
+  /// candidate instead of reporting the first broken one as the user's CLI.
+  /// Paths that execute the same file are listed once.
+  public static func candidates(
+    _ name: String, environment: [String: String] = ProcessInfo.processInfo.environment
+  ) -> [String] {
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     // Relative entries (`.`, `bin`) would resolve against Reserve's working
     // directory before validation ever saw them, so they are dropped here.
@@ -29,38 +42,59 @@ public enum BinaryLocator {
       .split(separator: ":")
       .map(String.init)
       .filter { $0.hasPrefix("/") }
+    var found: [String] = []
+    var executed = Set<String>()
+    func add(_ candidate: String) {
+      guard case .success(let final) = Self.validateExecutable(at: candidate),
+        executed.insert(final).inserted
+      else { return }
+      found.append(candidate)
+    }
     for directory in Self.preferredDirectories(home: home) {
-      if let candidate = Self.executable(name, in: directory) { return candidate }
+      add(URL(fileURLWithPath: directory).appendingPathComponent(name).path)
     }
     // The desktop apps ship their own native helpers outside PATH. Prefer these
     // known locations over arbitrary PATH entries so a desktop user does not
     // need a second installation just for Reserve.
-    if name == "codex", let bundled = Self.bundledCodexExecutable(home: home) {
-      return bundled
+    if name == "codex" {
+      Self.bundledCodexCandidates(home: home).forEach(add)
     }
     if name == "claude", let bundled = Self.bundledClaudeExecutable(home: home) {
-      return bundled
+      add(bundled)
     }
     for directory in pathEntries {
-      if let candidate = Self.executable(name, in: directory) { return candidate }
+      add(URL(fileURLWithPath: directory).appendingPathComponent(name).path)
     }
-    return nil
+    return found
   }
+
+  /// Where ChatGPT keeps its Codex helper, newest layout first. Releases since
+  /// 26.10 ship a `codex-cli` directory; earlier ones kept the binary directly
+  /// in Resources.
+  private static let bundledCodexPaths = [
+    "ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    "ChatGPT.app/Contents/Resources/codex",
+  ]
 
   static func bundledCodexExecutable(
     home: String, applicationDirectories: [URL]? = nil
   ) -> String? {
+    Self.bundledCodexCandidates(home: home, applicationDirectories: applicationDirectories).first
+  }
+
+  private static func bundledCodexCandidates(
+    home: String, applicationDirectories: [URL]? = nil
+  ) -> [String] {
     let roots = applicationDirectories ?? [
       URL(fileURLWithPath: "/Applications", isDirectory: true),
       URL(fileURLWithPath: home, isDirectory: true)
         .appendingPathComponent("Applications", isDirectory: true),
     ]
-    for root in roots {
-      let candidate = root
-        .appendingPathComponent("ChatGPT.app/Contents/Resources/codex").path
-      if let executable = Self.executable(at: candidate) { return executable }
+    return roots.flatMap { root in
+      Self.bundledCodexPaths.compactMap { relative in
+        Self.executable(at: root.appendingPathComponent(relative).path)
+      }
     }
-    return nil
   }
 
   static func bundledClaudeExecutable(
@@ -82,11 +116,6 @@ public enum BinaryLocator {
       if let executable = Self.executable(at: candidate) { return executable }
     }
     return nil
-  }
-
-  private static func executable(_ name: String, in directory: String) -> String? {
-    let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
-    return Self.executable(at: candidate)
   }
 
   /// The candidate path itself, when it passes `validateExecutable`.
