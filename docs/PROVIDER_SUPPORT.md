@@ -157,6 +157,25 @@ session has become another account's, Reserve reports an expired sign-in rather
 than renewing or reading usage that is not the rejected account's.
 [Official refresh implementation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-login/src/manager/remedy.rs)
 
+The X Subscription (announced 2026-10-12) bundles Grok, Grok Bot, Cursor and
+X Premium in the tiers Free, Plus, Premium, Super and Ultra, with one weekly
+included pool shared by Grok and Cursor; extra first-party usage and every
+third-party model in Cursor are paid from a prepaid balance
+([overview](https://docs.x.ai/x-subscription/overview),
+[prepaid balance](https://docs.x.ai/x-subscription/prepaid-balance)).
+Switching is optional, so both plan families coexist. `XSubscriptionPlan`
+recognises a tier as a bare name, an `x_subscription_` slug, a
+`SUBSCRIPTION_TIER_` enum or a team variant; the standalone plans keep their
+`x_premium`, `x_premium_plus` and `supergrok*` names, so a bare "Premium" is
+the new tier rather than X Premium. Grok's product shares now also name
+Cursor, Grok Bot, Imagine, Voice and the API, in camel-case or `PRODUCT_`
+enum form. Cursor's formatter takes every tier except a bare "free", which is
+still Cursor's own Hobby plan, and its cost fallback knows the tier prices
+($0, $8, $30, $100, $200). As of 2026-10-13
+no switched account has been read live: the shapes above are covered by
+fixtures, and the exact strings should be confirmed with
+`reserve-probe grok` and `reserve-probe cursor` on a switched account.
+
 ### OpenAI
 
 The Codex app-server adapter reads named limit buckets and available reset

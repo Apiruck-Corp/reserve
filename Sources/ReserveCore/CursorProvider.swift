@@ -822,6 +822,11 @@ enum CursorPlanFormatter {
       .replacingOccurrences(of: "_", with: "")
       .replacingOccurrences(of: "-", with: "")
       .replacingOccurrences(of: " ", with: "")
+    // Cursor accounts moved to The X Subscription report its tiers. A bare
+    // "free" is still Cursor's own Hobby plan; Ultra has the same name in both.
+    if normalized != "free", let tier = XSubscriptionPlan.tier(from: trimmed) {
+      return tier
+    }
     if normalized.contains("proplus") { return "Pro+" }
     if normalized.contains("ultra") { return "Ultra" }
     if normalized.contains("hobby") || normalized.contains("free") { return "Hobby" }
