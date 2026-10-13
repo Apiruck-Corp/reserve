@@ -135,6 +135,8 @@ public enum UsageShareCardBuilder {
     "Free", "Plus", "Pro", "Pro+", "Team", "Business", "Enterprise", "Edu",
     "Max", "Max 5x", "Max 20x",
     "SuperGrok", "SuperGrok Heavy", "X Premium", "X Premium+",
+    // The X Subscription tiers ("Free", "Plus" and "Ultra" are listed above).
+    "Premium", "Super",
     "Hobby", "Ultra",
     "Adagio", "Andante", "Moderato", "Allegretto", "Allegro",
     "GLM Coding Lite", "GLM Coding Pro", "GLM Coding Max",
@@ -144,7 +146,7 @@ public enum UsageShareCardBuilder {
   /// than copied, so a label cannot carry an email, org, or path.
   public static let allowedWindowLabels: Set<String> = [
     "Weekly", "Weekly limit", "5 hours", "5-hour window", "Session",
-    "Daily", "Monthly", "Primary", "Build share",
+    "Daily", "Monthly", "Primary", "Build share", "Cursor share",
   ]
 
   /// Always private. Dynamic strings are matched to fixed lists; unmatched
@@ -198,6 +200,7 @@ public enum UsageShareCardBuilder {
     if folded == "monthly" { return "Monthly" }
     if folded == "primary" { return "Primary" }
     if folded == "build share" || folded == "grok build share" { return "Build share" }
+    if folded == "cursor share" { return "Cursor share" }
     return nil
   }
 }

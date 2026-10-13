@@ -96,7 +96,8 @@ account's key from Reserve and leaves the others alone.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
-- Grok Build 1.0.0 or newer, signed into an X.AI subscription;
+- Grok Build 1.0.0 or newer, signed into an X.AI subscription (SuperGrok,
+  X Premium, or a tier of The X Subscription);
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported; and
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
@@ -255,6 +256,15 @@ five-hour or daily limit takes priority over a longer allowance. Forecasts wait
 until at least 10% of a known window has elapsed, and stop when observations
 are stale. Grok’s Build and Chat contributions appear only in details as
 percentages of its shared pool used.
+
+The X Subscription (Free, Plus, Premium, Super and Ultra, launched October
+2026) puts Grok, Grok Bot and Cursor on one weekly pool. Reserve reads that
+pool on the Grok card, with Cursor, Grok Bot, Imagine and Voice listed as
+shares of it when Grok reports them. An account that moved Cursor onto The X
+Subscription shows the same pool on Grok's card; Cursor's own card keeps
+showing what Cursor reports, and third-party models in Cursor are paid from
+the prepaid balance rather than the pool. Accounts that have not switched keep
+their SuperGrok, X Premium and Cursor plan names.
 
 The dashboard shows every enabled provider in a compact overview, including
 the reset time for the allowance shown by its percentage and meter. Select a tile

@@ -321,7 +321,8 @@ public enum ReserveSelfTests {
       ClaudePlanFormatter.plan(from: "team") == "Team",
       GrokPlanFormatter.plan(from: "supergrok_heavy") == "SuperGrok Heavy",
       GrokPlanFormatter.plan(from: "x_premium_plus") == "X Premium+",
-      GrokPlanFormatter.plan(from: "premium") == "X Premium",
+      GrokPlanFormatter.plan(from: "x_premium") == "X Premium",
+      GrokPlanFormatter.plan(from: "premium") == "Premium",
       CursorPlanFormatter.plan(from: "pro_plus") == "Pro+",
       CursorPlanFormatter.plan(from: "ultra") == "Ultra",
       CursorPlanFormatter.plan(from: "free") == "Hobby"

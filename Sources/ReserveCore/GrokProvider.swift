@@ -296,10 +296,20 @@ public struct GrokProvider: UsageProvider {
     return "Usage pool"
   }
 
-  private static func productLabel(_ product: String) -> String {
-    switch product.lowercased() {
+  /// Products share one pool. On The X Subscription that pool also covers
+  /// Cursor, Grok Bot, Imagine and Voice, which may arrive as `GrokBot` or as a
+  /// proto enum such as `PRODUCT_GROK_BOT`.
+  static func productLabel(_ product: String) -> String {
+    var key = XSubscriptionPlan.compact(product)
+    if key.hasPrefix("product"), key.count > "product".count { key.removeFirst("product".count) }
+    switch key {
     case "grokbuild": return "Grok Build share"
     case "grokchat": return "Grok Chat share"
+    case "cursor": return "Cursor share"
+    case "grokbot": return "Grok Bot share"
+    case "grokimagine", "imagine": return "Grok Imagine share"
+    case "grokvoice", "voice": return "Grok Voice share"
+    case "grokapi", "api": return "Grok API share"
     default: return product + " share"
     }
   }
@@ -338,6 +348,9 @@ enum GrokPlanFormatter {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
+    // A bare "Premium" is now The X Subscription tier; the older standalone
+    // X Premium plans are reported with their `x_` prefix.
+    if let tier = XSubscriptionPlan.tier(from: trimmed) { return tier }
     let normalized = trimmed.lowercased()
       .replacingOccurrences(of: "_", with: "")
       .replacingOccurrences(of: "-", with: "")
