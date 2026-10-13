@@ -169,8 +169,9 @@ recognises a tier as a bare name, an `x_subscription_` slug, a
 `x_premium`, `x_premium_plus` and `supergrok*` names, so a bare "Premium" is
 the new tier rather than X Premium. Grok's product shares now also name
 Cursor, Grok Bot, Imagine, Voice and the API, in camel-case or `PRODUCT_`
-enum form. Cursor's formatter takes a tier only when it cannot be a Cursor
-plan name, so a standalone "free" plan still reads as Hobby. As of 2026-10-13
+enum form. Cursor's formatter takes every tier except a bare "free", which is
+still Cursor's own Hobby plan, and its cost fallback knows the tier prices
+($0, $8, $30, $100, $200). As of 2026-10-13
 no switched account has been read live: the shapes above are covered by
 fixtures, and the exact strings should be confirmed with
 `reserve-probe grok` and `reserve-probe cursor` on a switched account.

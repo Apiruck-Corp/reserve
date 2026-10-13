@@ -15,16 +15,24 @@ enum XSubscriptionPlan {
   /// The tier name, or nil when the value does not name an X Subscription tier.
   static func tier(from value: String) -> String? {
     var remainder = self.compact(value)
-    for prefix in ["the", "xsubscription", "subscriptiontier", "tier", "plan"]
-    where remainder.hasPrefix(prefix) && remainder.count > prefix.count {
-      remainder.removeFirst(prefix.count)
-    }
-    // Team seats are the same tiers ("Premium Team", "team_premium").
-    for affix in ["team", "teams", "individual"] {
-      if remainder.hasSuffix(affix), remainder.count > affix.count {
-        remainder.removeLast(affix.count)
-      } else if remainder.hasPrefix(affix), remainder.count > affix.count {
-        remainder.removeFirst(affix.count)
+    // Strip until nothing changes, so the order of the wrapping words does not
+    // matter ("plan_x_subscription_premium"). Longer words come first, so
+    // "teams" is not cut down to a stray "s". Team seats are the same tiers.
+    let prefixes = [
+      "the", "xsubscription", "subscriptiontier", "subscription", "tier", "plan", "teams",
+      "team", "individual",
+    ]
+    let suffixes = ["teams", "team", "individual", "plan", "tier"]
+    var stripped = true
+    while stripped {
+      stripped = false
+      for prefix in prefixes where remainder.hasPrefix(prefix) && remainder.count > prefix.count {
+        remainder.removeFirst(prefix.count)
+        stripped = true
+      }
+      for suffix in suffixes where remainder.hasSuffix(suffix) && remainder.count > suffix.count {
+        remainder.removeLast(suffix.count)
+        stripped = true
       }
     }
     return self.tiers.first { $0.lowercased() == remainder }

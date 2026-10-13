@@ -11,7 +11,8 @@ struct XSubscriptionTests {
   func tierNamesAreRecognisedInEveryReportedShape() {
     for value in [
       "Premium", "premium", "PREMIUM", "x_subscription_premium", "The X Subscription Premium",
-      "SUBSCRIPTION_TIER_PREMIUM", "premium_team", "Premium Team",
+      "SUBSCRIPTION_TIER_PREMIUM", "premium_team", "Premium Team", "teams_premium",
+      "plan_x_subscription_premium", "x_subscription_premium_teams", "PREMIUM_PLAN",
     ] {
       #expect(XSubscriptionPlan.tier(from: value) == "Premium", "\(value)")
     }
@@ -26,7 +27,7 @@ struct XSubscriptionTests {
     for value in [
       "x_premium", "X Premium", "x_premium_plus", "X Premium+", "supergrok", "SuperGrok",
       "supergrok_heavy", "supergrok_plus", "x_basic", "The X Subscription", "pro", "pro_plus",
-      "", "premiums", "superpremium",
+      "", "premiums", "superpremium", "x_premium_team", "team_x_premium", "supergrok_team",
     ] {
       #expect(XSubscriptionPlan.tier(from: value) == nil, "\(value)")
     }
@@ -37,6 +38,8 @@ struct XSubscriptionTests {
     #expect(GrokPlanFormatter.plan(from: "Premium") == "Premium")
     #expect(GrokPlanFormatter.plan(from: "x_subscription_super") == "Super")
     #expect(GrokPlanFormatter.plan(from: "ultra") == "Ultra")
+    #expect(GrokPlanFormatter.plan(from: "teams_premium") == "Premium")
+    #expect(GrokPlanFormatter.plan(from: "plan_x_subscription_premium") == "Premium")
     #expect(GrokPlanFormatter.plan(from: "x_premium") == "X Premium")
     #expect(GrokPlanFormatter.plan(from: "X Premium") == "X Premium")
     #expect(GrokPlanFormatter.plan(from: "x_premium_plus") == "X Premium+")
@@ -51,6 +54,10 @@ struct XSubscriptionTests {
     #expect(CursorPlanFormatter.plan(from: "super") == "Super")
     #expect(CursorPlanFormatter.plan(from: "x_subscription_plus") == "Plus")
     #expect(CursorPlanFormatter.plan(from: "x_subscription_free") == "Free")
+    #expect(CursorPlanFormatter.plan(from: "SUBSCRIPTION_TIER_FREE") == "Free")
+    #expect(CursorPlanFormatter.plan(from: "SUBSCRIPTION_TIER_PREMIUM") == "Premium")
+    #expect(CursorPlanFormatter.plan(from: "Premium Team") == "Premium")
+    #expect(CursorPlanFormatter.plan(from: "teams_super") == "Super")
     // Standalone Cursor plans are unchanged.
     #expect(CursorPlanFormatter.plan(from: "free") == "Hobby")
     #expect(CursorPlanFormatter.plan(from: "pro") == "Pro")

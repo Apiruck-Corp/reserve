@@ -2231,7 +2231,13 @@ final class UsageStore {
     case "hobby": return 0
     case "pro": return 20
     case "pro plus", "pro+": return 60
+    // Cursor Ultra and The X Subscription's Ultra are both $200; the other
+    // X Subscription tiers appear once a Cursor account has switched.
     case "ultra": return 200
+    case "free": return 0
+    case "plus": return 8
+    case "premium": return 30
+    case "super": return 100
     default: return nil
     }
   }
