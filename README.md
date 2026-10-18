@@ -300,8 +300,10 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   cannot read billing, Reserve checks it through the Models API and shows
   "Key valid" with billing unavailable when that succeeds. The details retain
   the billing HTTP status without repeating provider error text or credentials.
-  Personal/service-account keys use Bearer authentication; legacy admin keys
-  keep x-api-key. If Anthropic explicitly requires a workspace execution context,
+  Organization endpoints use the Admin API guide's `x-api-key` header, including
+  personal/service-account keys; model validation uses Bearer authentication.
+  Request failures include fixed diagnostic categories, never provider free text.
+  If Anthropic explicitly requires a workspace execution context,
   Reserve discovers the default active workspace and retries with the documented
   `anthropic-workspace-id` header. This does not narrow the organization cost report.
   A failed latest check is shown even when an older reading exists, and replacing

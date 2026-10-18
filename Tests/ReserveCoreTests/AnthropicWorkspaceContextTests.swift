@@ -22,7 +22,8 @@ struct AnthropicWorkspaceContextTests {
     let client = APIConsumptionClient(requestHandler: { request in
       await sent.add(request)
       #expect(request.url?.host == "api.anthropic.com")
-      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-ant-usr-fixture")
+      #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+      #expect(request.value(forHTTPHeaderField: "x-api-key") == "sk-ant-usr-fixture")
       #expect(request.httpMethod == nil || request.httpMethod == "GET")
       if request.url?.path == "/v1/organizations/workspaces" {
         let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
@@ -135,5 +136,14 @@ struct AnthropicWorkspaceContextTests {
     #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data(#"{"error":{"type":"invalid_request_error","message":"anthropic-workspace-id header must be a valid workspace ID."}}"#.utf8)))
     #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data("not json".utf8)))
     #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data(repeating: 65, count: 16_385)))
+  }
+
+  @Test func rejectionHintsReturnOnlyFixedCategories() {
+    let body = Data(#"{"error":{"type":"invalid_request_error","message":"Missing workspace header for API key sk-ant-usr-secret-fixture and organization org_private."}}"#.utf8)
+    #expect(APIConsumptionClient.anthropicRequestErrorHints(body)
+      == " Response categories: workspace context, organization scope, API key, request header, required input.")
+    #expect(APIConsumptionClient.anthropicRequestErrorHints(Data(#"{"error":{"message":"sk-ant-usr-secret-fixture"}}"#.utf8)).isEmpty)
+    #expect(APIConsumptionClient.anthropicRequestErrorHints(Data("not JSON".utf8)).isEmpty)
+    #expect(APIConsumptionClient.anthropicRequestErrorHints(Data(repeating: 65, count: 16_385)).isEmpty)
   }
 }

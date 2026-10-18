@@ -572,11 +572,11 @@ public struct APIConsumptionClient: Sendable {
       "Anthropic requires a workspace context. Reserve could not identify a single default workspace.")
   }
 
-  /// Current personal/service-account keys use the documented Bearer form.
-  /// Legacy Admin keys retain the x-api-key authentication in Admin API examples.
+  /// The Admin API guide specifies x-api-key for identity keys too; the
+  /// general API guide uses Bearer. Follow each endpoint's documented form.
   private static func anthropicRequest(url: URL, key: String, workspaceID: String? = nil) -> URLRequest {
     var request = URLRequest(url: url)
-    if key.hasPrefix("sk-ant-admin") {
+    if key.hasPrefix("sk-ant-admin") || url.path.hasPrefix("/v1/organizations/") {
       request.setValue(key, forHTTPHeaderField: "x-api-key")
     } else {
       request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -1084,7 +1084,8 @@ public struct APIConsumptionClient: Sendable {
         default: endpoint = "API"
         }
         throw UsageProviderError.invalidResponse(
-          "Anthropic \(endpoint) rejected the request (HTTP \(http.statusCode)).")
+          "Anthropic \(endpoint) rejected the request (HTTP \(http.statusCode))."
+            + Self.anthropicRequestErrorHints(data))
       }
       throw UsageProviderError.invalidResponse(
         "\(provider.displayName) rejected this consumption request (HTTP \(http.statusCode)).")
@@ -1103,6 +1104,36 @@ public struct APIConsumptionClient: Sendable {
     else { return false }
     let normalized = message.lowercased()
     return normalized.contains("anthropic-workspace-id") && normalized.contains("is required")
+  }
+
+  /// Fixed categories provide a useful diagnosis without returning provider
+  /// text, identifiers, or even a fragment of a credential echoed in an error.
+  static func anthropicRequestErrorHints(_ data: Data) -> String {
+    guard data.count <= 16_384,
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let error = root["error"] as? [String: Any], let message = error["message"] as? String
+    else { return "" }
+    let text = message.lowercased()
+    let categories: [(String, [String])] = [
+      ("workspace context", ["workspace"]),
+      ("organization scope", ["organization", "organisation"]),
+      ("API version", ["anthropic-version"]),
+      ("request limit", ["limit"]),
+      ("OAuth", ["oauth"]),
+      ("authentication", ["authentication", "authorization", "bearer", "x-api-key"]),
+      ("API key", ["api key", "api_key"]),
+      ("access permission", ["permission", "access denied", "not authorized"]),
+      ("account billing", ["billing", "credit", "balance", "subscription"]),
+      ("request header", ["header"]),
+      ("required input", ["required", "missing", "must provide", "must specify"]),
+      ("invalid input", ["invalid", "malformed"]),
+      ("unsupported operation", ["not supported", "unsupported", "not available"]),
+      ("beta feature", ["beta"]),
+    ]
+    let matched = categories.compactMap { label, terms in
+      terms.contains(where: text.contains) ? label : nil
+    }
+    return matched.isEmpty ? "" : " Response categories: " + matched.joined(separator: ", ") + "."
   }
 
   /// The key the request carried, only to tell an admin key from another.

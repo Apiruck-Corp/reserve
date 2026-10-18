@@ -153,11 +153,11 @@ struct APIConsumptionDetailsTests {
     let client = APIConsumptionClient(requestHandler: { request in
       await sent.add(request)
       #expect(request.url?.host == "api.anthropic.com")
-      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-ant-api03-test")
-      #expect(request.value(forHTTPHeaderField: "x-api-key") == nil)
+      let models = request.url?.path == "/v1/models"
+      #expect(request.value(forHTTPHeaderField: "Authorization") == (models ? "Bearer sk-ant-api03-test" : nil))
+      #expect(request.value(forHTTPHeaderField: "x-api-key") == (models ? nil : "sk-ant-api03-test"))
       #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
       #expect(request.httpMethod == nil || request.httpMethod == "GET")
-      let models = request.url?.path == "/v1/models"
       let body = models
         ? #"{"data":[{"id":"claude-test","display_name":"Claude test"}],"has_more":false}"#
         : #"{"error":{"type":"authentication_error"}}"#
@@ -174,12 +174,12 @@ struct APIConsumptionDetailsTests {
   }
 
   @Test(arguments: ["sk-ant-usr-fixture-personal", "sk-ant-svc-fixture-service", "sk-ant-api03-fixture-legacy"])
-  func billingKeysUseDocumentedBearerAuthentication(_ key: String) async throws {
+  func billingKeysUseDocumentedAdminAPIAuthentication(_ key: String) async throws {
     let sent = Sent()
     let client = APIConsumptionClient(requestHandler: { request in
       await sent.add(request)
-      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(key)")
-      #expect(request.value(forHTTPHeaderField: "x-api-key") == nil)
+      #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+      #expect(request.value(forHTTPHeaderField: "x-api-key") == key)
       #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
       return (Data(#"{"data":[{"results":[{"amount":"123.00"}]}]}"#.utf8),
         HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
