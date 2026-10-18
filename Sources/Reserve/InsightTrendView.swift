@@ -15,17 +15,17 @@ final class InsightTrendView: NSView {
     self.addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseMoved, .inVisibleRect], owner: self))
   }
   required init?(coder: NSCoder) { nil }
-  // Washed pastels bring more light and color to the charts without neon
-  // saturation. Dark-mode variants keep the same hues with a softer, brighter tint.
+  // Light, clear tints retain their hue rather than fading toward gray.
+  // Brighter dark-mode variants keep provider colors consistent on both surfaces.
   private static let palette: [ProviderKind: NSColor] = [
-    .openAI: tone(light: 0x78A7D2, dark: 0xADD5F5),      // Powder blue
-    .anthropic: tone(light: 0xD99A80, dark: 0xF2BDA5),   // Peach
-    .grok: tone(light: 0xAC98CD, dark: 0xD3BEEF),        // Lavender
-    .cursor: tone(light: 0x76B39C, dark: 0xA2DCC3),      // Mint
-    .copilot: tone(light: 0xCE93B1, dark: 0xEABAD0),     // Rose
-    .gemini: tone(light: 0x929FD1, dark: 0xBDC8F1),      // Periwinkle
-    .kimi: tone(light: 0xC4AC70, dark: 0xE8D29B),        // Butter yellow
-    .zai: tone(light: 0xA4B783, dark: 0xC9DDAA),         // Pistachio
+    .openAI: tone(light: 0x70B2EB, dark: 0x9FD3FF),      // Sky blue
+    .anthropic: tone(light: 0xF19B87, dark: 0xFFB9A5),   // Soft coral
+    .grok: tone(light: 0xB394E6, dark: 0xD2B4FF),        // Lilac
+    .cursor: tone(light: 0x68CBA6, dark: 0x92E8C4),      // Fresh mint
+    .copilot: tone(light: 0xE58DBB, dark: 0xF6ACD0),     // Pink
+    .gemini: tone(light: 0x95A7F0, dark: 0xB8C8FF),      // Periwinkle
+    .kimi: tone(light: 0xE0BD67, dark: 0xF1D38B),        // Soft gold
+    .zai: tone(light: 0xA7CC75, dark: 0xCAE899),         // Light green
   ]
 
   static func color(_ provider: ProviderID) -> NSColor {
