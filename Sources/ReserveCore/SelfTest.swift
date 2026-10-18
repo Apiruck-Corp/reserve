@@ -378,7 +378,8 @@ public enum ReserveSelfTests {
           url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
         return (anthropicData, response)
       },
-      rateLimitGate: anthropicGate)
+      rateLimitGate: anthropicGate,
+      configDirectory: ClaudeConfigDirectory(path: anthropicDirectory.path))
     let anthropicSnapshot = try await anthropicProvider.fetch()
     guard anthropicSnapshot.provider == .anthropic,
       anthropicSnapshot.planName == "Pro",
@@ -410,7 +411,8 @@ public enum ReserveSelfTests {
           headerFields: ["Retry-After": "60"])!
         return (Data(), response)
       },
-      rateLimitGate: rateLimitedGate)
+      rateLimitGate: rateLimitedGate,
+      configDirectory: ClaudeConfigDirectory(path: anthropicDirectory.path))
     let beforeBackoff = Date()
     do {
       _ = try await rateLimitedProvider.fetch()

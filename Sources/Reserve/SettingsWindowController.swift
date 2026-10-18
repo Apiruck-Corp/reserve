@@ -525,7 +525,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         ? "≈ \(Self.moneyOrUnavailable(apiValue)) estimated API value for \(rangeLabel). \(coverage). \(priced)."
         : "≈ \(Self.moneyOrUnavailable(apiValue)) estimated API value for \(rangeLabel). \(coverage). \(priced). "
           + "\(DashboardFormat.money(planTotal))/month across \(trackedPlans) is a separate reference."
-    let activityFooter: String
+    var activityFooter: String
     if states.contains(where: {
       $0.provider == .openAI && $0.localUsage == nil
         && $0.snapshot?.accountTokenActivity?.dailyUsageBuckets?.isEmpty == false
@@ -541,6 +541,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         + "not included."
     }
 
+    if self.store.hasUnattributedClaudeHistory(for: .anthropic) {
+      activityFooter += " Claude's default-folder history is counted once. Added-account logs are not included; existing logs do not identify personal versus Team usage."
+    }
     return (states, published, totalText, activityFooter)
   }
 
@@ -1193,6 +1196,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// Where each number came from, so estimates cannot masquerade as authority.
   private func tokenSourceText(_ provider: ProviderID) -> String {
     let state = self.store.states[provider]
+    if self.store.hasUnattributedClaudeHistory(for: provider) {
+      return "Tokens · account split unavailable · device total in Insights"
+    }
     if let usage = state?.localUsage {
       return usage.origin == .providerAccount
         ? "Tokens and value · provider-reported account data"
@@ -1938,7 +1944,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func insightRow(_ provider: ProviderID) -> NSView {
     let logo = SettingsProviderLogo(provider: provider)
-    let name = SettingsLabel(provider.displayName, size: 13, color: .labelColor)
+    let name = SettingsLabel(self.store.insightHistoryName(for: provider), size: 13, color: .labelColor)
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let series = self.store.insightSeries(for: provider)
     let state = self.store.states[provider]
@@ -2129,7 +2135,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func heatmapRow(_ series: InsightHistorySeries) -> NSView {
-    let name = SettingsLabel(series.provider.displayName, size: 12, color: .secondaryLabelColor)
+    let name = SettingsLabel(self.store.insightHistoryName(for: series.provider), size: 12, color: .secondaryLabelColor)
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let chart = UsageHeatmapView(series: series)
     chart.widthAnchor.constraint(

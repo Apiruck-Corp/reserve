@@ -86,7 +86,22 @@ that folder, spelled the same way; changing the folder starts the card over.
 its sign-in on disk; for a key plan it also deletes the key Reserve saved. To
 use an added account in your own terminal, run the helper with its variable
 (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`) pointing at its folder.
-Activity from this Mac is not yet counted for added accounts.
+Activity from this Mac is not yet counted for added accounts. Claude's first
+card always reads its ordinary home, even when Reserve is launched from a
+terminal using another `CLAUDE_CONFIG_DIR`. Before accepting limits, Reserve
+checks that the sign-in's organization matches that folder's account profile;
+a shared email alone is not enough. Once verified, the card keeps that
+organization binding across restarts. If Claude Code switches organizations,
+Reserve asks for a new sign-in instead of silently replacing the card's limits.
+Passive status-line readings cannot replace verified limits while tracking
+multiple Claude accounts.
+
+After tracking several Claude accounts, Reserve keeps local Claude token totals
+in Insights as **Claude on this Mac**, separate from subscription cards. Existing
+transcripts do not identify the organization responsible for each message, so
+Reserve cannot reliably split that history between personal and Team plans.
+This history is counted once and covers the default Claude folder; added-account
+folders are not scanned. Provider-reported limits remain separate for each account.
 
 For API spend, choosing a provider whose first key is already saved adds a
 second account in **Settings > API** with its own key field, for example a

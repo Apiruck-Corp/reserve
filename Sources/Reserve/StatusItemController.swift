@@ -1444,7 +1444,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// includes account, organization, email, path, or raw error text.
   private func shareSelectedUsage() {
     let provider = self.store.expandedProvider ?? self.store.accounts.first { self.store.isEnabled($0) }
-    guard let provider, let state = self.store.states[provider] else { return }
+    guard let provider, let state = self.store.orderedStates.first(where: { $0.provider == provider }) else { return }
     let usage = state.snapshot?.accountUsage ?? state.localUsage
     let model = UsageShareCardBuilder.model(
       provider: provider,
