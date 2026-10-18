@@ -324,6 +324,9 @@ OpenAI and Anthropic admin keys and xAI management keys can only read billing.
 Ordinary Anthropic, OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also
 call models, so create one just for Reserve.
 
+Settings updates and clears API error explanations even while a key field has
+focus, so a previous key's error cannot linger while a fresh result arrives.
+
 Where a provider groups its billing, Reserve asks for the grouping and shows
 what the spend went on: models for Anthropic, billing line items for OpenAI.
 The card names a model only when one of them is most of the bill; the full

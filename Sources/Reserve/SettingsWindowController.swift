@@ -1346,14 +1346,17 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     // Why the provider refused or failed, in full: the status line above has
     // room only for "Needs attention".
-    if let error = self.store.apiConsumptionErrors[provider] {
-      let reason = NSTextField(wrappingLabelWithString: error)
-      reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
-      reason.font = .systemFont(ofSize: 11)
-      reason.textColor = .secondaryLabelColor
-      reason.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
-      rowViews.append(reason)
-    }
+    // Keep the error label installed even without an error. A refresh can finish
+    // while the credential editor has focus, when structural rebuilds are deferred.
+    // Live updates must still replace or clear the previous key's explanation.
+    let error = self.store.apiConsumptionErrors[provider]
+    let reason = NSTextField(wrappingLabelWithString: error ?? "")
+    reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
+    reason.font = .systemFont(ofSize: 11)
+    reason.textColor = .secondaryLabelColor
+    reason.isHidden = error == nil
+    reason.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    rowViews.append(reason)
     let row = NSStackView(views: rowViews)
     row.identifier = NSUserInterfaceItemIdentifier("api-provider-\(provider.rawValue)")
     row.orientation = .vertical
@@ -2972,6 +2975,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         let saved = self.store.hasAPIConsumptionKey(provider)
         check("api-enabled-\(provider.rawValue)", self.store.isAPIConsumptionEnabled(provider))
         setText("api-status-\(provider.rawValue)", self.apiReading(for: provider, saved: saved))
+        let error = self.store.apiConsumptionErrors[provider]
+        setText("api-error-\(provider.rawValue)", error ?? "")
+        field("api-error-\(provider.rawValue)")?.isHidden = error == nil
         field("api-status-\(provider.rawValue)")?.toolTip =
           self.store.apiConsumptionErrors[provider]
           ?? self.store.apiConsumption[provider]?.breakdownSummary
