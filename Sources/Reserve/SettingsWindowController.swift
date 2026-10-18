@@ -2833,6 +2833,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard send(currentMetric), self.insightFilters.metric == .limits,
       control("insights-breakdown-group", as: NSSegmentedControl.self) == nil else { return false }
     return loads == self.store.dailyHistoryLoadCountForTesting
+      && InsightTrendView.validateCurvesForSelfTest()
   }
 
   // MARK: - Self test

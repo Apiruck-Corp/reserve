@@ -342,6 +342,8 @@ Insights has provider and source filters, Cost / Tokens / Limits views, and
 Today, 7-, 30-, and 90-day ranges. Daily trends, provider shares, token-type
 totals, cache savings, and searchable model / day / provider breakdowns use
 published history without rescanning session files when filters change.
+Smooth trend lines connect available days across gaps; missing days remain
+unavailable in the heatmap, tooltips, and totals.
 The daily heatmap includes local history and provider-reported daily history
 (such as Cursor), with each row's source and coverage labeled. Recorded history
 remains visible when live monitoring for a provider is disabled. Missing days
