@@ -1253,7 +1253,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.apiReading(for: provider, saved: saved), size: 12, color: .secondaryLabelColor)
     status.identifier = NSUserInterfaceItemIdentifier("api-status-\(provider.rawValue)")
     status.toolTip =
-      self.store.apiConsumptionErrors[provider]
+      self.apiExplanation(for: provider)
       ?? self.store.apiConsumption[provider]?.breakdownSummary
       ?? status.stringValue
     status.lineBreakMode = .byTruncatingTail
@@ -1332,16 +1332,37 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     var rowViews: [NSView] = [heading, fields]
     if self.apiAccountTakesName(provider) { rowViews.append(self.apiAccountNameRow(provider)) }
+    let help: String?
+    switch provider.provider {
+    case .anthropic:
+      help = "Spend reporting requires a Claude Console organization. Individual accounts do not support the Admin API. "
+        + "Use an organization-scoped key with billing access; key scope alone does not change account type."
+    case .typeSafe:
+      help = "TypeSafe reports available models, descriptions and release dates. "
+        + "Its documented API does not expose account spend or balance."
+    default: help = nil
+    }
+    if let help {
+      let explanation = NSTextField(wrappingLabelWithString: help)
+      explanation.identifier = NSUserInterfaceItemIdentifier("api-help-\(provider.rawValue)")
+      explanation.font = .systemFont(ofSize: 11)
+      explanation.textColor = .secondaryLabelColor
+      explanation.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+      rowViews.append(explanation)
+    }
     // Why the provider refused or failed, in full: the status line above has
     // room only for "Needs attention".
-    if let error = self.store.apiConsumptionErrors[provider] {
-      let reason = NSTextField(wrappingLabelWithString: error)
-      reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
-      reason.font = .systemFont(ofSize: 11)
-      reason.textColor = .secondaryLabelColor
-      reason.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
-      rowViews.append(reason)
-    }
+    // Keep the error label installed even without an error. A refresh can finish
+    // while the credential editor has focus, when structural rebuilds are deferred.
+    // Live updates must still replace or clear the previous key's explanation.
+    let error = self.apiExplanation(for: provider)
+    let reason = NSTextField(wrappingLabelWithString: error ?? "")
+    reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
+    reason.font = .systemFont(ofSize: 11)
+    reason.textColor = .secondaryLabelColor
+    reason.isHidden = error == nil
+    reason.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    rowViews.append(reason)
     let row = NSStackView(views: rowViews)
     row.identifier = NSUserInterfaceItemIdentifier("api-provider-\(provider.rawValue)")
     row.orientation = .vertical
@@ -1860,6 +1881,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     NSWorkspace.shared.open(url)
   }
 
+  /// Model validation can succeed while billing fails. Keep that sanitized
+  /// billing response visible in Settings alongside the model-only reading.
+  private func apiExplanation(for provider: APIAccountID) -> String? {
+    if let error = self.store.apiConsumptionErrors[provider] { return error }
+    guard provider.provider == .anthropic,
+      let snapshot = self.store.apiConsumption[provider], snapshot.source == "Anthropic Models API"
+    else { return nil }
+    return snapshot.details.first { $0.label == "Billing response" }?.value
+  }
+
   private func apiReading(for provider: APIAccountID, saved: Bool) -> String {
     switch self.store.apiConsumptionKeyAvailability(provider) {
     case .unknown: return "Checking Keychain…"
@@ -1868,7 +1899,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     if self.store.apiConsumptionRefreshing.contains(provider) { return "Measuring…" }
     let snapshot = self.store.apiConsumption[provider]
-    if self.store.apiConsumptionErrors[provider] != nil, snapshot == nil { return "Needs attention" }
+    if self.store.apiConsumptionErrors[provider] != nil {
+      return snapshot == nil ? "Needs attention" : "Latest check failed"
+    }
     if let note = snapshot?.note {
       return [note.headline, note.detail].compactMap { $0 }.joined(separator: " · ")
     }
@@ -2872,7 +2905,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
         // The name field appears once a provider has a second account.
         parts.append(self.apiAccountTakesName(provider) ? "named" : "-")
-        parts.append(self.store.apiConsumptionErrors[provider] ?? "-")
+        parts.append(self.apiExplanation(for: provider) ?? "-")
       }
     case .insights:
       let enabled = self.store.accounts.filter { self.store.isEnabled($0) }
@@ -2960,8 +2993,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         let saved = self.store.hasAPIConsumptionKey(provider)
         check("api-enabled-\(provider.rawValue)", self.store.isAPIConsumptionEnabled(provider))
         setText("api-status-\(provider.rawValue)", self.apiReading(for: provider, saved: saved))
+        let error = self.apiExplanation(for: provider)
+        setText("api-error-\(provider.rawValue)", error ?? "")
+        field("api-error-\(provider.rawValue)")?.isHidden = error == nil
         field("api-status-\(provider.rawValue)")?.toolTip =
-          self.store.apiConsumptionErrors[provider]
+          self.apiExplanation(for: provider)
           ?? self.store.apiConsumption[provider]?.breakdownSummary
           ?? field("api-status-\(provider.rawValue)")?.stringValue
       }

@@ -308,15 +308,42 @@ Settings > API measures consumption instead of subscription limits. Paste a key
 there. It stays in the macOS Keychain on this Mac and is off until you save one:
 
 - OpenAI, an organization admin key, read from the Costs API;
-- Anthropic, an organization admin key, read from the Cost Report API;
+- Anthropic, an organization-scoped personal/service-account key whose linked
+  account can read billing, or a legacy admin key, read from the Cost Report API.
+  **A configured Claude Console organization is required.** Anthropic's
+  [Admin API](https://platform.claude.com/docs/en/manage-claude/admin-api) is unavailable
+  to Individual accounts, including those with an Organization-scoped personal key.
+  Key scope does not change account type. Organization setup is available on the
+  [Console Organization page](https://platform.claude.com/settings/organization).
+  Create current keys on [Claude Console's API keys page](https://platform.claude.com/settings/keys)
+  and choose Organization scope. If an ordinary key
+  cannot read billing, Reserve checks it through the Models API and shows
+  "Key valid" with billing unavailable when that succeeds. The details retain
+  the billing HTTP status without repeating provider error text or credentials.
+  Organization endpoints use the Admin API guide's `x-api-key` header, including
+  personal/service-account keys; model validation uses Bearer authentication.
+  Request failures include fixed diagnostic categories, never provider free text.
+  If an HTTP 400 explicitly names the absent workspace header,
+  Reserve discovers the default active workspace and retries with the documented
+  `anthropic-workspace-id` header. This does not narrow the organization cost report.
+  Recovery does not depend on a particular error sentence and cannot repeat once
+  the header is supplied.
+  A failed latest check is shown even when an older reading exists, and replacing
+  a key clears that previous key's validation. This makes no model calls and does
+  not invent a zero spend reading;
 - OpenRouter, the API key itself, read from that key's usage endpoint: today,
   this week, this month, and the credit balance when the key is capped;
 - xAI, a management key, read from the prepaid balance API: spend against
   purchased credits when the transaction list explains the balance, and the
   remaining balance on its own when it does not;
 - TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
-  endpoint, so Reserve lists the models that key can send and the documented
-  input price. It does not call System One, which would consume the account;
+  endpoint, so Reserve lists model names, descriptions and release dates.
+  Expanded details distinguish the published price and default context limits
+  from live account data, and direct you to the console for organization rate
+  limits. The summary explicitly says spend is unavailable. It does not call
+  System One, which would consume the account. Published facts come from
+  [TypeSafe's model documentation](https://docs.typesafe.ai/models), checked
+  October 18, 2026;
 - DeepSeek, an API key, read from the user balance endpoint: the remaining
   balance in the currency DeepSeek reports (USD first when the account holds
   both USD and CNY), split into granted and topped-up credit, and whether the
@@ -326,9 +353,12 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   vouchers and cash. Keys from the China platform (api.moonshot.cn) are not
   supported.
 
-OpenAI and Anthropic admin keys and xAI management keys can only read billing.
-OpenRouter, TypeSafe, DeepSeek and Moonshot have no read-only key: the key you
-paste can also call models, so create one just for Reserve.
+OpenAI and Anthropic admin keys and xAI management keys do not perform inference.
+Ordinary Anthropic, OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also
+call models, so create one just for Reserve.
+
+Settings updates and clears API error explanations even while a key field has
+focus, so a previous key's error cannot linger while a fresh result arrives.
 
 Where a provider groups its billing, Reserve asks for the grouping and shows
 what the spend went on: models for Anthropic, billing line items for OpenAI.

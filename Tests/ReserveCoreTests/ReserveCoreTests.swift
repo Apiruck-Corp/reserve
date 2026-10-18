@@ -253,7 +253,7 @@ struct APIConsumptionTests {
     #expect(snapshot.primary == nil)
     #expect(snapshot.note?.headline == "2 models")
     #expect(snapshot.note?.detail?.contains("jev-latest, jev-preview") == true)
-    #expect(snapshot.note?.detail?.contains("$0.042 per million tokens in") == true)
+    #expect(snapshot.note?.detail?.contains("spend unavailable") == true)
     let paths = await requests.value.compactMap { $0.url?.path }
     #expect(paths == ["/v1/models"])
   }

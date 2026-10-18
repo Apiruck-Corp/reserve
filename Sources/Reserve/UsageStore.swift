@@ -3753,6 +3753,8 @@ final class UsageStore {
 
   private func adoptSavedAPIKey(_ provider: APIAccountID) {
     self.invalidateAPIWork(provider)
+    // A result obtained with the previous key cannot validate its replacement.
+    self.apiConsumption[provider] = nil
     self.apiKeyCache[provider] = .present
     self.apiSchedules[provider] = nil
     self.keychainProbeFailures[self.apiProbeID(provider)] = 0
