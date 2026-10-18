@@ -31,13 +31,13 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   }
 
   /// What kind of key the provider issues. OpenAI and Anthropic admin keys and
-  /// xAI management keys read billing and cannot call a model. OpenRouter,
-  /// TypeSafe, DeepSeek and Moonshot issue ordinary API keys: the key that reads
-  /// the account can also call models, so a dedicated key is the one to paste.
+  /// xAI management keys read billing and cannot call a model. Ordinary Anthropic,
+  /// OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also call models,
+  /// so a dedicated key is the one to paste.
   public var keyKind: String {
     switch self {
     case .openAI: "Admin key"
-    case .anthropic: "Admin key"
+    case .anthropic: "API key"
     case .openRouter: "API key"
     case .xAI: "Management key"
     case .typeSafe: "API key"
@@ -516,6 +516,47 @@ public struct APIConsumptionClient: Sendable {
   /// defaults to 7 buckets, so a month has to ask for 31 and then follow the
   /// cursor, or the reading silently stops a week into the month.
   private func fetchAnthropic(_ key: String) async throws -> APIConsumptionSnapshot {
+    do {
+      return try await self.fetchAnthropicCosts(key)
+    } catch UsageProviderError.unauthorized where !key.hasPrefix("sk-ant-admin") {
+      // A workspace key can be valid for models and refused by the Admin API.
+      // Try billing first: unscoped personal/service-account keys can read it too.
+      return try await self.validateAnthropicModelKey(key)
+    }
+  }
+
+  private func validateAnthropicModelKey(_ key: String) async throws -> APIConsumptionSnapshot {
+    var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!)
+    request.setValue(key, forHTTPHeaderField: "x-api-key")
+    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+    let data: Data
+    do {
+      data = try await self.data(for: request, provider: .anthropic)
+    } catch UsageProviderError.unauthorized {
+      // Billing refusal alone cannot establish that an ordinary key is invalid.
+      // Do not expose either endpoint's free-text error, which can echo secrets.
+      throw UsageProviderError.unauthorized(
+        "Anthropic could not validate this API key. Check that it is active in Claude Console. "
+          + "Spend reporting requires an admin key or an unscoped key with billing access.")
+    }
+    let page = try Self.decode(AnthropicModelsPage.self, from: data, provider: .anthropic)
+    let names = page.data.map { $0.displayName ?? $0.id }
+    return APIConsumptionSnapshot(
+      provider: .anthropic,
+      windows: [],
+      note: APIConsumptionNote(
+        headline: "Key valid",
+        detail: "Billing unavailable · use an admin key for spend"),
+      fetchedAt: self.now(),
+      source: "Anthropic Models API",
+      details: [
+        UsageDetail("Key status", "Validated by Anthropic Models API"),
+        UsageDetail("Spend reporting", "Requires an admin key or an unscoped key with billing access"),
+        UsageDetail("Models", names.isEmpty ? "None returned" : names.prefix(4).joined(separator: ", ")),
+      ])
+  }
+
+  private func fetchAnthropicCosts(_ key: String) async throws -> APIConsumptionSnapshot {
     let now = self.now()
     let start = Calendar(identifier: .gregorian).dateInterval(of: .month, for: now)?.start ?? now
     let ending = min(now, start.addingTimeInterval(31 * 24 * 60 * 60))
@@ -747,21 +788,27 @@ public struct APIConsumptionClient: Sendable {
       windows: [],
       note: APIConsumptionNote(
         headline: names.count == 1 ? "1 model" : "\(names.count) models",
-        detail: names.prefix(4).joined(separator: ", ")
-          + " · $0.042 per million tokens in, output free"),
+        detail: names.prefix(4).joined(separator: ", ") + " · spend unavailable"),
       fetchedAt: now,
       source: "TypeSafe Models API",
-      details: [UsageDetail("Price", "$0.042 per million input tokens · output free")]
-        + named.prefix(UsageDetail.maximumCount - 1).map { model in
-          let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-          let released = UsageDateParser.iso8601(model.releaseDate)
-            ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
-          // The model's own description is a paragraph: in a detail row it is
-          // truncated to a fragment that says nothing. The release date is the
-          // fact that fits, so the row carries only that.
-          return UsageDetail(
-            name, released.map { "Released \(UsageDetailFormat.date($0))" } ?? "Available")
-        })
+      // Published facts are explicitly separate from this key's live metadata.
+      // Source: https://docs.typesafe.ai/models (checked 2026-10-18).
+      details: [
+        UsageDetail("Spend and balance", "Not exposed by the documented API"),
+        UsageDetail("Published price", "$0.042 per million input tokens · output free (docs, 18 Oct 2026)"),
+        UsageDetail("Default context (docs)", "64k tokens per request · 32k per question"),
+        UsageDetail("Rate limits", "Organization-specific · see TypeSafe console"),
+      ] + named.prefix((UsageDetail.maximumCount - 4) / 2).flatMap { model in
+        let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let released = UsageDateParser.iso8601(model.releaseDate)
+          ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
+        var facts = [UsageDetail(
+          name, released.map { "Released \(UsageDetailFormat.date($0))" } ?? "Available")]
+        if let description = model.description?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty {
+          facts.append(UsageDetail("\(name) description", description))
+        }
+        return facts
+      })
   }
 
   // MARK: DeepSeek
@@ -983,7 +1030,8 @@ public struct APIConsumptionClient: Sendable {
   static func refusalMessage(
     provider: APIConsumptionProvider, status: Int, body: Data, key: String?
   ) -> String {
-    var message = "\(provider.displayName) refused this \(provider.keyKind.lowercased())."
+    let kind = provider == .anthropic ? "admin key" : provider.keyKind.lowercased()
+    var message = "\(provider.displayName) refused this \(kind)."
     switch Self.providerErrorCode(in: body) {
     case "authentication_error", "invalid_api_key", "invalid_key", "unauthorized":
       message += " The key is invalid or has been revoked."
@@ -995,7 +1043,7 @@ public struct APIConsumptionClient: Sendable {
     }
     if let prefix = provider.adminKeyPrefix, let key {
       if !key.hasPrefix(prefix) {
-        message += " If it is a regular API key, use an \(provider.keyKind.lowercased()) (\(provider.keyHint)) instead."
+        message += " If it is a regular API key, use an admin key (\(provider.keyHint)) instead."
       } else if provider == .anthropic, status == 403 {
         message += " Admin keys work only for a Claude Console organization where you are an admin."
       }
@@ -1306,6 +1354,18 @@ private struct XAValidation: Decodable {
     case teamId
     case scopeId
   }
+}
+
+private struct AnthropicModelsPage: Decodable {
+  struct Model: Decodable {
+    let id: String
+    let displayName: String?
+    enum CodingKeys: String, CodingKey {
+      case id
+      case displayName = "display_name"
+    }
+  }
+  let data: [Model]
 }
 
 private struct TypeSafeModelsPage: Decodable {

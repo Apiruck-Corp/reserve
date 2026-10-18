@@ -293,15 +293,24 @@ Settings > API measures consumption instead of subscription limits. Paste a key
 there. It stays in the macOS Keychain on this Mac and is off until you save one:
 
 - OpenAI, an organization admin key, read from the Costs API;
-- Anthropic, an organization admin key, read from the Cost Report API;
+- Anthropic, an organization admin key (or an unscoped personal/service-account
+  key with billing access), read from the Cost Report API. If an ordinary key
+  cannot read billing, Reserve checks it through the Models API and shows
+  "Key valid" with billing unavailable when that succeeds. This makes no model
+  calls and does not invent a zero spend reading;
 - OpenRouter, the API key itself, read from that key's usage endpoint: today,
   this week, this month, and the credit balance when the key is capped;
 - xAI, a management key, read from the prepaid balance API: spend against
   purchased credits when the transaction list explains the balance, and the
   remaining balance on its own when it does not;
 - TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
-  endpoint, so Reserve lists the models that key can send and the documented
-  input price. It does not call System One, which would consume the account;
+  endpoint, so Reserve lists model names, descriptions and release dates.
+  Expanded details distinguish the published price and default context limits
+  from live account data, and direct you to the console for organization rate
+  limits. The summary explicitly says spend is unavailable. It does not call
+  System One, which would consume the account. Published facts come from
+  [TypeSafe's model documentation](https://docs.typesafe.ai/models), checked
+  October 18, 2026;
 - DeepSeek, an API key, read from the user balance endpoint: the remaining
   balance in the currency DeepSeek reports (USD first when the account holds
   both USD and CNY), split into granted and topped-up credit, and whether the
@@ -312,8 +321,8 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   supported.
 
 OpenAI and Anthropic admin keys and xAI management keys can only read billing.
-OpenRouter, TypeSafe, DeepSeek and Moonshot have no read-only key: the key you
-paste can also call models, so create one just for Reserve.
+Ordinary Anthropic, OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also
+call models, so create one just for Reserve.
 
 Where a provider groups its billing, Reserve asks for the grouping and shows
 what the spend went on: models for Anthropic, billing line items for OpenAI.

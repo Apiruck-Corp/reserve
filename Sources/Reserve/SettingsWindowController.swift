@@ -1326,6 +1326,24 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     var rowViews: [NSView] = [heading, fields]
     if self.apiAccountTakesName(provider) { rowViews.append(self.apiAccountNameRow(provider)) }
+    let help: String?
+    switch provider.provider {
+    case .anthropic:
+      help = "Spend requires a Claude Console admin key or an unscoped key with billing access. "
+        + "An ordinary key can be validated without making a model call."
+    case .typeSafe:
+      help = "TypeSafe reports available models, descriptions and release dates. "
+        + "Its documented API does not expose account spend or balance."
+    default: help = nil
+    }
+    if let help {
+      let explanation = NSTextField(wrappingLabelWithString: help)
+      explanation.identifier = NSUserInterfaceItemIdentifier("api-help-\(provider.rawValue)")
+      explanation.font = .systemFont(ofSize: 11)
+      explanation.textColor = .secondaryLabelColor
+      explanation.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+      rowViews.append(explanation)
+    }
     // Why the provider refused or failed, in full: the status line above has
     // room only for "Needs attention".
     if let error = self.store.apiConsumptionErrors[provider] {
