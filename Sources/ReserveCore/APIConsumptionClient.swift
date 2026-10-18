@@ -1073,7 +1073,9 @@ public struct APIConsumptionClient: Sendable {
           from: http.value(forHTTPHeaderField: "Retry-After"), now: self.now()))
     case 400, 404, 422:
       if provider == .anthropic {
-        if http.statusCode == 400, Self.anthropicRequiresWorkspace(data) {
+        if http.statusCode == 400, Self.anthropicRequiresWorkspace(
+          data, workspaceWasSupplied: request.value(forHTTPHeaderField: "anthropic-workspace-id") != nil)
+        {
           throw AnthropicWorkspaceRequired()
         }
         let endpoint: String
@@ -1095,15 +1097,16 @@ public struct APIConsumptionClient: Sendable {
     }
   }
 
-  /// Match the documented missing-context response without displaying any
-  /// free text (which could echo the credential). No recovery for other 400s.
-  static func anthropicRequiresWorkspace(_ data: Data) -> Bool {
-    guard data.count <= 16_384, Self.providerErrorCode(in: data) == "invalid_request_error",
+  /// Recover a missing workspace header without relying on a particular English
+  /// sentence. An explicit reference to that header is required, and a request
+  /// which already supplied it must never trigger discovery again.
+  static func anthropicRequiresWorkspace(_ data: Data, workspaceWasSupplied: Bool = false) -> Bool {
+    guard !workspaceWasSupplied, data.count <= 16_384,
+      Self.providerErrorCode(in: data) == "invalid_request_error",
       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
       let error = root["error"] as? [String: Any], let message = error["message"] as? String
     else { return false }
-    let normalized = message.lowercased()
-    return normalized.contains("anthropic-workspace-id") && normalized.contains("is required")
+    return message.lowercased().contains("anthropic-workspace-id")
   }
 
   /// Fixed categories provide a useful diagnosis without returning provider

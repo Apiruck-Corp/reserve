@@ -133,9 +133,48 @@ struct AnthropicWorkspaceContextTests {
   @Test func missingWorkspaceDetectionDoesNotExposeFreeTextOrMatchOtherErrors() {
     #expect(APIConsumptionClient.anthropicRequiresWorkspace(Data(Self.missing.utf8)))
     #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data(#"{"error":{"type":"authentication_error","message":"anthropic-workspace-id is required"}}"#.utf8)))
-    #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data(#"{"error":{"type":"invalid_request_error","message":"anthropic-workspace-id header must be a valid workspace ID."}}"#.utf8)))
+    #expect(!APIConsumptionClient.anthropicRequiresWorkspace(
+      Data(#"{"error":{"type":"invalid_request_error","message":"anthropic-workspace-id header must be a valid workspace ID."}}"#.utf8),
+      workspaceWasSupplied: true))
     #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data("not json".utf8)))
     #expect(!APIConsumptionClient.anthropicRequiresWorkspace(Data(repeating: 65, count: 16_385)))
+  }
+
+  @Test(arguments: [
+    "Please select a workspace for this API key with the anthropic-workspace-id header.",
+    "Use the Anthropic-Workspace-Id header to select a workspace for this API key.",
+    "Provide anthropic-workspace-id for this API key.",
+  ])
+  func workspaceRecoveryDoesNotDependOnAnExactSentence(_ message: String) async throws {
+    let body = String(decoding: try JSONSerialization.data(withJSONObject: [
+      "error": ["type": "invalid_request_error", "message": message],
+    ]), as: UTF8.self)
+    let client = APIConsumptionClient(requestHandler: { request in
+      if request.url?.path == "/v1/organizations/workspaces" {
+        return Self.reply(request, 200, Self.workspaces)
+      }
+      if request.value(forHTTPHeaderField: "anthropic-workspace-id") != nil {
+        return Self.reply(request, 200, Self.spend)
+      }
+      return Self.reply(request, 400, body)
+    })
+    #expect(try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture").primary?.usedMinorUnits == 123)
+  }
+
+  @Test func aRejectedSuppliedWorkspaceCannotRestartDiscovery() async {
+    let sent = Sent()
+    let client = APIConsumptionClient(requestHandler: { request in
+      await sent.add(request)
+      if request.url?.path == "/v1/organizations/workspaces" {
+        return Self.reply(request, 200, Self.workspaces)
+      }
+      return Self.reply(request, 400, Self.missing)
+    })
+    await #expect(throws: UsageProviderError.self) {
+      _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture")
+    }
+    #expect(await sent.value.filter { $0.url?.path == "/v1/organizations/workspaces" }.count == 1)
+    #expect(await sent.value.count == 4) // Initial, discovery, grouped and ungrouped retry.
   }
 
   @Test func rejectionHintsReturnOnlyFixedCategories() {

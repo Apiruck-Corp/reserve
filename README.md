@@ -303,9 +303,11 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   Organization endpoints use the Admin API guide's `x-api-key` header, including
   personal/service-account keys; model validation uses Bearer authentication.
   Request failures include fixed diagnostic categories, never provider free text.
-  If Anthropic explicitly requires a workspace execution context,
+  If an HTTP 400 explicitly names the absent workspace header,
   Reserve discovers the default active workspace and retries with the documented
   `anthropic-workspace-id` header. This does not narrow the organization cost report.
+  Recovery does not depend on a particular error sentence and cannot repeat once
+  the header is supplied.
   A failed latest check is shown even when an older reading exists, and replacing
   a key clears that previous key's validation. This makes no model calls and does
   not invent a zero spend reading;
