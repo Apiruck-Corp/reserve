@@ -599,7 +599,7 @@ public struct APIConsumptionClient: Sendable {
       // Do not expose either endpoint's free-text error, which can echo secrets.
       throw UsageProviderError.unauthorized(
         "Anthropic could not validate this API key. Check that it is active in Claude Console. "
-          + "Spend reporting requires organization scope and permission to read billing.")
+          + "Spend reporting requires a Console organization; Individual accounts do not support the Admin API.")
     }
     let page = try Self.decode(AnthropicModelsPage.self, from: data, provider: .anthropic)
     let names = page.data.map { $0.displayName ?? $0.id }
@@ -608,12 +608,13 @@ public struct APIConsumptionClient: Sendable {
       windows: [],
       note: APIConsumptionNote(
         headline: "Key valid",
-        detail: "Billing unavailable · check organization scope and billing permission"),
+        detail: "Billing unavailable · check Console account type and permissions"),
       fetchedAt: self.now(),
       source: "Anthropic Models API",
       details: [
         UsageDetail("Key status", "Validated by Anthropic Models API"),
-        UsageDetail("Spend reporting", "Organization scope and permission to read billing required"),
+        UsageDetail("Spend reporting", "Console organization, organization-scoped key and billing permission required"),
+        UsageDetail("Account eligibility", "Individual accounts do not support the Admin API; key scope does not change account type"),
         UsageDetail("Billing response", billingRefusal),
         UsageDetail("Credential type", key.hasPrefix("sk-ant-usr-") ? "Personal API key" : "API key"),
         UsageDetail("Models", names.isEmpty ? "None returned" : names.prefix(4).joined(separator: ", ")),
@@ -1061,7 +1062,9 @@ public struct APIConsumptionClient: Sendable {
     case 401, 403:
       if provider == .anthropic, request.url?.path == "/v1/organizations/workspaces" {
         throw UsageProviderError.unauthorized(
-          "Anthropic Workspaces API refused discovery (HTTP \(http.statusCode)). Check the linked account's access to workspaces.")
+          "Anthropic Workspaces API refused discovery (HTTP \(http.statusCode)). "
+            + "Individual accounts cannot use the Admin API. Organization scope does not change account type; "
+            + "for organization accounts, check the linked account's role.")
       }
       throw UsageProviderError.unauthorized(
         Self.refusalMessage(
@@ -1167,7 +1170,7 @@ public struct APIConsumptionClient: Sendable {
       default: reason = "Access denied."
       }
       return "Anthropic billing request refused (HTTP \(status)). \(reason) "
-        + "Check organization scope and the linked account's billing permission."
+        + "Check Console account type and billing permission. Individual accounts do not support the Admin API."
     }
     let kind = provider == .anthropic ? "admin key" : provider.keyKind.lowercased()
     var message = "\(provider.displayName) refused this \(kind)."

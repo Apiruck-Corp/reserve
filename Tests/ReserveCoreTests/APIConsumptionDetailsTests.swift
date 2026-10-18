@@ -128,7 +128,7 @@ struct APIConsumptionDetailsTests {
       body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-api03-regular"}}"#,
       key: "sk-ant-api03-regular-test-key-000000")
     #expect(regular == "Anthropic could not validate this API key. Check that it is active in Claude Console. "
-      + "Spend reporting requires organization scope and permission to read billing.")
+      + "Spend reporting requires a Console organization; Individual accounts do not support the Admin API.")
 
     let organization = await refusal(
       status: 403,
@@ -217,7 +217,8 @@ struct APIConsumptionDetailsTests {
     #expect(details["Credential type"] == "Personal API key")
     #expect(details["Billing response"]?.contains("HTTP \(status)") == true)
     #expect(details["Billing response"]?.contains("Permission denied") == true)
-    #expect(snapshot.note?.detail?.contains("organization scope") == true)
+    #expect(snapshot.note?.detail?.contains("account type") == true)
+    #expect(details["Account eligibility"]?.contains("Individual accounts") == true)
     #expect(snapshot.note?.detail?.contains("use an admin key") == false)
     let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
     #expect(!encoded.contains(key))

@@ -185,4 +185,24 @@ struct AnthropicWorkspaceContextTests {
     #expect(APIConsumptionClient.anthropicRequestErrorHints(Data("not JSON".utf8)).isEmpty)
     #expect(APIConsumptionClient.anthropicRequestErrorHints(Data(repeating: 65, count: 16_385)).isEmpty)
   }
+
+  @Test(arguments: [401, 403])
+  func discoveryRefusalExplainsEligibilityWithoutAssumingTheAccountType(_ status: Int) async {
+    let client = APIConsumptionClient(requestHandler: { request in
+      if request.url?.path == "/v1/organizations/workspaces" {
+        return Self.reply(request, status, #"{"error":{"type":"permission_error","message":"sk-ant-usr-private-fixture"}}"#)
+      }
+      return Self.reply(request, 400, Self.missing)
+    })
+    do {
+      _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-private-fixture")
+      Issue.record("discovery refusal was treated as success")
+    } catch UsageProviderError.unauthorized(let message) {
+      #expect(message.contains("HTTP \(status)"))
+      #expect(message.contains("Individual accounts cannot use the Admin API"))
+      #expect(message.contains("for organization accounts, check"))
+      #expect(!message.contains("sk-ant-usr-private-fixture"))
+      #expect(message.count <= 240)
+    } catch { Issue.record("unexpected error \(error)") }
+  }
 }

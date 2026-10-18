@@ -295,6 +295,11 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
 - OpenAI, an organization admin key, read from the Costs API;
 - Anthropic, an organization-scoped personal/service-account key whose linked
   account can read billing, or a legacy admin key, read from the Cost Report API.
+  **A configured Claude Console organization is required.** Anthropic's
+  [Admin API](https://platform.claude.com/docs/en/manage-claude/admin-api) is unavailable
+  to Individual accounts, including those with an Organization-scoped personal key.
+  Key scope does not change account type. Organization setup is available on the
+  [Console Organization page](https://platform.claude.com/settings/organization).
   Create current keys on [Claude Console's API keys page](https://platform.claude.com/settings/keys)
   and choose Organization scope. If an ordinary key
   cannot read billing, Reserve checks it through the Models API and shows

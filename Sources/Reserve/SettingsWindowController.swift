@@ -1329,8 +1329,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let help: String?
     switch provider.provider {
     case .anthropic:
-      help = "Use a key with Organization scope linked to an account allowed to read billing. "
-        + "Legacy admin keys also work. Model access alone does not establish billing access."
+      help = "Spend reporting requires a Claude Console organization. Individual accounts do not support the Admin API. "
+        + "Use an organization-scoped key with billing access; key scope alone does not change account type."
     case .typeSafe:
       help = "TypeSafe reports available models, descriptions and release dates. "
         + "Its documented API does not expose account spend or balance."
