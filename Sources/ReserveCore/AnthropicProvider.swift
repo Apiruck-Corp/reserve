@@ -198,14 +198,41 @@ public struct AnthropicProvider: UsageProvider {
         windows.append(opus)
       }
       if let limits = response.limits {
-        for (index, limit) in limits.prefix(28).enumerated() where limit.isActive != false {
+        // `is_active` marks the limit that binds right now, not whether a
+        // limit applies: an account at its weekly cap reports its five-hour
+        // limit inactive, and a model limit is inactive until it is the
+        // tightest. Every listed limit is real, so none is skipped for it.
+        for limit in limits.prefix(28) where limit.scope?.model == nil {
+          // Team seats can omit `seven_day` and still list the plan limits.
+          guard let percent = limit.percent, let kind = limit.kind else { continue }
+          let normalized = kind.lowercased().replacingOccurrences(of: "-", with: "_")
+          let id: String
+          switch normalized {
+          case "session", "five_hour": id = "five-hour"
+          case "weekly_all", "seven_day": id = "weekly"
+          default: continue
+          }
+          if windows.contains(where: { $0.id == id }) { continue }
+          let window = UsageWindow(
+            id: id,
+            label: id == "weekly" ? "Weekly" : "5 hours",
+            usedPercent: percent,
+            windowMinutes: id == "weekly" ? 10080 : 300,
+            resetsAt: UsageDateParser.iso8601(limit.resetsAt))
+          if id == "five-hour" { windows.insert(window, at: 0) } else { windows.append(window) }
+        }
+        for (index, limit) in limits.prefix(28).enumerated() {
           guard let percent = limit.percent,
             let name = limit.scope?.model?.displayName,
             !name.isEmpty
           else { continue }
           // Most scoped limits are weekly; a five-hour one says so in its kind.
           let isFiveHour = limit.kind.map(ClaudeLimit.isFiveHourKind) ?? false
-          let modelID = limit.scope?.model?.id ?? "scoped-\(index)"
+          // Anthropic currently sends a null model id. The name keeps the
+          // window's identity stable when the order of limits changes.
+          let modelID = limit.scope?.model?.id
+            ?? ClaudeLimit.slug(name)
+            ?? "scoped-\(index)"
           let id = isFiveHour ? "\(modelID)-five-hour" : modelID
           if windows.contains(where: { $0.id == id }) { continue }
           windows.append(
@@ -1039,6 +1066,12 @@ struct ClaudeLimit: Decodable, Sendable {
   static func isFiveHourKind(_ kind: String) -> Bool {
     let normalized = kind.lowercased().replacingOccurrences(of: "-", with: "_")
     return normalized == "five_hour" || normalized.hasPrefix("five_hour_")
+  }
+
+  /// "Fable" → "fable", "Opus 5.5" → "opus-5-5"; nil when nothing is left.
+  static func slug(_ name: String) -> String? {
+    let parts = name.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+    return parts.isEmpty ? nil : parts.joined(separator: "-")
   }
 }
 
