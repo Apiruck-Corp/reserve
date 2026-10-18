@@ -324,7 +324,7 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   vouchers and cash. Keys from the China platform (api.moonshot.cn) are not
   supported.
 
-OpenAI and Anthropic admin keys and xAI management keys can only read billing.
+OpenAI and Anthropic admin keys and xAI management keys do not perform inference.
 Ordinary Anthropic, OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also
 call models, so create one just for Reserve.
 
