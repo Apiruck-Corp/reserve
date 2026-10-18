@@ -1151,10 +1151,10 @@ final class UsageStore {
   var insightHistoryDays: Int {
     get {
       let stored = self.defaults.integer(forKey: "insights.historyDays")
-      return [7, 30, 90].contains(stored) ? stored : 30
+      return [1, 7, 30, 90].contains(stored) ? stored : 30
     }
     set {
-      let days = [7, 30, 90].contains(newValue) ? newValue : 30
+      let days = [1, 7, 30, 90].contains(newValue) ? newValue : 30
       self.defaults.set(days, forKey: "insights.historyDays")
       self.changed()
     }
@@ -1167,12 +1167,15 @@ final class UsageStore {
 
   var dailyHistoryLoadCountForTesting: Int { self.dailyHistoryLoads }
 
-  func insightSeries(for provider: ProviderID, now: Date = Date()) -> InsightHistorySeries {
+  func insightSeries(for provider: ProviderID, now: Date = Date(), origin: UsageInsightOrigin? = nil) -> InsightHistorySeries {
     return InsightHistoryRange.series(
       provider: provider,
       days: self.insightHistoryDays,
       now: now,
-      published: self.publishedDailyHistory)
+      published: origin == .providerAccount ? [:] : self.publishedDailyHistory,
+      accountDays: origin == .localDevice ? [] : self.states[provider]?.snapshot?.accountTokenActivity?.dailyUsageBuckets
+        ?? (self.states[provider]?.snapshot?.accountUsage?.origin == .providerAccount
+          ? self.states[provider]?.snapshot?.accountUsage?.dailyTokens ?? [] : []))
   }
 
   /// Test-only publication. Production scans will call the same replacement
@@ -1190,7 +1193,7 @@ final class UsageStore {
   }
 
   /// Replaces published days from a cache-only read. Does not scan session
-  /// roots. Disabled history and disabled providers are dropped.
+  /// roots. Disabled history is dropped; known providers retain historical days.
   func publishCachedHistory(_ histories: [ProviderID: CachedUsageHistory]) {
     guard self.localHistoryEnabled else {
       self.publishedDailyHistory = [:]
@@ -1198,11 +1201,11 @@ final class UsageStore {
     }
     var next: [ProviderID: [InsightHistoryDay]] = [:]
     for (provider, history) in histories {
-      guard self.isEnabled(provider),
+      guard self.accounts.contains(provider),
         ProviderDescriptor.forProvider(provider).capabilities.contains(.localHistory)
       else { continue }
       next[provider] = history.days.map {
-        InsightHistoryDay(day: $0.day, tokens: $0.tokens, costUSD: $0.costUSD)
+        InsightHistoryDay(day: $0.day, tokens: $0.tokens, costUSD: $0.costUSD, detail: $0.detail)
       }.sorted { $0.day < $1.day }
     }
     self.publishedDailyHistory = next
@@ -1216,8 +1219,8 @@ final class UsageStore {
       self.dailyHistoryLoads += 1
       return
     }
-    let enabled = Set(self.accounts.filter { self.isEnabled($0) })
-    let loaded = await self.dailyHistoryLoad(enabled, now)
+    let known = Set(self.accounts)
+    let loaded = await self.dailyHistoryLoad(known, now)
     self.publishCachedHistory(loaded)
   }
 

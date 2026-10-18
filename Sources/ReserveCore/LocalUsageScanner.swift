@@ -532,7 +532,7 @@ public actor LocalUsageScanner {
       let rows = (merged[provider] ?? [:]).compactMap { key, day -> CachedUsageDay? in
         guard let oldest, key >= oldest, key <= today else { return nil }
         return CachedUsageDay(
-          day: key, tokens: day.tokens, costUSD: day.costUSD, fetchedAt: day.fetchedAt)
+          day: key, tokens: day.tokens, costUSD: day.costUSD, fetchedAt: day.fetchedAt, detail: day.detail)
       }
       result[provider] = CachedUsageHistory(provider: provider, days: rows)
     }
@@ -1067,7 +1067,7 @@ public actor LocalUsageScanner {
       if start > 0, let newline = completeLines.firstIndex(of: 0x0A) {
         completeLines.removeSubrange(completeLines.startIndex...newline)
       }
-      parsed = try Self.parseCodexTailData(completeLines, deadline: deadline, budget: budget)
+      parsed = try Self.parseCodexTailData(completeLines, deadline: deadline, budget: budget, includesStart: start == 0)
       if parsed?.model != nil { break }
     }
     if start > 0, data.count < self.codexTailBytes, remainingBytes <= 0 {
@@ -1085,8 +1085,10 @@ public actor LocalUsageScanner {
   private static func parseCodexTailData(
     _ data: Data,
     deadline: Date?,
-    budget: ScanBudget?
+    budget: ScanBudget?,
+    includesStart: Bool = true
   ) throws -> (timestamp: Date, totals: UsageTotals, model: String?)? {
+    var modelsSeen: Set<String> = []
     var currentModel: String?
     var latest: (Date, UsageTotals, String?)?
     for (lineIndex, line) in data.split(separator: 0x0A).prefix(100_000).enumerated()
@@ -1106,6 +1108,7 @@ public actor LocalUsageScanner {
         else { return }
         if type == "turn_context", let model = payload["model"] as? String {
           currentModel = model
+          modelsSeen.insert(model)
           return
         }
         guard type == "event_msg", payload["type"] as? String == "token_count",
@@ -1128,6 +1131,9 @@ public actor LocalUsageScanner {
         )
       }
     }
+    // Cumulative Codex totals cannot be assigned to the last model when the
+    // file changed models, or when a bounded tail omitted earlier contexts.
+    if !includesStart || modelsSeen.count != 1 { latest?.1.models = nil }
     return latest
   }
 
@@ -1454,7 +1460,10 @@ public actor LocalUsageScanner {
         rows[key] = ArchivedUsageDay(
           tokens: value.totalTokens(provider: provider),
           costUSD: missingPrice.contains(key) ? nil : recordedCost(value.costUSD),
-          fetchedAt: now)
+          fetchedAt: now, detail: UsageDayDetail(
+            input: value.input, cached: value.cached, cacheWrite: value.cacheWrite,
+            output: value.output, cacheSavingsUSD: value.pricedSavings,
+            unpricedCacheReads: value.unpricedCacheReads, models: value.models ?? [:]))
       }
       archived[provider] = rows
     }
@@ -2264,11 +2273,13 @@ private struct ArchivedUsageDay: Codable, Equatable {
   var tokens: Int64
   var costUSD: Double?
   var fetchedAt: Date
+  var detail: UsageDayDetail? = nil
 
-  init(tokens: Int64, costUSD: Double?, fetchedAt: Date) {
+  init(tokens: Int64, costUSD: Double?, fetchedAt: Date, detail: UsageDayDetail? = nil) {
     self.tokens = tokens < 0 ? 0 : tokens
     self.costUSD = costUSD.flatMap { $0.isFinite ? max(0, $0) : nil }
     self.fetchedAt = fetchedAt
+    self.detail = detail
   }
 }
 
@@ -2401,17 +2412,18 @@ struct UsageTotals: Codable, Equatable {
   var cacheSavingsUSD: Double = 0
   var cacheSavingsKnown: Bool? = nil
   var cacheSavingsUnpricedTokens: Int64? = nil
+  var models: [String: InsightModelUsage]? = nil
 
   private enum CodingKeys: String, CodingKey {
     case input, cached, cacheWrite, output, costUSD, estimated
-    case cacheSavingsUSD, cacheSavingsKnown, cacheSavingsUnpricedTokens
+    case cacheSavingsUSD, cacheSavingsKnown, cacheSavingsUnpricedTokens, models
   }
 
   init(
     input: Int64 = 0, cached: Int64 = 0, cacheWrite: Int64 = 0, output: Int64 = 0,
     costUSD: Double = 0, estimated: Bool = false,
     cacheSavingsUSD: Double = 0, cacheSavingsKnown: Bool? = nil,
-    cacheSavingsUnpricedTokens: Int64? = nil
+    cacheSavingsUnpricedTokens: Int64? = nil, models: [String: InsightModelUsage]? = nil
   ) {
     self.input = input
     self.cached = cached
@@ -2422,10 +2434,12 @@ struct UsageTotals: Codable, Equatable {
     self.cacheSavingsUSD = cacheSavingsUSD
     self.cacheSavingsKnown = cacheSavingsKnown
     self.cacheSavingsUnpricedTokens = cacheSavingsUnpricedTokens
+    self.models = models
   }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.models = try container.decodeIfPresent([String: InsightModelUsage].self, forKey: .models)
     self.input = try container.decodeIfPresent(Int64.self, forKey: .input) ?? 0
     self.cached = try container.decodeIfPresent(Int64.self, forKey: .cached) ?? 0
     self.cacheWrite = try container.decodeIfPresent(Int64.self, forKey: .cacheWrite) ?? 0
@@ -2459,6 +2473,7 @@ struct UsageTotals: Codable, Equatable {
     var container = encoder.container(keyedBy: CodingKeys.self)
     // Missing values already decode to these defaults. Avoid repeating them in
     // every recent row so a large history can keep its existing storage cap.
+    try container.encodeIfPresent(self.models, forKey: .models)
     if self.input != 0 { try container.encode(self.input, forKey: .input) }
     if self.cached != 0 { try container.encode(self.cached, forKey: .cached) }
     if self.cacheWrite != 0 { try container.encode(self.cacheWrite, forKey: .cacheWrite) }
@@ -2491,6 +2506,13 @@ struct UsageTotals: Codable, Equatable {
   }
 
   mutating func add(_ other: UsageTotals) {
+    for (model, usage) in (other.models ?? [:]).sorted(by: { $0.key < $1.key }) {
+      if self.models?[model] != nil { self.models?[model]?.add(usage) }
+      else if (self.models?.count ?? 0) < 128 {
+        if self.models == nil { self.models = [:] }
+        self.models?[model] = usage
+      }
+    }
     let unpriced = saturatingNonnegativeSum(self.unpricedCacheReads, other.unpricedCacheReads)
     let savings = (self.pricedSavings ?? 0) + (other.pricedSavings ?? 0)
     self.input = saturatingNonnegativeSum(self.input, other.input)
@@ -2504,6 +2526,10 @@ struct UsageTotals: Codable, Equatable {
   }
 
   mutating func subtract(_ other: UsageTotals) {
+    for (model, usage) in other.models ?? [:] {
+      self.models?[model]?.subtract(usage)
+      if self.models?[model]?.tokens == 0 { self.models?.removeValue(forKey: model) }
+    }
     let unpriced = saturatingNonnegativeSubtract(self.unpricedCacheReads, other.unpricedCacheReads)
     let savings = max(0, (self.pricedSavings ?? 0) - (other.pricedSavings ?? 0))
     self.input = saturatingNonnegativeSubtract(self.input, other.input)
@@ -2582,7 +2608,10 @@ private enum Pricing {
     return UsageTotals(
       input: input, cached: cached, cacheWrite: cacheWrite, output: output,
       costUSD: cost ?? 0, estimated: estimated || cost == nil,
-      cacheSavingsUSD: savings ?? 0, cacheSavingsKnown: savings != nil)
+      cacheSavingsUSD: savings ?? 0, cacheSavingsKnown: savings != nil,
+      models: model.isEmpty ? nil : [String(model.prefix(128)): InsightModelUsage(
+        tokens: UsageTotals(input: input, cached: cached, cacheWrite: cacheWrite, output: output)
+          .totalTokens(provider: provider), costUSD: cost)])
   }
 
   /// Dollars saved because cache reads were billed below the full input rate.

@@ -793,6 +793,23 @@ enum LifecycleSelfTest {
         "updated Insights total fell outside the scrollable document")
     }
 
+    if let search = view("insights-breakdown-search") as? NSSearchField,
+      let dashboard = view("insights-dashboard") as? InsightDashboardView,
+      let window = settings.window {
+      window.makeFirstResponder(search)
+      search.stringValue = "unsaved search"
+      dashboard.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+      store.publishDailyHistoryForTesting([InsightHistoryDay(day: day, tokens: 11_000, costUSD: 110)], provider: .openAI)
+      self.settle()
+      result.expect(view("insights-breakdown-search") === search && search.stringValue == "unsaved search",
+        "an Insights refresh interrupted breakdown search editing")
+      window.makeFirstResponder(nil)
+      self.settle()
+      result.expect((view("insights-breakdown-search") as? NSSearchField)?.stringValue == "unsaved search"
+        && (view("insights-total") as? NSTextField)?.stringValue != beforeTotal,
+        "Insights did not apply its deferred update after search editing ended")
+    } else { result.failures.append("Insights search controls unavailable") }
+
     settings.show(.api)
     self.settle()
     if let key = view("api-key-openAI") as? NSTextField, let window = settings.window {

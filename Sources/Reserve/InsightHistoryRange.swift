@@ -7,6 +7,7 @@ struct InsightHistoryDay: Equatable, Sendable {
   var day: String
   var tokens: Int64?
   var costUSD: Double?
+  var detail: UsageDayDetail? = nil
 }
 
 struct InsightHistorySeries: Equatable, Sendable {
@@ -15,9 +16,9 @@ struct InsightHistorySeries: Equatable, Sendable {
   /// Days in the selected range that actually have a cached sample.
   var coveredDays: Int
   var requestedDays: Int
-  /// False when this provider has no local daily cache. Cursor account history
-  /// is not mixed in here.
+  /// False when neither local daily history nor provider account days are supported.
   var available: Bool
+  var origin: UsageInsightOrigin = .localDevice
 }
 
 enum InsightHistoryRange {
@@ -26,28 +27,40 @@ enum InsightHistoryRange {
     provider: ProviderID,
     days: Int,
     now: Date,
-    published: [ProviderID: [InsightHistoryDay]]
+    published: [ProviderID: [InsightHistoryDay]],
+    accountDays: [DailyUsage] = []
   ) -> InsightHistorySeries {
     let supported = ProviderDescriptor.forProvider(provider).capabilities.contains(.localHistory)
-    guard supported else {
+    guard supported || !accountDays.isEmpty else {
       return InsightHistorySeries(
         provider: provider, days: [], coveredDays: 0, requestedDays: days, available: false)
     }
     let keys = Self.dayKeys(count: days, now: now)
-    let byDay = Dictionary(uniqueKeysWithValues: (published[provider] ?? []).map { ($0.day, $0) })
+    let selectedKeys = Set(keys)
+    let useAccount = !(published[provider] ?? []).contains { selectedKeys.contains($0.day) && $0.tokens != nil }
+      && !accountDays.isEmpty
+    var byDay: [String: InsightHistoryDay] = [:]
+    if useAccount {
+      for day in accountDays { byDay[day.day] = InsightHistoryDay(day: day.day, tokens: day.tokens, costUSD: nil) }
+    } else {
+      for day in published[provider] ?? [] { byDay[day.day] = day }
+    }
     let rows = keys.map { key -> InsightHistoryDay in
       if let sample = byDay[key] {
-        return InsightHistoryDay(day: key, tokens: sample.tokens, costUSD: sample.costUSD)
+        return InsightHistoryDay(day: key, tokens: sample.tokens, costUSD: sample.costUSD, detail: sample.detail)
       }
       return InsightHistoryDay(day: key, tokens: nil, costUSD: nil)
     }
     let covered = rows.filter { $0.tokens != nil }.count
     return InsightHistorySeries(
-      provider: provider, days: rows, coveredDays: covered, requestedDays: days, available: true)
+      provider: provider, days: rows, coveredDays: covered, requestedDays: days, available: true, origin: useAccount ? .providerAccount : .localDevice)
   }
 
   /// Calendar dates, oldest first, ending today. Future dates are excluded.
   static func dayKeys(count: Int, now: Date, calendar: Calendar = .current) -> [String] {
+    var civil = Calendar(identifier: .gregorian)
+    civil.timeZone = calendar.timeZone
+    let calendar = civil
     let count = min(90, max(1, count))
     let start = calendar.startOfDay(for: now)
     let formatter = DateFormatter()

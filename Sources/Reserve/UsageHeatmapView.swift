@@ -51,7 +51,7 @@ final class UsageHeatmapView: NSView {
       if let tokens = day.tokens {
         let fraction = peak > 0 ? CGFloat(tokens) / CGFloat(peak) : 0
         let alpha = tokens == 0 ? 0.18 : 0.25 + 0.75 * min(1, fraction)
-        ReserveColor.chartPrimary.withAlphaComponent(alpha).setFill()
+        InsightTrendView.color(self.series.provider).withAlphaComponent(alpha).setFill()
         path.fill()
       } else {
         ReserveColor.subtle.setStroke()
@@ -144,6 +144,6 @@ final class UsageHeatmapView: NSView {
     } else {
       dates = ""
     }
-    return "\(series.provider.displayName), \(series.coveredDays) of \(series.requestedDays) days cached, \(missing) missing. A missing day is not zero.\(dates)"
+    return "\(series.provider.displayName), \(series.coveredDays) of \(series.requestedDays) days cached (\(series.origin == .providerAccount ? "provider account" : "this Mac")), \(missing) missing. A missing day is not zero.\(dates)"
   }
 }
