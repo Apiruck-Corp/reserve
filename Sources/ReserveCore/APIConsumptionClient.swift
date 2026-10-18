@@ -517,17 +517,64 @@ public struct APIConsumptionClient: Sendable {
   /// cursor, or the reading silently stops a week into the month.
   private func fetchAnthropic(_ key: String) async throws -> APIConsumptionSnapshot {
     do {
-      return try await self.fetchAnthropicCosts(key)
-    } catch UsageProviderError.unauthorized(let billingRefusal) where !key.hasPrefix("sk-ant-admin") {
-      // A workspace key can be valid for models and refused by the Admin API.
-      // Try billing first: unscoped personal/service-account keys can read it too.
-      return try await self.validateAnthropicModelKey(key, billingRefusal: billingRefusal)
+      return try await self.fetchAnthropicReading(key, workspaceID: nil)
+    } catch is AnthropicWorkspaceRequired {
+      // Organization-scoped identity keys can need a workspace execution
+      // context too. This header does not filter the organization's cost report.
+      let workspaceID: String
+      do {
+        workspaceID = try await self.anthropicDefaultWorkspace(key)
+      } catch is AnthropicWorkspaceRequired {
+        throw UsageProviderError.invalidResponse(
+          "Anthropic requires a workspace context, but workspace discovery requires one too.")
+      }
+      do {
+        return try await self.fetchAnthropicReading(key, workspaceID: workspaceID)
+      } catch is AnthropicWorkspaceRequired {
+        throw UsageProviderError.invalidResponse(
+          "Anthropic still requires a workspace context after Reserve supplied the default workspace.")
+      }
     }
+  }
+
+  private func fetchAnthropicReading(_ key: String, workspaceID: String?) async throws -> APIConsumptionSnapshot {
+    do {
+      return try await self.fetchAnthropicCosts(key, workspaceID: workspaceID)
+    } catch UsageProviderError.unauthorized(let billingRefusal) where !key.hasPrefix("sk-ant-admin") {
+      return try await self.validateAnthropicModelKey(
+        key, billingRefusal: billingRefusal, workspaceID: workspaceID)
+    }
+  }
+
+  private func anthropicDefaultWorkspace(_ key: String) async throws -> String {
+    let pages = try await self.pages(
+      AnthropicWorkspacesPage.self, provider: .anthropic, maximumPages: 4,
+      request: { cursor in
+        var components = URLComponents(string: "https://api.anthropic.com/v1/organizations/workspaces")!
+        components.queryItems = [
+          URLQueryItem(name: "include_default", value: "true"),
+          URLQueryItem(name: "limit", value: "1000"),
+        ] + (cursor.map { [URLQueryItem(name: "after_id", value: $0)] } ?? [])
+        return Self.anthropicRequest(url: components.url!, key: key)
+      }, cursor: { ($0.hasMore ?? false, $0.lastID) })
+    var seen: Set<String> = []
+    let active = pages.flatMap(\.data).filter { workspace in
+      seen.insert(workspace.id).inserted && workspace.archivedAt == nil && workspace.id.hasPrefix("wrkspc_")
+        && workspace.id.count <= 128
+        && workspace.id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
+    }
+    let defaults = active.filter {
+      ["default", "default workspace"].contains($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+    if defaults.count == 1 { return defaults[0].id }
+    if active.count == 1 { return active[0].id }
+    throw UsageProviderError.unavailable(
+      "Anthropic requires a workspace context. Reserve could not identify a single default workspace.")
   }
 
   /// Current personal/service-account keys use the documented Bearer form.
   /// Legacy Admin keys retain the x-api-key authentication in Admin API examples.
-  private static func anthropicRequest(url: URL, key: String) -> URLRequest {
+  private static func anthropicRequest(url: URL, key: String, workspaceID: String? = nil) -> URLRequest {
     var request = URLRequest(url: url)
     if key.hasPrefix("sk-ant-admin") {
       request.setValue(key, forHTTPHeaderField: "x-api-key")
@@ -535,14 +582,15 @@ public struct APIConsumptionClient: Sendable {
       request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
     }
     request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+    if let workspaceID { request.setValue(workspaceID, forHTTPHeaderField: "anthropic-workspace-id") }
     return request
   }
 
   private func validateAnthropicModelKey(
-    _ key: String, billingRefusal: String
+    _ key: String, billingRefusal: String, workspaceID: String?
   ) async throws -> APIConsumptionSnapshot {
     let request = Self.anthropicRequest(
-      url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!, key: key)
+      url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!, key: key, workspaceID: workspaceID)
     let data: Data
     do {
       data = try await self.data(for: request, provider: .anthropic)
@@ -572,7 +620,7 @@ public struct APIConsumptionClient: Sendable {
       ])
   }
 
-  private func fetchAnthropicCosts(_ key: String) async throws -> APIConsumptionSnapshot {
+  private func fetchAnthropicCosts(_ key: String, workspaceID: String?) async throws -> APIConsumptionSnapshot {
     let now = self.now()
     let start = Calendar(identifier: .gregorian).dateInterval(of: .month, for: now)?.start ?? now
     let ending = min(now, start.addingTimeInterval(31 * 24 * 60 * 60))
@@ -593,7 +641,7 @@ public struct APIConsumptionClient: Sendable {
       guard let url = components.url else {
         throw UsageProviderError.invalidResponse("Anthropic cost URL could not be formed.")
       }
-      return Self.anthropicRequest(url: url, key: key)
+      return Self.anthropicRequest(url: url, key: key, workspaceID: workspaceID)
     }
 
     let pages = try await self.groupedPages(
@@ -1011,6 +1059,10 @@ public struct APIConsumptionClient: Sendable {
     switch http.statusCode {
     case 200: return data
     case 401, 403:
+      if provider == .anthropic, request.url?.path == "/v1/organizations/workspaces" {
+        throw UsageProviderError.unauthorized(
+          "Anthropic Workspaces API refused discovery (HTTP \(http.statusCode)). Check the linked account's access to workspaces.")
+      }
       throw UsageProviderError.unauthorized(
         Self.refusalMessage(
           provider: provider, status: http.statusCode, body: data,
@@ -1020,12 +1072,37 @@ public struct APIConsumptionClient: Sendable {
         retryAt: HTTPRetryAfter.deadline(
           from: http.value(forHTTPHeaderField: "Retry-After"), now: self.now()))
     case 400, 404, 422:
+      if provider == .anthropic {
+        if http.statusCode == 400, Self.anthropicRequiresWorkspace(data) {
+          throw AnthropicWorkspaceRequired()
+        }
+        let endpoint: String
+        switch request.url?.path {
+        case "/v1/models": endpoint = "Models API"
+        case "/v1/organizations/cost_report": endpoint = "Cost Report API"
+        case "/v1/organizations/workspaces": endpoint = "Workspaces API"
+        default: endpoint = "API"
+        }
+        throw UsageProviderError.invalidResponse(
+          "Anthropic \(endpoint) rejected the request (HTTP \(http.statusCode)).")
+      }
       throw UsageProviderError.invalidResponse(
         "\(provider.displayName) rejected this consumption request (HTTP \(http.statusCode)).")
     default:
       throw UsageProviderError.unavailable(
         "\(provider.displayName) consumption request returned HTTP \(http.statusCode).")
     }
+  }
+
+  /// Match the documented missing-context response without displaying any
+  /// free text (which could echo the credential). No recovery for other 400s.
+  static func anthropicRequiresWorkspace(_ data: Data) -> Bool {
+    guard data.count <= 16_384, Self.providerErrorCode(in: data) == "invalid_request_error",
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let error = root["error"] as? [String: Any], let message = error["message"] as? String
+    else { return false }
+    let normalized = message.lowercased()
+    return normalized.contains("anthropic-workspace-id") && normalized.contains("is required")
   }
 
   /// The key the request carried, only to tell an admin key from another.
@@ -1381,6 +1458,28 @@ private struct XAValidation: Decodable {
   enum CodingKeys: String, CodingKey {
     case teamId
     case scopeId
+  }
+}
+
+private struct AnthropicWorkspaceRequired: Error {}
+
+private struct AnthropicWorkspacesPage: Decodable {
+  struct Workspace: Decodable {
+    let id: String
+    let name: String
+    let archivedAt: String?
+    enum CodingKeys: String, CodingKey {
+      case id, name
+      case archivedAt = "archived_at"
+    }
+  }
+  let data: [Workspace]
+  let hasMore: Bool?
+  let lastID: String?
+  enum CodingKeys: String, CodingKey {
+    case data
+    case hasMore = "has_more"
+    case lastID = "last_id"
   }
 }
 

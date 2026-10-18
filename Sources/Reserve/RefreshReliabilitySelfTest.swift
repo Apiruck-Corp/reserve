@@ -31,6 +31,7 @@ enum RefreshReliabilitySelfTest {
     let fixture = Fixture("model-only-billing")
     fixture.defaults.set(true, forKey: "apiConsumption.anthropic.enabled")
     let response = LockedValue("Anthropic billing request refused (HTTP 403). Permission denied.")
+    let requestFailure = LockedValue(false)
     let store = UsageStore(
       defaults: fixture.defaults, startAutomatically: false,
       notificationsActive: false, cache: fixture.cache,
@@ -38,7 +39,10 @@ enum RefreshReliabilitySelfTest {
         availability: { _ in .present }, load: { _ in "sk-ant-usr-fixture" },
         save: { _, _ in }, delete: { _ in }),
       apiConsumptionFetch: { _, _ in
-        APIConsumptionSnapshot(
+        if requestFailure.value {
+          throw UsageProviderError.invalidResponse("Anthropic Models API rejected the request (HTTP 400).")
+        }
+        return APIConsumptionSnapshot(
           provider: .anthropic, windows: [], note: APIConsumptionNote(headline: "Key valid"),
           source: "Anthropic Models API", details: [UsageDetail("Billing response", response.value)])
       })
@@ -66,6 +70,18 @@ enum RefreshReliabilitySelfTest {
       "model-only billing diagnostics stayed stale while editing")
     expect(field("api-key-anthropic") === input && input.stringValue == "unsaved-fixture",
       "model-only billing diagnostics discarded the active key draft")
+    requestFailure.value = true
+    _ = store.refreshAPIConsumption(.anthropic)
+    _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Latest check failed" }
+    expect(field("api-status-anthropic")?.stringValue == "Latest check failed"
+      && field("api-error-anthropic")?.stringValue.contains("Models API") == true,
+      "a fresh HTTP 400 was masked by the old Key valid heading")
+    try? await store.saveAPIConsumptionKey("sk-ant-usr-replacement-fixture", for: .anthropic)
+    _ = await self.eventually { !store.apiConsumptionRefreshing.contains(.anthropic) }
+    _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Needs attention" }
+    expect(store.apiConsumption[.anthropic] == nil
+      && field("api-status-anthropic")?.stringValue == "Needs attention",
+      "a replacement key inherited the previous key's validation result")
   }
 
   /// Drive the actual Settings action with an active AppKit field editor.

@@ -301,7 +301,12 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   "Key valid" with billing unavailable when that succeeds. The details retain
   the billing HTTP status without repeating provider error text or credentials.
   Personal/service-account keys use Bearer authentication; legacy admin keys
-  keep x-api-key. This makes no model calls and does not invent a zero spend reading;
+  keep x-api-key. If Anthropic explicitly requires a workspace execution context,
+  Reserve discovers the default active workspace and retries with the documented
+  `anthropic-workspace-id` header. This does not narrow the organization cost report.
+  A failed latest check is shown even when an older reading exists, and replacing
+  a key clears that previous key's validation. This makes no model calls and does
+  not invent a zero spend reading;
 - OpenRouter, the API key itself, read from that key's usage endpoint: today,
   this week, this month, and the credit balance when the key is capped;
 - xAI, a management key, read from the prepaid balance API: spend against

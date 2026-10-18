@@ -1893,7 +1893,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     if self.store.apiConsumptionRefreshing.contains(provider) { return "Measuring…" }
     let snapshot = self.store.apiConsumption[provider]
-    if self.store.apiConsumptionErrors[provider] != nil, snapshot == nil { return "Needs attention" }
+    if self.store.apiConsumptionErrors[provider] != nil {
+      return snapshot == nil ? "Needs attention" : "Latest check failed"
+    }
     if let note = snapshot?.note {
       return [note.headline, note.detail].compactMap { $0 }.joined(separator: " · ")
     }
