@@ -127,6 +127,7 @@ final class DashboardViewController: NSViewController {
       parts.append(String(reflecting: summary.billingRenewsAt))
       parts.append(String(reflecting: summary.nextRenewal))
       parts.append(summary.localHistoryEnabled ? "local-history" : "-")
+      parts.append(summary.hasUnattributedClaudeHistory ? "unattributed-history" : "-")
       parts.append(summary.historyPossible ? "history-possible" : "-")
       parts.append(String(reflecting: summary.localHistoryCheckedAt))
       parts.append(summary.localHistoryError ?? "-")
@@ -2607,6 +2608,10 @@ private final class UsageDetailGrid: NSView {
     let accountData = usage?.origin == .providerAccount
     var rows = summary.details.enumerated().map { index, detail in
       RowSpec(kind: .fact, id: "detail-\(index)", label: detail.label, value: detail.value)
+    }
+    if summary.hasUnattributedClaudeHistory {
+      rows.append(RowSpec(kind: .note, id: "unattributed-claude-history", label: "",
+        value: "Claude token history on this Mac cannot be split by account. See Insights for available device history; plan limits above are account-specific."))
     }
     if let usage {
       rows.append(RowSpec(

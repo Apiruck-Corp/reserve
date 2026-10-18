@@ -18,6 +18,8 @@ public struct AnthropicProvider: UsageProvider {
   private let allowKeychainRead: Bool
   private let allowKeychainInteraction: Bool
   private let passiveStatusline: Bool
+  private let requireAccountIdentity: Bool
+  private let expectedOrganizationIdentifier: String?
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
   private let rateLimitGate: ClaudeRateLimitGate
   private let renewer: ClaudeSessionRenewalHook
@@ -36,17 +38,22 @@ public struct AnthropicProvider: UsageProvider {
     allowKeychainRead: Bool = false,
     allowKeychainInteraction: Bool = false,
     passiveStatusline: Bool = false,
+    requireAccountIdentity: Bool = false,
+    expectedOrganizationIdentifier: String? = nil,
     session: URLSession? = nil
   ) {
     let session = session ?? ProviderHTTPSession.shared
     self.id = id
     self.configDirectory = configDirectory
-    self.environment = configDirectory?.environment(from: environment) ?? environment
+    self.environment = configDirectory?.environment(from: environment)
+      ?? ClaudeConfigDirectory.defaultAccountEnvironment(from: environment)
     self.keychainService =
       configDirectory?.keychainService() ?? ClaudeConfigDirectory.defaultKeychainService
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
     self.passiveStatusline = passiveStatusline
+    self.requireAccountIdentity = requireAccountIdentity
+    self.expectedOrganizationIdentifier = expectedOrganizationIdentifier
     self.requestHandler = {
       try await ProviderHTTPSession.boundedData(
         for: $0, using: session, maximumBytes: 1_048_576)
@@ -59,7 +66,7 @@ public struct AnthropicProvider: UsageProvider {
     self.credentialFileURLs = configDirectory.map { [$0.credentialFileURL] }
     self.accountProfileURLs =
       configDirectory.map { [$0.accountProfileURL] }
-      ?? ClaudeAccountProfile.defaultURLs(environment: environment)
+      ?? ClaudeAccountProfile.defaultURLs(environment: self.environment)
   }
 
   /// The renewal and Keychain hooks exist so tests never launch Claude Code or
@@ -77,16 +84,21 @@ public struct AnthropicProvider: UsageProvider {
     accountProfileURLs: [URL] = [],
     id: ProviderID = .anthropic,
     configDirectory: ClaudeConfigDirectory? = nil,
-    keychainItemExists: (@Sendable () -> Bool)? = nil
+    keychainItemExists: (@Sendable () -> Bool)? = nil,
+    requireAccountIdentity: Bool = false,
+    expectedOrganizationIdentifier: String? = nil
   ) {
     self.id = id
     self.configDirectory = configDirectory
-    self.environment = configDirectory?.environment(from: environment) ?? environment
+    self.environment = configDirectory?.environment(from: environment)
+      ?? ClaudeConfigDirectory.defaultAccountEnvironment(from: environment)
     self.keychainService =
       configDirectory?.keychainService() ?? ClaudeConfigDirectory.defaultKeychainService
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
     self.passiveStatusline = false
+    self.requireAccountIdentity = requireAccountIdentity
+    self.expectedOrganizationIdentifier = expectedOrganizationIdentifier
     self.requestHandler = requestHandler
     self.rateLimitGate = rateLimitGate
     self.renewer = renewer ?? ClaudeSessionRenewer.hook(for: id)
@@ -96,6 +108,14 @@ public struct AnthropicProvider: UsageProvider {
     self.credentialFileURLs = credentialFileURLs ?? configDirectory.map { [$0.credentialFileURL] }
     self.accountProfileURLs =
       accountProfileURLs.isEmpty ? (configDirectory.map { [$0.accountProfileURL] } ?? []) : accountProfileURLs
+  }
+
+  /// A non-personal binding used to detect a later CLI organization switch.
+  /// No credential, email, or raw account identifier is persisted by Reserve.
+  public static func organizationIdentifier(configDirectory: ClaudeConfigDirectory? = nil) -> String? {
+    let urls = configDirectory.map { [$0.accountProfileURL] }
+      ?? ClaudeAccountProfile.defaultURLs(environment: [:])
+    return urls.lazy.compactMap(ClaudeAccountProfile.load).first?.organizationIdentifier
   }
 
   /// A status-line reading this recent comes from a Claude Code session that
@@ -113,7 +133,14 @@ public struct AnthropicProvider: UsageProvider {
     if self.id.isAdded, self.configDirectory == nil {
       throw Self.configDirectoryMissing
     }
-    if self.passiveStatusline {
+    // The passive payload carries no organization. With multiple accounts it
+    // cannot prove which subscription produced a reading, even in its own file.
+    if self.passiveStatusline, self.requireAccountIdentity, !self.allowKeychainRead {
+      throw UsageProviderError.keychainConsentRequired(self.id)
+    }
+    if self.passiveStatusline, !self.requireAccountIdentity,
+      self.expectedOrganizationIdentifier == nil
+    {
       let snapshot = ClaudeStatuslineBridge.read(
         cacheURL: ClaudeStatuslineBridge.cacheURL(provider: self.id), provider: self.id)
       // Status-line updates only come from Claude Code running in a terminal;
@@ -137,11 +164,23 @@ public struct AnthropicProvider: UsageProvider {
     if let retryAt = await self.rateLimitGate.activeBlock(), retryAt > Date() {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }
+    let profile = self.accountProfileURLs.lazy.compactMap(ClaudeAccountProfile.load).first
+    if let expected = self.expectedOrganizationIdentifier,
+      profile?.organizationIdentifier != expected
+    {
+      throw UsageProviderError.credentialsNotFound(
+        "Claude Code switched to another organization. Sign in to this account again in Settings > Providers.")
+    }
+    if self.requireAccountIdentity, profile?.organizationIdentifier == nil {
+      throw UsageProviderError.credentialsNotFound(
+        "This Claude account's organization could not be verified. Sign in again in Settings > Providers.")
+    }
     let credentials: ClaudeCredentials
     let response: ClaudeUsageResponse
     do {
       let stored = try await self.loadCredentials()
       do {
+        try await self.validateAccount(stored, profile: profile, gateGeneration: gateGeneration)
         response = try await self.fetchUsage(
           accessToken: stored.accessToken, gateGeneration: gateGeneration)
         credentials = stored
@@ -150,6 +189,7 @@ public struct AnthropicProvider: UsageProvider {
         // example after Claude Code rotated it elsewhere. Let Claude Code renew
         // its own session once, then retry exactly once.
         let renewed = try await self.renewedCredentials(after: stored)
+        try await self.validateAccount(renewed, profile: profile, gateGeneration: gateGeneration)
         response = try await self.fetchUsage(
           accessToken: renewed.accessToken, gateGeneration: gateGeneration)
         credentials = renewed
@@ -176,7 +216,7 @@ public struct AnthropicProvider: UsageProvider {
       windows: windows,
       source: credentials.source,
       includedSpend: response.extraUsage?.includedSpend,
-      details: (self.accountProfileURLs.lazy.compactMap(ClaudeAccountProfile.load).first?.details() ?? [])
+      details: (profile?.details() ?? [])
         + (response.extraUsage?.isEnabled == false ? [UsageDetail("Extra usage", "Off")] : []))
   }
 
@@ -302,7 +342,39 @@ public struct AnthropicProvider: UsageProvider {
   private func fetchUsage(
     accessToken: String, gateGeneration: Int? = nil
   ) async throws -> ClaudeUsageResponse {
-    guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
+    let data = try await self.fetchData(path: "usage", accessToken: accessToken, gateGeneration: gateGeneration)
+    do {
+      return try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+    } catch {
+      throw UsageProviderError.invalidResponse(error.localizedDescription)
+    }
+  }
+
+  /// Emails identify a person, not a subscription: a personal plan and a Team
+  /// seat can share the email while belonging to different organizations.
+  private func validateAccount(
+    _ credentials: ClaudeCredentials, profile: ClaudeAccountProfile?, gateGeneration: Int
+  ) async throws {
+    guard let expected = profile?.organizationUuid, !expected.isEmpty else { return }
+    let data = try await self.fetchData(
+      path: "profile", accessToken: credentials.accessToken, gateGeneration: gateGeneration)
+    struct Identity: Decodable {
+      struct Organization: Decodable { let uuid: String }
+      let organization: Organization
+    }
+    let identity: Identity
+    do { identity = try JSONDecoder().decode(Identity.self, from: data) }
+    catch { throw UsageProviderError.invalidResponse("Claude did not return this sign-in's organization.") }
+    guard identity.organization.uuid == expected else {
+      throw UsageProviderError.credentialsNotFound(
+        "This Claude sign-in belongs to a different organization. Sign in to this account again in Settings > Providers.")
+    }
+  }
+
+  private func fetchData(
+    path: String, accessToken: String, gateGeneration: Int? = nil
+  ) async throws -> Data {
+    guard let url = URL(string: "https://api.anthropic.com/api/oauth/\(path)") else {
       throw UsageProviderError.invalidResponse("invalid Anthropic endpoint")
     }
     var request = URLRequest(url: url)
@@ -347,11 +419,7 @@ public struct AnthropicProvider: UsageProvider {
     guard data.count <= 1_048_576 else {
       throw UsageProviderError.invalidResponse("Anthropic response exceeded 1 MB")
     }
-    do {
-      return try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
-    } catch {
-      throw UsageProviderError.invalidResponse(error.localizedDescription)
-    }
+    return data
   }
 
   static func conservativeRetryDate(retryAfter value: String?, now: Date = Date()) -> Date {
@@ -709,7 +777,8 @@ enum ClaudeCredentialLoader {
     let fileManager = FileManager.default
     var roots: [URL] = []
     if let configured = environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
-      roots.append(URL(fileURLWithPath: (configured as NSString).expandingTildeInPath))
+      return [URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        .appendingPathComponent(".credentials.json")]
     }
     roots.append(fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude"))
     return roots.map { $0.appendingPathComponent(".credentials.json") }
@@ -1060,20 +1129,27 @@ struct ClaudeLimitModel: Decodable, Sendable {
 /// these few display fields are read; tokens never live in this file.
 struct ClaudeAccountProfile: Decodable, Sendable {
   let emailAddress: String?
+  let organizationUuid: String?
   let organizationName: String?
   let organizationType: String?
   let organizationRole: String?
   let subscriptionCreatedAt: String?
   let claudeCodeTrialEndsAt: String?
 
+  var organizationIdentifier: String? {
+    guard let organizationUuid, !organizationUuid.isEmpty else { return nil }
+    return StableIdentifier.notificationComponent(organizationUuid)
+  }
+
   private struct Settings: Decodable { let oauthAccount: ClaudeAccountProfile? }
 
-  /// Same order as the credential files: the configured directory, then home.
+  /// One profile source, matching the credential directory. A missing profile
+  /// must never borrow another organization's metadata from the default home.
   static func defaultURLs(environment: [String: String]) -> [URL] {
     var urls: [URL] = []
     if let configured = environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
-      urls.append(URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
-        .appendingPathComponent(".claude.json"))
+      return [URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        .appendingPathComponent(".claude.json")]
     }
     urls.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json"))
     return urls

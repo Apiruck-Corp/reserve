@@ -137,8 +137,8 @@ struct ProviderDetailsTests {
     let labels = try #require(ClaudeAccountProfile.load(from: personal))
       .details(now: Self.now).map(\.label)
     #expect(labels == ["Account", "Subscribed since"])
-    // A configured directory without the file falls back to the home file.
-    #expect(ClaudeAccountProfile.defaultURLs(environment: ["CLAUDE_CONFIG_DIR": "/tmp/x"]).count == 2)
+    // A configured directory never borrows the default account profile.
+    #expect(ClaudeAccountProfile.defaultURLs(environment: ["CLAUDE_CONFIG_DIR": "/tmp/x"]).count == 1)
 
     let team = try temporaryFile(
       #"{"oauthAccount":{"emailAddress":"w@corp.com","organizationName":"Corp","organizationType":"team","organizationRole":"billing_admin"}}"#)

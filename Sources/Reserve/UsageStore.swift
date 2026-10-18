@@ -9,6 +9,7 @@ struct ProviderViewState: Identifiable {
   var isRefreshing = false
   var isConnecting = false
   var localUsage: LocalUsageSummary?
+  var hasUnattributedClaudeHistory = false
   /// When this Mac's session logs were last scanned successfully. Separate
   /// from the quota snapshot, which can be fresh while these totals are not.
   var localHistoryCheckedAt: Date?
@@ -435,6 +436,9 @@ final class UsageStore {
       defaults: defaults, active: notificationsActive ?? startAutomatically)
     let addedAccounts = Self.loadAddedAccounts(from: defaults)
     self.addedAccounts = addedAccounts
+    if addedAccounts.contains(where: \.isAnthropic) {
+      defaults.set(true, forKey: "anthropic.historyIncludesMultipleAccounts")
+    }
     // A default account of a kind that can hold several accounts can be
     // named too, so it can be told apart from the added ones.
     for kind in ProviderKind.allCases where kind.supportsAddedAccounts {
@@ -497,6 +501,10 @@ final class UsageStore {
           ? "Reported monthly cost" : "Typical monthly cost"
       state.renewalStart = self.renewalStart(for: provider)
       state.nextRenewal = self.nextRenewal(for: provider)
+      state.hasUnattributedClaudeHistory = self.hasUnattributedClaudeHistory(for: provider)
+      if state.hasUnattributedClaudeHistory, state.localUsage?.origin == .localDevice {
+        state.localUsage = nil
+      }
       state.localHistoryEnabled = self.localHistoryEnabled
       state.localHistoryCheckedAt = self.localHistoryEnabled ? self.lastLocalUsageScanAt : nil
       state.localHistoryError = self.localHistoryEnabled ? self.localHistoryScanError : nil
@@ -504,6 +512,18 @@ final class UsageStore {
       state.hidesPersonalInfo = self.hidesPersonalInfo
       return state
     }
+  }
+
+  /// Claude transcripts do not identify the organization that paid for each
+  /// message. Keep their single device total in Insights, never credit it to
+  /// a personal or Team subscription merely because it occupies the first slot.
+  func hasUnattributedClaudeHistory(for provider: ProviderID) -> Bool {
+    provider.isAnthropic && self.defaults.bool(forKey: "anthropic.historyIncludesMultipleAccounts")
+  }
+
+  func insightHistoryName(for provider: ProviderID) -> String {
+    provider == .anthropic && self.hasUnattributedClaudeHistory(for: provider)
+      ? "Claude on this Mac" : provider.displayName
   }
 
   // MARK: Accounts
@@ -624,6 +644,9 @@ final class UsageStore {
     self.defaults.set(true, forKey: "provider.\(account.rawValue).enabled")
     self.defaults.set(false, forKey: "\(account.rawValue).keychainReadAllowed")
     self.addedAccounts.append(account)
+    if account.isAnthropic {
+      self.defaults.set(true, forKey: "anthropic.historyIncludesMultipleAccounts")
+    }
     self.persistAddedAccounts()
     var state = ProviderViewState(provider: account)
     // A key plan has nothing to read until its key is pasted.
@@ -656,6 +679,7 @@ final class UsageStore {
       "provider.\(account.rawValue).enabled",
       "\(account.rawValue).keychainReadAllowed",
       "\(account.rawValue).passiveStatusline",
+      "\(account.rawValue).organizationIdentifier",
       "\(account.rawValue).label",
       "\(account.rawValue).labelIsCustom",
       "\(account.rawValue).ordinal",
@@ -822,7 +846,10 @@ final class UsageStore {
   /// The status line lives in the slot's own settings file: Claude Code's
   /// default home for the first slot, the chosen folder for the second.
   private func claudeStatuslineSettingsURL(for provider: ProviderID) throws -> URL {
-    guard provider.isAdded else { return ClaudeStatuslineBridge.settingsURL() }
+    guard provider.isAdded else {
+      return ClaudeStatuslineBridge.settingsURL(environment: ClaudeConfigDirectory.defaultAccountEnvironment(
+        from: ProcessInfo.processInfo.environment))
+    }
     guard let directory = self.claudeConfigDirectory(for: provider) else {
       throw AnthropicProvider.configDirectoryMissing
     }
@@ -857,12 +884,14 @@ final class UsageStore {
     return ClaudeConfigDirectory(path: folder.path)
   }
 
-  /// The helper environment for an account: unchanged for a default account,
-  /// with the home variable pointing at its folder for an added one.
+  /// Added accounts use their own folder. The first Claude card always uses
+  /// the ordinary home, independent of the terminal Reserve was launched from.
   func helperEnvironment(
     for provider: ProviderID, base: [String: String] = ProcessInfo.processInfo.environment
   ) -> [String: String] {
-    guard let folder = self.accountFolder(for: provider) else { return base }
+    guard let folder = self.accountFolder(for: provider) else {
+      return provider.isAnthropic ? ClaudeConfigDirectory.defaultAccountEnvironment(from: base) : base
+    }
     return folder.environment(for: provider.kind, from: base)
   }
 
@@ -892,9 +921,10 @@ final class UsageStore {
           "Enter the full path of a folder, such as \(example).")
       }
       // Pointed at the default home, the helper would sign in over the first
-      // account, which already covers that folder. The default account also
-      // reads a folder named by the environment Reserve was launched with.
-      let environmentHome = ProcessInfo.processInfo.environment[variable].flatMap(AccountFolder.init(path:))
+      // account, which already covers that folder. Other helpers can also
+      // inherit their default folder from Reserve's launch environment.
+      let environmentHome = provider.isAnthropic ? nil
+        : ProcessInfo.processInfo.environment[variable].flatMap(AccountFolder.init(path:))
       guard !parsed.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome),
         parsed.resolvedPath != environmentHome?.resolvedPath
       else {
@@ -935,6 +965,7 @@ final class UsageStore {
     } else {
       self.defaults.removeObject(forKey: Self.configDirectoryKey(provider))
     }
+    self.defaults.removeObject(forKey: "\(provider.rawValue).organizationIdentifier")
     self.states[provider] = ProviderViewState(provider: provider)
     self.staleProviders.remove(provider)
     self.incidentProviders.remove(provider)
@@ -963,9 +994,9 @@ final class UsageStore {
   private func accountFolderConflict(_ provider: ProviderID) -> String? {
     guard let folder = self.accountFolder(for: provider) else { return nil }
     let resolved = folder.resolvedPath
-    // The default account reads the helper's default home, or the folder the
-    // environment Reserve was launched with names.
-    let environmentHome = ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey
+    // Claude's first card uses the ordinary home. Other default helpers may
+    // inherit a folder from Reserve's launch environment.
+    let environmentHome = provider.isAnthropic ? nil : ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey
       .flatMap { ProcessInfo.processInfo.environment[$0] }.flatMap(AccountFolder.init(path:))
     if folder.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome)
       || resolved == environmentHome?.resolvedPath
@@ -2630,6 +2661,11 @@ final class UsageStore {
       self.changed()
       completion?()
     } else if status == 0 {
+      // A deliberate successful sign-in may choose a new organization. A CLI
+      // switch outside Reserve cannot silently rebind an existing card.
+      if provider.isAnthropic {
+        self.defaults.removeObject(forKey: "\(provider.rawValue).organizationIdentifier")
+      }
       self.states[provider]?.error = nil
       if !self.refresh(provider, queueIfBusy: true, onFinished: { [weak self] in
         // Cursor can exit successfully even when secure storage failed. A
@@ -3116,6 +3152,9 @@ final class UsageStore {
     }
 
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
+    let claudeOrganization = provider.isAnthropic && self.fetchOverride == nil
+      && self.hasUnattributedClaudeHistory(for: provider)
+      ? AnthropicProvider.organizationIdentifier(configDirectory: self.claudeConfigDirectory(for: provider)) : nil
     let fetcher: any UsageProvider =
       switch provider.kind {
       case .openAI:
@@ -3126,7 +3165,10 @@ final class UsageStore {
           configDirectory: self.claudeConfigDirectory(for: provider),
           allowKeychainRead: self.keychainReadAllowed(for: provider),
           allowKeychainInteraction: allowKeychainInteraction,
-          passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider))
+          passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider),
+          requireAccountIdentity: self.hasUnattributedClaudeHistory(for: provider),
+          expectedOrganizationIdentifier: self.defaults.string(forKey: "\(provider.rawValue).organizationIdentifier")
+            ?? claudeOrganization)
       case .grok: GrokProvider(environment: self.helperEnvironment(for: provider))
       case .cursor:
         CursorProvider(
@@ -3150,6 +3192,9 @@ final class UsageStore {
       guard isCurrent() else { return }
       let snapshot = fetched.attributed(to: provider).withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
+      if let claudeOrganization {
+        self.defaults.set(claudeOrganization, forKey: "\(provider.rawValue).organizationIdentifier")
+      }
       self.adoptAutomaticLabel(for: provider, from: snapshot)
       self.states[provider]?.error = nil
       self.states[provider]?.signInCouldNotStart = false
@@ -3250,8 +3295,8 @@ final class UsageStore {
 
   /// Places synthetic local totals without scanning this Mac. Used only by the
   /// refresh self-test, which cannot write `states` from outside the store.
-  func seedLocalUsageForSelfTest(_ usage: LocalUsageSummary?) {
-    self.states[.openAI]?.localUsage = usage
+  func seedLocalUsageForSelfTest(_ usage: LocalUsageSummary?, provider: ProviderID = .openAI) {
+    self.states[provider]?.localUsage = usage
   }
 
   /// Replaces one snapshot for a presentation check, then the caller restores it.

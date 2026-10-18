@@ -86,6 +86,92 @@ import Testing
         environment: ["CLAUDE_CONFIG_DIR": "/tmp/x/"], homeDirectory: self.home)?.path == "/tmp/x")
   }
 
+  @Test func defaultAccountDoesNotFollowTheTeamsTerminalEnvironment() {
+    let inherited = ["PATH": "/usr/bin", "CLAUDE_CONFIG_DIR": "/tmp/nimbus-team"]
+    let personal = ClaudeConfigDirectory.defaultAccountEnvironment(from: inherited)
+    #expect(personal == ["PATH": "/usr/bin"])
+    #expect(ClaudeConfigDirectory.resolve(environment: personal, homeDirectory: self.home)?.path
+      == "/Users/example/.claude")
+    #expect(ClaudeStatuslineBridge.settingsURL(environment: personal).lastPathComponent == "settings.json")
+    #expect(ClaudeAccountProfile.defaultURLs(environment: inherited).map(\.path)
+      == ["/tmp/nimbus-team/.claude.json"])
+  }
+
+  @Test func sameEmailDifferentOrganizationsCannotExchangeLimits() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reserve-identity-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let profile = root.appendingPathComponent(".claude.json")
+    try Data(#"{"oauthAccount":{"emailAddress":"same@example.com","organizationUuid":"personal-org","organizationType":"claude_max"}}"#.utf8).write(to: profile)
+    func provider(token: String) -> AnthropicProvider {
+      AnthropicProvider(
+        environment: ["CLAUDE_CONFIG_DIR": "/tmp/nimbus-team"], allowKeychainRead: true,
+        requestHandler: { request in
+          let authorized = request.value(forHTTPHeaderField: "Authorization") == "Bearer personal-token"
+          let payload: String
+          if request.url?.lastPathComponent == "profile" {
+            payload = authorized
+              ? #"{"organization":{"uuid":"personal-org"}}"#
+              : #"{"organization":{"uuid":"nimbus-org"}}"#
+          } else {
+            payload = authorized
+              ? #"{"seven_day":{"utilization":100,"resets_at":"2033-05-18T03:33:20Z"}}"#
+              : #"{"five_hour":{"utilization":16,"resets_at":"2033-05-18T03:33:20Z"}}"#
+          }
+          return (Data(payload.utf8), HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        },
+        rateLimitGate: ClaudeRateLimitGate(defaults: nil),
+        renewer: { _, _, _ in false },
+        keychainCandidateLoader: { _ in
+          try ClaudeCredentialLoader.decodeCandidate(
+            data: Data("{\"claudeAiOauth\":{\"accessToken\":\"\(token)\",\"subscriptionType\":\"max\"}}".utf8),
+            source: "Fixture Keychain")
+        },
+        credentialFileURLs: [], accountProfileURLs: [profile], keychainItemExists: { false })
+    }
+    let personal = try await provider(token: "personal-token").fetch()
+    #expect(personal.planName == "Max")
+    #expect(personal.windows.map(\.usedPercent) == [100])
+    do {
+      _ = try await provider(token: "nimbus-token").fetch()
+      Issue.record("Nimbus usage was credited to the personal account")
+    } catch UsageProviderError.credentialsNotFound(let message) {
+      #expect(message.contains("different organization"))
+    }
+  }
+
+  @Test func aPinnedOrganizationCannotSilentlyFollowAClISwitch() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let profile = root.appendingPathComponent(".claude.json")
+    try Data(#"{"oauthAccount":{"organizationUuid":"new-team-org"}}"#.utf8).write(to: profile)
+    let provider = AnthropicProvider(
+      environment: [:], allowKeychainRead: true,
+      requestHandler: { _ in Issue.record("A switched organization reached a usage request"); throw URLError(.badURL) },
+      rateLimitGate: ClaudeRateLimitGate(defaults: nil),
+      keychainCandidateLoader: { _ in Issue.record("A switched organization read credentials"); return nil },
+      credentialFileURLs: [], accountProfileURLs: [profile], keychainItemExists: { false },
+      requireAccountIdentity: true,
+      expectedOrganizationIdentifier: StableIdentifier.notificationComponent("original-personal-org"))
+    do {
+      _ = try await provider.fetch()
+      Issue.record("The personal card silently followed the CLI into a Team organization")
+    } catch UsageProviderError.credentialsNotFound(let message) {
+      #expect(message.contains("switched to another organization"))
+    }
+  }
+
+  @Test func unverifiedPassiveLimitsCannotReplaceAuthenticatedAccountLimits() async {
+    let provider = AnthropicProvider(
+      allowKeychainRead: false, passiveStatusline: true, requireAccountIdentity: true)
+    await #expect(throws: UsageProviderError.keychainConsentRequired(.anthropic)) {
+      try await provider.fetch()
+    }
+  }
+
   @Test func secondSlotReadsOnlyItsOwnFolderAndStampsItsOwnProvider() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("reserve-claude2-\(UUID().uuidString)", isDirectory: true)
