@@ -293,11 +293,15 @@ Settings > API measures consumption instead of subscription limits. Paste a key
 there. It stays in the macOS Keychain on this Mac and is off until you save one:
 
 - OpenAI, an organization admin key, read from the Costs API;
-- Anthropic, an organization admin key (or an unscoped personal/service-account
-  key with billing access), read from the Cost Report API. If an ordinary key
+- Anthropic, an organization-scoped personal/service-account key whose linked
+  account can read billing, or a legacy admin key, read from the Cost Report API.
+  Create current keys on [Claude Console's API keys page](https://platform.claude.com/settings/keys)
+  and choose Organization scope. If an ordinary key
   cannot read billing, Reserve checks it through the Models API and shows
-  "Key valid" with billing unavailable when that succeeds. This makes no model
-  calls and does not invent a zero spend reading;
+  "Key valid" with billing unavailable when that succeeds. The details retain
+  the billing HTTP status without repeating provider error text or credentials.
+  Personal/service-account keys use Bearer authentication; legacy admin keys
+  keep x-api-key. This makes no model calls and does not invent a zero spend reading;
 - OpenRouter, the API key itself, read from that key's usage endpoint: today,
   this week, this month, and the credit balance when the key is capped;
 - xAI, a management key, read from the prepaid balance API: spend against

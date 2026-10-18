@@ -49,7 +49,7 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   public var keyHint: String {
     switch self {
     case .openAI: "sk-admin-…"
-    case .anthropic: "sk-ant-admin…"
+    case .anthropic: "sk-ant-usr-…"
     case .openRouter: "sk-or-…"
     case .xAI: "xai-…"
     case .typeSafe: "ts-…"
@@ -63,7 +63,7 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   public var keySettingsURL: URL {
     switch self {
     case .openAI: URL(string: "https://platform.openai.com/settings/organization/admin-keys")!
-    case .anthropic: URL(string: "https://platform.claude.com/settings/admin-keys")!
+    case .anthropic: URL(string: "https://platform.claude.com/settings/keys")!
     case .openRouter: URL(string: "https://openrouter.ai/settings/keys")!
     case .xAI: URL(string: "https://console.x.ai/team/default/settings")!
     case .typeSafe: URL(string: "https://console.typesafe.ai/settings/keys")!
@@ -518,17 +518,31 @@ public struct APIConsumptionClient: Sendable {
   private func fetchAnthropic(_ key: String) async throws -> APIConsumptionSnapshot {
     do {
       return try await self.fetchAnthropicCosts(key)
-    } catch UsageProviderError.unauthorized where !key.hasPrefix("sk-ant-admin") {
+    } catch UsageProviderError.unauthorized(let billingRefusal) where !key.hasPrefix("sk-ant-admin") {
       // A workspace key can be valid for models and refused by the Admin API.
       // Try billing first: unscoped personal/service-account keys can read it too.
-      return try await self.validateAnthropicModelKey(key)
+      return try await self.validateAnthropicModelKey(key, billingRefusal: billingRefusal)
     }
   }
 
-  private func validateAnthropicModelKey(_ key: String) async throws -> APIConsumptionSnapshot {
-    var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!)
-    request.setValue(key, forHTTPHeaderField: "x-api-key")
+  /// Current personal/service-account keys use the documented Bearer form.
+  /// Legacy Admin keys retain the x-api-key authentication in Admin API examples.
+  private static func anthropicRequest(url: URL, key: String) -> URLRequest {
+    var request = URLRequest(url: url)
+    if key.hasPrefix("sk-ant-admin") {
+      request.setValue(key, forHTTPHeaderField: "x-api-key")
+    } else {
+      request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    }
     request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+    return request
+  }
+
+  private func validateAnthropicModelKey(
+    _ key: String, billingRefusal: String
+  ) async throws -> APIConsumptionSnapshot {
+    let request = Self.anthropicRequest(
+      url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!, key: key)
     let data: Data
     do {
       data = try await self.data(for: request, provider: .anthropic)
@@ -537,7 +551,7 @@ public struct APIConsumptionClient: Sendable {
       // Do not expose either endpoint's free-text error, which can echo secrets.
       throw UsageProviderError.unauthorized(
         "Anthropic could not validate this API key. Check that it is active in Claude Console. "
-          + "Spend reporting requires an admin key or an unscoped key with billing access.")
+          + "Spend reporting requires organization scope and permission to read billing.")
     }
     let page = try Self.decode(AnthropicModelsPage.self, from: data, provider: .anthropic)
     let names = page.data.map { $0.displayName ?? $0.id }
@@ -546,12 +560,14 @@ public struct APIConsumptionClient: Sendable {
       windows: [],
       note: APIConsumptionNote(
         headline: "Key valid",
-        detail: "Billing unavailable · use an admin key for spend"),
+        detail: "Billing unavailable · check organization scope and billing permission"),
       fetchedAt: self.now(),
       source: "Anthropic Models API",
       details: [
         UsageDetail("Key status", "Validated by Anthropic Models API"),
-        UsageDetail("Spend reporting", "Requires an admin key or an unscoped key with billing access"),
+        UsageDetail("Spend reporting", "Organization scope and permission to read billing required"),
+        UsageDetail("Billing response", billingRefusal),
+        UsageDetail("Credential type", key.hasPrefix("sk-ant-usr-") ? "Personal API key" : "API key"),
         UsageDetail("Models", names.isEmpty ? "None returned" : names.prefix(4).joined(separator: ", ")),
       ])
   }
@@ -577,10 +593,7 @@ public struct APIConsumptionClient: Sendable {
       guard let url = components.url else {
         throw UsageProviderError.invalidResponse("Anthropic cost URL could not be formed.")
       }
-      var request = URLRequest(url: url)
-      request.setValue(key, forHTTPHeaderField: "x-api-key")
-      request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-      return request
+      return Self.anthropicRequest(url: url, key: key)
     }
 
     let pages = try await self.groupedPages(
@@ -1030,6 +1043,21 @@ public struct APIConsumptionClient: Sendable {
   static func refusalMessage(
     provider: APIConsumptionProvider, status: Int, body: Data, key: String?
   ) -> String {
+    if provider == .anthropic, let key, !key.hasPrefix("sk-ant-admin") {
+      // A non-admin prefix does not exclude billing: organization-scoped
+      // personal/service-account keys inherit the linked account's permissions.
+      // Keep the actual HTTP status; never echo the provider's free-text error.
+      let reason: String
+      switch Self.providerErrorCode(in: body) {
+      case "authentication_error", "invalid_api_key", "invalid_key", "unauthorized":
+        reason = "Authentication refused for this endpoint."
+      case "permission_error", "insufficient_permissions", "forbidden", "permission_denied":
+        reason = "Permission denied."
+      default: reason = "Access denied."
+      }
+      return "Anthropic billing request refused (HTTP \(status)). \(reason) "
+        + "Check organization scope and the linked account's billing permission."
+    }
     let kind = provider == .anthropic ? "admin key" : provider.keyKind.lowercased()
     var message = "\(provider.displayName) refused this \(kind)."
     switch Self.providerErrorCode(in: body) {

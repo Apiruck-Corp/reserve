@@ -1247,7 +1247,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.apiReading(for: provider, saved: saved), size: 12, color: .secondaryLabelColor)
     status.identifier = NSUserInterfaceItemIdentifier("api-status-\(provider.rawValue)")
     status.toolTip =
-      self.store.apiConsumptionErrors[provider]
+      self.apiExplanation(for: provider)
       ?? self.store.apiConsumption[provider]?.breakdownSummary
       ?? status.stringValue
     status.lineBreakMode = .byTruncatingTail
@@ -1329,8 +1329,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let help: String?
     switch provider.provider {
     case .anthropic:
-      help = "Spend requires a Claude Console admin key or an unscoped key with billing access. "
-        + "An ordinary key can be validated without making a model call."
+      help = "Use a key with Organization scope linked to an account allowed to read billing. "
+        + "Legacy admin keys also work. Model access alone does not establish billing access."
     case .typeSafe:
       help = "TypeSafe reports available models, descriptions and release dates. "
         + "Its documented API does not expose account spend or balance."
@@ -1349,7 +1349,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // Keep the error label installed even without an error. A refresh can finish
     // while the credential editor has focus, when structural rebuilds are deferred.
     // Live updates must still replace or clear the previous key's explanation.
-    let error = self.store.apiConsumptionErrors[provider]
+    let error = self.apiExplanation(for: provider)
     let reason = NSTextField(wrappingLabelWithString: error ?? "")
     reason.identifier = NSUserInterfaceItemIdentifier("api-error-\(provider.rawValue)")
     reason.font = .systemFont(ofSize: 11)
@@ -1873,6 +1873,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       url.scheme?.lowercased() == "https"
     else { return }
     NSWorkspace.shared.open(url)
+  }
+
+  /// Model validation can succeed while billing fails. Keep that sanitized
+  /// billing response visible in Settings alongside the model-only reading.
+  private func apiExplanation(for provider: APIAccountID) -> String? {
+    if let error = self.store.apiConsumptionErrors[provider] { return error }
+    guard provider.provider == .anthropic,
+      let snapshot = self.store.apiConsumption[provider], snapshot.source == "Anthropic Models API"
+    else { return nil }
+    return snapshot.details.first { $0.label == "Billing response" }?.value
   }
 
   private func apiReading(for provider: APIAccountID, saved: Bool) -> String {
@@ -2887,7 +2897,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
         // The name field appears once a provider has a second account.
         parts.append(self.apiAccountTakesName(provider) ? "named" : "-")
-        parts.append(self.store.apiConsumptionErrors[provider] ?? "-")
+        parts.append(self.apiExplanation(for: provider) ?? "-")
       }
     case .insights:
       let enabled = self.store.accounts.filter { self.store.isEnabled($0) }
@@ -2975,11 +2985,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         let saved = self.store.hasAPIConsumptionKey(provider)
         check("api-enabled-\(provider.rawValue)", self.store.isAPIConsumptionEnabled(provider))
         setText("api-status-\(provider.rawValue)", self.apiReading(for: provider, saved: saved))
-        let error = self.store.apiConsumptionErrors[provider]
+        let error = self.apiExplanation(for: provider)
         setText("api-error-\(provider.rawValue)", error ?? "")
         field("api-error-\(provider.rawValue)")?.isHidden = error == nil
         field("api-status-\(provider.rawValue)")?.toolTip =
-          self.store.apiConsumptionErrors[provider]
+          self.apiExplanation(for: provider)
           ?? self.store.apiConsumption[provider]?.breakdownSummary
           ?? field("api-status-\(provider.rawValue)")?.stringValue
       }

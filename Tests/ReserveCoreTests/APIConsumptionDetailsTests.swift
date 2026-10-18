@@ -128,7 +128,7 @@ struct APIConsumptionDetailsTests {
       body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-api03-regular"}}"#,
       key: "sk-ant-api03-regular-test-key-000000")
     #expect(regular == "Anthropic could not validate this API key. Check that it is active in Claude Console. "
-      + "Spend reporting requires an admin key or an unscoped key with billing access.")
+      + "Spend reporting requires organization scope and permission to read billing.")
 
     let organization = await refusal(
       status: 403,
@@ -153,7 +153,8 @@ struct APIConsumptionDetailsTests {
     let client = APIConsumptionClient(requestHandler: { request in
       await sent.add(request)
       #expect(request.url?.host == "api.anthropic.com")
-      #expect(request.value(forHTTPHeaderField: "x-api-key") == "sk-ant-api03-test")
+      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-ant-api03-test")
+      #expect(request.value(forHTTPHeaderField: "x-api-key") == nil)
       #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
       #expect(request.httpMethod == nil || request.httpMethod == "GET")
       let models = request.url?.path == "/v1/models"
@@ -170,6 +171,57 @@ struct APIConsumptionDetailsTests {
     #expect(snapshot.windows.isEmpty && snapshot.primary == nil)
     #expect(snapshot.source == "Anthropic Models API")
     #expect(self.byLabel(snapshot)["Models"] == "Claude test")
+  }
+
+  @Test(arguments: ["sk-ant-usr-fixture-personal", "sk-ant-svc-fixture-service", "sk-ant-api03-fixture-legacy"])
+  func billingKeysUseDocumentedBearerAuthentication(_ key: String) async throws {
+    let sent = Sent()
+    let client = APIConsumptionClient(requestHandler: { request in
+      await sent.add(request)
+      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(key)")
+      #expect(request.value(forHTTPHeaderField: "x-api-key") == nil)
+      #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
+      return (Data(#"{"data":[{"results":[{"amount":"123.00"}]}]}"#.utf8),
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    })
+    let snapshot = try await client.fetch(.anthropic, apiKey: key)
+    #expect(snapshot.primary?.usedMinorUnits == 123)
+    #expect(snapshot.source == "Anthropic Cost API")
+    #expect(await sent.value.count == 1)
+  }
+
+  @Test func legacyAdminAuthenticationStillUsesXAPIKey() async throws {
+    let client = APIConsumptionClient(requestHandler: { request in
+      #expect(request.value(forHTTPHeaderField: "x-api-key") == "sk-ant-admin01-fixture")
+      #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+      return (Data(#"{"data":[]}"#.utf8),
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    })
+    _ = try await client.fetch(.anthropic, apiKey: "sk-ant-admin01-fixture")
+    #expect(APIConsumptionProvider.anthropic.keySettingsURL.absoluteString
+      == "https://platform.claude.com/settings/keys")
+  }
+
+  @Test(arguments: [401, 403])
+  func personalKeyFallbackRetainsBillingFailureWithoutEchoingSecrets(_ status: Int) async throws {
+    let key = "sk-ant-usr-fixture-secret"
+    let client = APIConsumptionClient(requestHandler: { request in
+      let models = request.url?.path == "/v1/models"
+      let body = models ? #"{"data":[{"id":"claude-fixture"}]}"#
+        : #"{"error":{"type":"permission_error","message":"Denied key sk-ant-usr-fixture-secret"}}"#
+      return (Data(body.utf8), HTTPURLResponse(
+        url: request.url!, statusCode: models ? 200 : status, httpVersion: nil, headerFields: nil)!)
+    })
+    let snapshot = try await client.fetch(.anthropic, apiKey: key)
+    let details = self.byLabel(snapshot)
+    #expect(details["Credential type"] == "Personal API key")
+    #expect(details["Billing response"]?.contains("HTTP \(status)") == true)
+    #expect(details["Billing response"]?.contains("Permission denied") == true)
+    #expect(snapshot.note?.detail?.contains("organization scope") == true)
+    #expect(snapshot.note?.detail?.contains("use an admin key") == false)
+    let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+    #expect(!encoded.contains(key))
+    #expect(snapshot.windows.isEmpty)
   }
 
   @Test func ordinaryKeyWithBillingAccessStillShowsSpend() async throws {
