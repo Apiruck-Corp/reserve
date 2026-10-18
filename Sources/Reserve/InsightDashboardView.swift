@@ -355,11 +355,7 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
   }
   private func spacer() -> NSView { let v = NSView(); v.setContentHuggingPriority(.defaultLow, for: .horizontal); return v }
   private func dot(_ provider: ProviderID) -> NSView {
-    let dot = NSView(); dot.wantsLayer = true; dot.layer?.cornerRadius = 4
-    dot.layer?.backgroundColor = InsightTrendView.color(provider).cgColor
-    dot.widthAnchor.constraint(equalToConstant: 8).isActive = true
-    dot.heightAnchor.constraint(equalToConstant: 8).isActive = true
-    return dot
+    InsightProviderDot(provider: provider)
   }
   private func popup(_ titles: [String], id: String, action: Selector, width: CGFloat) -> NSPopUpButton {
     let p = NSPopUpButton(); p.addItems(withTitles: titles); p.target = self; p.action = action
@@ -393,4 +389,27 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
     self.searchChanged?(self.filters)
   }
   var searchChanged: ((Filters) -> Void)?
+}
+
+/// Resolve legend markers in their own appearance, just like the chart strokes.
+@MainActor
+private final class InsightProviderDot: NSView {
+  private let provider: ProviderID
+
+  init(provider: ProviderID) {
+    self.provider = provider
+    super.init(frame: .zero)
+    self.wantsLayer = true
+    self.layer?.cornerRadius = 4
+    self.layer?.backgroundColor = self.resolvedCGColor(InsightTrendView.color(provider))
+    self.widthAnchor.constraint(equalToConstant: 8).isActive = true
+    self.heightAnchor.constraint(equalToConstant: 8).isActive = true
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.layer?.backgroundColor = self.resolvedCGColor(InsightTrendView.color(self.provider))
+  }
 }

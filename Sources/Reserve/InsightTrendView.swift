@@ -15,18 +15,31 @@ final class InsightTrendView: NSView {
     self.addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseMoved, .inVisibleRect], owner: self))
   }
   required init?(coder: NSCoder) { nil }
+  // Muted mineral tones keep overlapping series distinct without competing
+  // with the readings. Dark-mode variants lift luminance rather than saturation.
+  private static let palette: [ProviderKind: NSColor] = [
+    .openAI: tone(light: 0x526E88, dark: 0xA9BED3),      // Slate blue
+    .anthropic: tone(light: 0xB37459, dark: 0xD9A184),   // Copper
+    .grok: tone(light: 0x82748D, dark: 0xBBAAC6),        // Smoky plum
+    .cursor: tone(light: 0x5E8478, dark: 0x9BBBAD),      // Sage
+    .copilot: tone(light: 0xA36C82, dark: 0xD0A1B3),     // Dusty rose
+    .gemini: tone(light: 0x6E789C, dark: 0xADB6D7),      // Soft indigo
+    .kimi: tone(light: 0x9B804D, dark: 0xCFBA8D),        // Ochre
+    .zai: tone(light: 0x748262, dark: 0xB0BE9D),         // Moss
+  ]
+
   static func color(_ provider: ProviderID) -> NSColor {
-    switch provider.kind {
-    case .openAI: .systemBlue
-    case .anthropic: .systemOrange
-    case .grok: .systemPurple
-    case .cursor: .systemTeal
-    case .copilot: .systemPink
-    case .gemini: .systemIndigo
-    case .kimi: .systemYellow
-    case .zai: .systemGreen
+    Self.palette[provider.kind] ?? .secondaryLabelColor
+  }
+
+  private static func tone(light: UInt32, dark: UInt32) -> NSColor {
+    NSColor(name: nil) { appearance in
+      let value = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+      return NSColor(srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+        green: CGFloat((value >> 8) & 0xFF) / 255, blue: CGFloat(value & 0xFF) / 255, alpha: 1)
     }
   }
+
   private func value(_ day: InsightHistoryDay) -> Double? {
     let value = self.metric == .tokens ? day.tokens.map(Double.init) : day.costUSD
     return value.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
