@@ -97,7 +97,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     window.title = Pane.general.title
     window.isReleasedWhenClosed = false
     window.toolbarStyle = .preference
-    window.level = .floating
+    // An ordinary window: it comes to the front when opened from the menu bar
+    // and goes behind whatever app is clicked next, like any other app's.
+    window.level = .normal
     window.hidesOnDeactivate = false
     // Opening Settings from another Space brings the window to that Space
     // instead of switching back to the one it was left on.
@@ -2905,7 +2907,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && window.toolbarStyle == .preference
       && window.toolbar?.items.count == Pane.allCases.count
       && window.toolbar?.identifier == "settings-toolbar"
-    let usesMenuBarWindowLevel = window.level == .floating
+    let usesOrdinaryWindowLevel = window.level == .normal
 
     var paneResults: [String] = []
     var allPanesFit = true
@@ -3183,13 +3185,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     window.orderOut(nil)
 
     let success =
-      isNative && usesMenuBarWindowLevel && allPanesFit && allPanesReadable && generalSuccess
+      isNative && usesOrdinaryWindowLevel && allPanesFit && allPanesReadable && generalSuccess
       && providersSuccess && apiSuccess && notificationsSuccess && appearanceSuccess && insightsSuccess
       && privacySuccess && aboutSuccess && closeReleasesHiddenPane && reopenRebuildsPane
     let details =
       success
       ? "settings is a native toolbar window with \(Pane.allCases.count) resizable panes, one General menu-bar model, adaptive full-surface themes with fixed quota semantics, deficit transition alerts, provider detail behind disclosure, and an About pane carrying identity, updates and links"
-      : "settings native=\(isNative), floating=\(usesMenuBarWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), api=\(apiSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess), closeReleases=\(closeReleasesHiddenPane), reopenRebuilds=\(reopenRebuildsPane)"
+      : "settings native=\(isNative), ordinaryLevel=\(usesOrdinaryWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), api=\(apiSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess), closeReleases=\(closeReleasesHiddenPane), reopenRebuilds=\(reopenRebuildsPane)"
     return (success, details)
   }
 

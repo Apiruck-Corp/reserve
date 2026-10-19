@@ -1093,7 +1093,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   func popoverDidClose(_ notification: Notification) {
-    self.settingsWindow?.level = .floating
+    // Levels only order Settings against the open popover. Afterwards it is an
+    // ordinary window again, free to go behind the next app that is clicked.
+    self.settingsWindow?.level = .normal
     self.stopMouseMonitors()
     self.lockedStatusItemLength = nil
     self.updateStatusIcon()
