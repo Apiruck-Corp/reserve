@@ -222,4 +222,38 @@ struct AnthropicWorkspaceContextTests {
       #expect(message.count <= 240)
     } catch { Issue.record("unexpected error \(error)") }
   }
+
+  @Test func aRateLimitDuringModelDiscoveryKeepsItsRetryDeadline() async {
+    let client = APIConsumptionClient(requestHandler: { request in
+      switch request.url?.path {
+      case "/v1/organizations/workspaces":
+        return (Data(), HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil,
+          headerFields: ["Retry-After": "120"])!)
+      case "/v1/models": return Self.reply(request, 400, Self.missing)
+      default: return Self.reply(request, 403, #"{"error":{"type":"permission_error"}}"#)
+      }
+    })
+    do {
+      _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture")
+      Issue.record("a rate-limited discovery was treated as success")
+    } catch UsageProviderError.rateLimited(let retryAt) {
+      #expect(retryAt != nil)
+    } catch { Issue.record("rate limit became \(error)") }
+  }
+
+  @Test func anOutageDuringModelDiscoveryIsNotAKeyProblem() async {
+    let client = APIConsumptionClient(requestHandler: { request in
+      switch request.url?.path {
+      case "/v1/organizations/workspaces": return Self.reply(request, 503, "")
+      case "/v1/models": return Self.reply(request, 400, Self.missing)
+      default: return Self.reply(request, 403, #"{"error":{"type":"permission_error"}}"#)
+      }
+    })
+    do {
+      _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture")
+      Issue.record("an outage was treated as success")
+    } catch UsageProviderError.unavailable(let message) {
+      #expect(message != APIConsumptionClient.anthropicWorkspaceKeyMessage)
+    } catch { Issue.record("unexpected error \(error)") }
+  }
 }

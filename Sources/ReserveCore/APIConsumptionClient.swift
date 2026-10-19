@@ -606,10 +606,22 @@ public struct APIConsumptionClient: Sendable {
       throw UsageProviderError.unauthorized(
         "Anthropic refused this key. Check that it is active in Claude Console.")
     } catch is AnthropicWorkspaceRequired {
-      if mayDiscoverWorkspace, let discovered = try? await self.anthropicDefaultWorkspace(key) {
-        return try await self.validateAnthropicModelKey(key, workspaceID: discovered, mayDiscoverWorkspace: false)
+      guard mayDiscoverWorkspace else {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
       }
-      throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      let discovered: String
+      do {
+        discovered = try await self.anthropicDefaultWorkspace(key)
+      } catch UsageProviderError.unauthorized {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      } catch is AnthropicWorkspaceRequired {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      } catch is AnthropicWorkspaceUnresolved {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      }
+      // Outages, rate limits and bad requests during discovery propagate as
+      // they are, keeping any Retry-After deadline.
+      return try await self.validateAnthropicModelKey(key, workspaceID: discovered, mayDiscoverWorkspace: false)
     }
     let page = try Self.decode(AnthropicModelsPage.self, from: data, provider: .anthropic)
     let names = page.data.map { $0.displayName ?? $0.id }
