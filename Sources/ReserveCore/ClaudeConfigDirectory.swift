@@ -109,6 +109,15 @@ public struct ClaudeConfigDirectory: Sendable, Equatable, Hashable {
   /// The session transcripts Reserve scans for activity from this Mac.
   public var projectsURL: URL { self.url.appendingPathComponent("projects") }
 
+  /// The first card always owns Claude Code's ordinary home. Launching Reserve
+  /// from a terminal signed in to a team must not redirect that card's files,
+  /// status line, or renewal while it still reads the default Keychain item.
+  public static func defaultAccountEnvironment(from base: [String: String]) -> [String: String] {
+    var environment = base
+    environment.removeValue(forKey: Self.environmentKey)
+    return environment
+  }
+
   /// The environment a Claude Code launch for this directory receives: the
   /// caller's environment with `CLAUDE_CONFIG_DIR` pointing here.
   public func environment(from base: [String: String]) -> [String: String] {

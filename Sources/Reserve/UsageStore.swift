@@ -9,6 +9,7 @@ struct ProviderViewState: Identifiable {
   var isRefreshing = false
   var isConnecting = false
   var localUsage: LocalUsageSummary?
+  var hasUnattributedClaudeHistory = false
   /// When this Mac's session logs were last scanned successfully. Separate
   /// from the quota snapshot, which can be fresh while these totals are not.
   var localHistoryCheckedAt: Date?
@@ -139,6 +140,10 @@ final class UsageStore {
   /// Production uses one scanner so its in-memory index survives between
   /// scans. Test and preview stores leave this nil so they never watch this
   /// Mac's session roots.
+  private let hourlyUsageScanner: LocalHourlyUsageScanner?
+  private(set) var publishedHourlyHistory: [ProviderID: HourlyUsageHistory] = [:]
+  private(set) var hourlyHistoryStatus = "Hourly detail has not been loaded yet."
+
   private let localUsageScanner: LocalUsageScanner?
   private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
   private let cachedLocalUsageLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary]
@@ -221,6 +226,8 @@ final class UsageStore {
         self.localScanTask?.cancel()
         self.localScanTask = nil
         self.isScanningLocalUsage = false
+        self.publishedHourlyHistory = [:]
+        self.hourlyHistoryStatus = "Local history is off."
         self.localHistoryScanError = nil
         self.localScanNeedsContinuation = false
         self.lastLocalUsageScanAt = nil
@@ -365,6 +372,7 @@ final class UsageStore {
     cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
     localUsageProgress: (@Sendable () async -> (incomplete: Bool, checkpoints: Int))? = nil,
     localScanContinuationDelay: Duration = .seconds(5),
+    hourlyUsageScanner: LocalHourlyUsageScanner? = nil,
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
     openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
@@ -381,13 +389,15 @@ final class UsageStore {
     self.serviceStatusFetch = serviceStatusFetch
     self.now = now
     let productionStore = planKeys == nil && apiKeys == nil && fetchOverride == nil
-      && localUsageScan == nil && cachedLocalUsageLoad == nil && localUsageProgress == nil && startAutomatically
+      && localUsageScan == nil && cachedLocalUsageLoad == nil && localUsageProgress == nil
+      && hourlyUsageScanner == nil && startAutomatically
     self.usesProductionKeychain = productionStore
     self.honorsHostRefreshEnvironment = productionStore
     self.loginHandoffDeadline = loginHandoffDeadline
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.localUsageScanner = productionStore ? Self.makeProductionLocalUsageScanner() : nil
+    self.hourlyUsageScanner = hourlyUsageScanner ?? (productionStore ? LocalHourlyUsageScanner() : nil)
     if let localUsageScan {
       self.localUsageScan = localUsageScan
     } else if let scanner = self.localUsageScanner {
@@ -435,6 +445,9 @@ final class UsageStore {
       defaults: defaults, active: notificationsActive ?? startAutomatically)
     let addedAccounts = Self.loadAddedAccounts(from: defaults)
     self.addedAccounts = addedAccounts
+    if addedAccounts.contains(where: \.isAnthropic) {
+      defaults.set(true, forKey: "anthropic.historyIncludesMultipleAccounts")
+    }
     // A default account of a kind that can hold several accounts can be
     // named too, so it can be told apart from the added ones.
     for kind in ProviderKind.allCases where kind.supportsAddedAccounts {
@@ -497,6 +510,10 @@ final class UsageStore {
           ? "Reported monthly cost" : "Typical monthly cost"
       state.renewalStart = self.renewalStart(for: provider)
       state.nextRenewal = self.nextRenewal(for: provider)
+      state.hasUnattributedClaudeHistory = self.hasUnattributedClaudeHistory(for: provider)
+      if state.hasUnattributedClaudeHistory, state.localUsage?.origin == .localDevice {
+        state.localUsage = nil
+      }
       state.localHistoryEnabled = self.localHistoryEnabled
       state.localHistoryCheckedAt = self.localHistoryEnabled ? self.lastLocalUsageScanAt : nil
       state.localHistoryError = self.localHistoryEnabled ? self.localHistoryScanError : nil
@@ -504,6 +521,46 @@ final class UsageStore {
       state.hidesPersonalInfo = self.hidesPersonalInfo
       return state
     }
+  }
+
+  /// Claude transcripts do not identify the organization that paid for each
+  /// message. Keep their single device total in Insights, never credit it to
+  /// a personal or Team subscription merely because it occupies the first slot.
+  func hasUnattributedClaudeHistory(for provider: ProviderID) -> Bool {
+    provider.isAnthropic && self.defaults.bool(forKey: "anthropic.historyIncludesMultipleAccounts")
+  }
+
+  /// Two Claude cards signed in to one organization would show the same
+  /// quota twice under different names. An added account signed in inside its
+  /// own folder on purpose, so it keeps the reading; the first card only
+  /// follows whatever Claude Code last signed in to. Returns the card that
+  /// keeps the reading when `provider` duplicates it.
+  func claudeAccountSharingOrganization(with provider: ProviderID) -> ProviderID? {
+    guard provider.isAnthropic else { return nil }
+    func organization(_ account: ProviderID) -> String? {
+      let directory = self.claudeConfigDirectory(for: account)
+      // An added card without a folder has no profile of its own yet.
+      if account.isAdded, directory == nil { return nil }
+      return AnthropicProvider.organizationIdentifier(configDirectory: directory)
+    }
+    return Self.claudeOrganizationOwner(
+      of: provider, among: self.accounts.filter { $0.isAnthropic && self.isEnabled($0) },
+      organization: organization)
+  }
+
+  static func claudeOrganizationOwner(
+    of provider: ProviderID, among accounts: [ProviderID], organization: (ProviderID) -> String?
+  ) -> ProviderID? {
+    guard let mine = organization(provider) else { return nil }
+    let sharing = accounts.filter { $0 == provider || organization($0) == mine }
+    guard sharing.count > 1 else { return nil }
+    let owner = sharing.first(where: \.isAdded) ?? sharing[0]
+    return owner == provider ? nil : owner
+  }
+
+  func insightHistoryName(for provider: ProviderID) -> String {
+    provider == .anthropic && self.hasUnattributedClaudeHistory(for: provider)
+      ? "Claude on this Mac" : provider.displayName
   }
 
   // MARK: Accounts
@@ -624,6 +681,9 @@ final class UsageStore {
     self.defaults.set(true, forKey: "provider.\(account.rawValue).enabled")
     self.defaults.set(false, forKey: "\(account.rawValue).keychainReadAllowed")
     self.addedAccounts.append(account)
+    if account.isAnthropic {
+      self.defaults.set(true, forKey: "anthropic.historyIncludesMultipleAccounts")
+    }
     self.persistAddedAccounts()
     var state = ProviderViewState(provider: account)
     // A key plan has nothing to read until its key is pasted.
@@ -656,6 +716,7 @@ final class UsageStore {
       "provider.\(account.rawValue).enabled",
       "\(account.rawValue).keychainReadAllowed",
       "\(account.rawValue).passiveStatusline",
+      "\(account.rawValue).organizationIdentifier",
       "\(account.rawValue).label",
       "\(account.rawValue).labelIsCustom",
       "\(account.rawValue).ordinal",
@@ -822,7 +883,10 @@ final class UsageStore {
   /// The status line lives in the slot's own settings file: Claude Code's
   /// default home for the first slot, the chosen folder for the second.
   private func claudeStatuslineSettingsURL(for provider: ProviderID) throws -> URL {
-    guard provider.isAdded else { return ClaudeStatuslineBridge.settingsURL() }
+    guard provider.isAdded else {
+      return ClaudeStatuslineBridge.settingsURL(environment: ClaudeConfigDirectory.defaultAccountEnvironment(
+        from: ProcessInfo.processInfo.environment))
+    }
     guard let directory = self.claudeConfigDirectory(for: provider) else {
       throw AnthropicProvider.configDirectoryMissing
     }
@@ -857,12 +921,14 @@ final class UsageStore {
     return ClaudeConfigDirectory(path: folder.path)
   }
 
-  /// The helper environment for an account: unchanged for a default account,
-  /// with the home variable pointing at its folder for an added one.
+  /// Added accounts use their own folder. The first Claude card always uses
+  /// the ordinary home, independent of the terminal Reserve was launched from.
   func helperEnvironment(
     for provider: ProviderID, base: [String: String] = ProcessInfo.processInfo.environment
   ) -> [String: String] {
-    guard let folder = self.accountFolder(for: provider) else { return base }
+    guard let folder = self.accountFolder(for: provider) else {
+      return provider.isAnthropic ? ClaudeConfigDirectory.defaultAccountEnvironment(from: base) : base
+    }
     return folder.environment(for: provider.kind, from: base)
   }
 
@@ -892,9 +958,10 @@ final class UsageStore {
           "Enter the full path of a folder, such as \(example).")
       }
       // Pointed at the default home, the helper would sign in over the first
-      // account, which already covers that folder. The default account also
-      // reads a folder named by the environment Reserve was launched with.
-      let environmentHome = ProcessInfo.processInfo.environment[variable].flatMap(AccountFolder.init(path:))
+      // account, which already covers that folder. Other helpers can also
+      // inherit their default folder from Reserve's launch environment.
+      let environmentHome = provider.isAnthropic ? nil
+        : ProcessInfo.processInfo.environment[variable].flatMap(AccountFolder.init(path:))
       guard !parsed.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome),
         parsed.resolvedPath != environmentHome?.resolvedPath
       else {
@@ -935,6 +1002,7 @@ final class UsageStore {
     } else {
       self.defaults.removeObject(forKey: Self.configDirectoryKey(provider))
     }
+    self.defaults.removeObject(forKey: "\(provider.rawValue).organizationIdentifier")
     self.states[provider] = ProviderViewState(provider: provider)
     self.staleProviders.remove(provider)
     self.incidentProviders.remove(provider)
@@ -963,9 +1031,9 @@ final class UsageStore {
   private func accountFolderConflict(_ provider: ProviderID) -> String? {
     guard let folder = self.accountFolder(for: provider) else { return nil }
     let resolved = folder.resolvedPath
-    // The default account reads the helper's default home, or the folder the
-    // environment Reserve was launched with names.
-    let environmentHome = ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey
+    // Claude's first card uses the ordinary home. Other default helpers may
+    // inherit a folder from Reserve's launch environment.
+    let environmentHome = provider.isAnthropic ? nil : ProviderDescriptor.forProvider(provider).homeFolderEnvironmentKey
       .flatMap { ProcessInfo.processInfo.environment[$0] }.flatMap(AccountFolder.init(path:))
     if folder.isDefaultHome(for: provider.kind, homeDirectory: self.accountsHome)
       || resolved == environmentHome?.resolvedPath
@@ -1151,10 +1219,10 @@ final class UsageStore {
   var insightHistoryDays: Int {
     get {
       let stored = self.defaults.integer(forKey: "insights.historyDays")
-      return [7, 30, 90].contains(stored) ? stored : 30
+      return [1, 7, 30, 90].contains(stored) ? stored : 30
     }
     set {
-      let days = [7, 30, 90].contains(newValue) ? newValue : 30
+      let days = [1, 7, 30, 90].contains(newValue) ? newValue : 30
       self.defaults.set(days, forKey: "insights.historyDays")
       self.changed()
     }
@@ -1167,12 +1235,15 @@ final class UsageStore {
 
   var dailyHistoryLoadCountForTesting: Int { self.dailyHistoryLoads }
 
-  func insightSeries(for provider: ProviderID, now: Date = Date()) -> InsightHistorySeries {
+  func insightSeries(for provider: ProviderID, now: Date = Date(), origin: UsageInsightOrigin? = nil) -> InsightHistorySeries {
     return InsightHistoryRange.series(
       provider: provider,
       days: self.insightHistoryDays,
       now: now,
-      published: self.publishedDailyHistory)
+      published: origin == .providerAccount ? [:] : self.publishedDailyHistory,
+      accountDays: origin == .localDevice ? [] : self.states[provider]?.snapshot?.accountTokenActivity?.dailyUsageBuckets
+        ?? (self.states[provider]?.snapshot?.accountUsage?.origin == .providerAccount
+          ? self.states[provider]?.snapshot?.accountUsage?.dailyTokens ?? [] : []))
   }
 
   /// Test-only publication. Production scans will call the same replacement
@@ -1190,7 +1261,7 @@ final class UsageStore {
   }
 
   /// Replaces published days from a cache-only read. Does not scan session
-  /// roots. Disabled history and disabled providers are dropped.
+  /// roots. Disabled history is dropped; known providers retain historical days.
   func publishCachedHistory(_ histories: [ProviderID: CachedUsageHistory]) {
     guard self.localHistoryEnabled else {
       self.publishedDailyHistory = [:]
@@ -1198,11 +1269,11 @@ final class UsageStore {
     }
     var next: [ProviderID: [InsightHistoryDay]] = [:]
     for (provider, history) in histories {
-      guard self.isEnabled(provider),
+      guard self.accounts.contains(provider),
         ProviderDescriptor.forProvider(provider).capabilities.contains(.localHistory)
       else { continue }
       next[provider] = history.days.map {
-        InsightHistoryDay(day: $0.day, tokens: $0.tokens, costUSD: $0.costUSD)
+        InsightHistoryDay(day: $0.day, tokens: $0.tokens, costUSD: $0.costUSD, detail: $0.detail)
       }.sorted { $0.day < $1.day }
     }
     self.publishedDailyHistory = next
@@ -1216,9 +1287,16 @@ final class UsageStore {
       self.dailyHistoryLoads += 1
       return
     }
-    let enabled = Set(self.accounts.filter { self.isEnabled($0) })
-    let loaded = await self.dailyHistoryLoad(enabled, now)
+    let known = Set(self.accounts)
+    let loaded = await self.dailyHistoryLoad(known, now)
     self.publishCachedHistory(loaded)
+    if let scanner = self.hourlyUsageScanner, self.localHistoryEnabled {
+      let hourly = await scanner.cachedHistory(now: now)
+      if self.localHistoryEnabled {
+        self.publishedHourlyHistory = hourly
+        self.publishHourlyToday(now: now)
+      }
+    }
   }
 
   var notificationsEnabled: Bool {
@@ -2630,6 +2708,11 @@ final class UsageStore {
       self.changed()
       completion?()
     } else if status == 0 {
+      // A deliberate successful sign-in may choose a new organization. A CLI
+      // switch outside Reserve cannot silently rebind an existing card.
+      if provider.isAnthropic {
+        self.defaults.removeObject(forKey: "\(provider.rawValue).organizationIdentifier")
+      }
       self.states[provider]?.error = nil
       if !self.refresh(provider, queueIfBusy: true, onFinished: { [weak self] in
         // Cursor can exit successfully even when secure storage failed. A
@@ -2955,6 +3038,9 @@ final class UsageStore {
       }
     }
     await self.loadCachedLocalUsage(now: self.now())
+    let enabledForHours = Set(self.accounts.filter { self.isEnabled($0) })
+    await self.performHourlyUsageScan(providers: enabledForHours, generation: generation, notify: notify)
+    if self.localScanNeedsContinuation, self.discretionaryRefreshIsSuppressed() { return }
     var continuing = false
     while !Task.isCancelled {
       guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
@@ -3008,17 +3094,88 @@ final class UsageStore {
     }
   }
 
+  /// Independent hourly recovery cannot hide successfully recovered daily totals.
+  private func performHourlyUsageScan(providers: Set<ProviderID>, generation: Int, notify: Bool) async {
+    guard let scanner = self.hourlyUsageScanner, self.localHistoryEnabled,
+      self.localScanGeneration == generation, !Task.isCancelled else { return }
+    self.hourlyHistoryStatus = "Loading hourly detail from this Mac…"
+    if notify { self.changed() }
+    var continuing = false
+    while !Task.isCancelled, self.localHistoryEnabled, self.localScanGeneration == generation {
+      if continuing, self.discretionaryRefreshIsSuppressed() {
+        self.hourlyHistoryStatus = "Hourly update paused. Saved hours remain visible."
+        return
+      }
+      let before = await scanner.checkpoints
+      do {
+        let histories = try await scanner.scan(now: self.now(), providers: providers)
+        guard !Task.isCancelled, self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+        self.publishedHourlyHistory = histories
+        self.publishHourlyToday(now: self.now())
+        self.localScanNeedsContinuation = false
+        self.hourlyHistoryStatus = histories.isEmpty
+          ? "No timestamped hourly history is available for these sources."
+          : "Hourly detail comes from timestamped logs on this Mac."
+        if notify { self.changed() }
+        return
+      } catch is CancellationError { return }
+      catch {
+        guard !Task.isCancelled, self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+        if case UsageProviderError.timedOut = error,
+          await scanner.scanIncomplete, await scanner.checkpoints > before {
+          self.localScanNeedsContinuation = true
+          continuing = true
+          do { try await Task.sleep(for: self.localScanContinuationDelay) }
+          catch { return }
+          continue
+        }
+        self.localScanNeedsContinuation = false
+        self.hourlyHistoryStatus = "Hourly detail could not be updated. Daily totals are still available."
+        if notify { self.changed() }
+        return
+      }
+    }
+  }
+
+  private func publishHourlyToday(now: Date) {
+    for (provider, history) in self.insightHourlyHistory(now: now) {
+      let day = history.dailyUsage()
+      var days = self.publishedDailyHistory[provider] ?? []
+      days.removeAll { $0.day == day.day }
+      days.append(InsightHistoryDay(day: day.day, tokens: day.tokens, costUSD: day.costUSD, detail: day.detail))
+      self.publishedDailyHistory[provider] = days.sorted { $0.day < $1.day }
+    }
+  }
+
+  func insightHourlyHistory(now: Date = Date()) -> [ProviderID: HourlyUsageHistory] {
+    guard self.localHistoryEnabled else { return [:] }
+    let dayStart = Calendar.current.startOfDay(for: now)
+    return self.publishedHourlyHistory.filter {
+      $0.value.dayStart == dayStart && $0.value.observedAt <= now
+    }
+  }
+
+  func publishHourlyHistoryForTesting(_ histories: [ProviderID: HourlyUsageHistory]) {
+    self.publishedHourlyHistory = histories
+    self.publishHourlyToday(now: self.now())
+    self.hourlyHistoryStatus = "Hourly detail comes from timestamped logs on this Mac."
+    self.changed()
+  }
+
   /// What the dashboard may say about a failed local scan. Paths, file names
   /// and raw scanner text stay out of the interface.
   static func localHistoryFailureMessage(_ error: Error) -> String {
+    if let storageError = error as? LocalHistoryStorageError {
+      return storageError.localizedDescription
+    }
     guard let providerError = error as? UsageProviderError else {
-      return "Local history could not be read. Totals are from the last successful scan."
+      return "Local history could not be updated. Totals are from the last successful scan."
     }
     switch providerError {
     case .timedOut:
       return "Local history scan timed out. Totals are from the last successful scan."
     default:
-      return "Local history could not be read. Totals are from the last successful scan."
+      return "Local history could not be updated. Totals are from the last successful scan."
     }
   }
 
@@ -3116,6 +3273,22 @@ final class UsageStore {
     }
 
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
+    let claudeOrganization = provider.isAnthropic && self.fetchOverride == nil
+      && self.hasUnattributedClaudeHistory(for: provider)
+      ? AnthropicProvider.organizationIdentifier(configDirectory: self.claudeConfigDirectory(for: provider)) : nil
+    if self.fetchOverride == nil, let owner = self.claudeAccountSharingOrganization(with: provider) {
+      // The last reading is the other card's quota under this card's name.
+      self.states[provider]?.snapshot = nil
+      if var state = self.states[provider] {
+        Self.applyFailure(UsageProviderError.credentialsNotFound(
+          "Signed in to the same Claude account as \(owner.displayName). Sign in with your other account."),
+          to: &state)
+        self.states[provider] = state
+      }
+      self.changed()
+      if persist { await self.persistSnapshots() }
+      return
+    }
     let fetcher: any UsageProvider =
       switch provider.kind {
       case .openAI:
@@ -3126,7 +3299,10 @@ final class UsageStore {
           configDirectory: self.claudeConfigDirectory(for: provider),
           allowKeychainRead: self.keychainReadAllowed(for: provider),
           allowKeychainInteraction: allowKeychainInteraction,
-          passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider))
+          passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider),
+          requireAccountIdentity: self.hasUnattributedClaudeHistory(for: provider),
+          expectedOrganizationIdentifier: self.defaults.string(forKey: "\(provider.rawValue).organizationIdentifier")
+            ?? claudeOrganization)
       case .grok: GrokProvider(environment: self.helperEnvironment(for: provider))
       case .cursor:
         CursorProvider(
@@ -3150,6 +3326,9 @@ final class UsageStore {
       guard isCurrent() else { return }
       let snapshot = fetched.attributed(to: provider).withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
+      if let claudeOrganization {
+        self.defaults.set(claudeOrganization, forKey: "\(provider.rawValue).organizationIdentifier")
+      }
       self.adoptAutomaticLabel(for: provider, from: snapshot)
       self.states[provider]?.error = nil
       self.states[provider]?.signInCouldNotStart = false
@@ -3250,8 +3429,8 @@ final class UsageStore {
 
   /// Places synthetic local totals without scanning this Mac. Used only by the
   /// refresh self-test, which cannot write `states` from outside the store.
-  func seedLocalUsageForSelfTest(_ usage: LocalUsageSummary?) {
-    self.states[.openAI]?.localUsage = usage
+  func seedLocalUsageForSelfTest(_ usage: LocalUsageSummary?, provider: ProviderID = .openAI) {
+    self.states[provider]?.localUsage = usage
   }
 
   /// Replaces one snapshot for a presentation check, then the caller restores it.
@@ -3708,6 +3887,8 @@ final class UsageStore {
 
   private func adoptSavedAPIKey(_ provider: APIAccountID) {
     self.invalidateAPIWork(provider)
+    // A result obtained with the previous key cannot validate its replacement.
+    self.apiConsumption[provider] = nil
     self.apiKeyCache[provider] = .present
     self.apiSchedules[provider] = nil
     self.keychainProbeFailures[self.apiProbeID(provider)] = 0

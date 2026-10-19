@@ -102,6 +102,40 @@ struct ProviderDetailsTests {
     #expect(oddWindows.map(\.id) == ["five-hour", "fable"])
   }
 
+  @Test func claudeInactiveLimitsAreStillShown() throws {
+    // A Team seat as Anthropic returns it: no `seven_day`, the model limit
+    // inactive because the five-hour limit binds, and a null model id.
+    let team = Data(
+      #"""
+      {"five_hour":{"utilization":15.0,"resets_at":"2033-05-18T03:33:20.09+00:00"},
+       "seven_day":null,
+       "limits":[
+        {"kind":"session","group":"session","percent":15,"resets_at":"2033-05-18T03:33:20.09+00:00","scope":null,"is_active":true},
+        {"kind":"weekly_scoped","group":"weekly","percent":0,"resets_at":"2033-05-21T12:00:00+00:00",
+         "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}]}
+      """#.utf8)
+    let teamWindows = AnthropicProvider.windows(
+      from: try JSONDecoder().decode(ClaudeUsageResponse.self, from: team))
+    #expect(teamWindows.map(\.id) == ["five-hour", "fable"])
+    #expect(teamWindows.map(\.label) == ["5 hours", "Fable weekly"])
+
+    // The plan limits alone, without the legacy keys, still give both windows.
+    let limitsOnly = Data(
+      #"""
+      {"limits":[
+        {"kind":"weekly_all","percent":100,"resets_at":"2033-05-18T03:33:20Z","scope":null,"is_active":true},
+        {"kind":"session","percent":21,"resets_at":"2033-05-18T03:33:20Z","scope":null,"is_active":false}]}
+      """#.utf8)
+    let limitWindows = AnthropicProvider.windows(
+      from: try JSONDecoder().decode(ClaudeUsageResponse.self, from: limitsOnly))
+    #expect(limitWindows.map(\.id) == ["five-hour", "weekly"])
+    #expect(limitWindows.map(\.usedPercent) == [21, 100])
+    #expect(limitWindows.map(\.windowMinutes) == [300, 10080])
+
+    #expect(ClaudeLimit.slug("Opus 5.5") == "opus-5-5")
+    #expect(ClaudeLimit.slug(" · ") == nil)
+  }
+
   @Test func personalDetailsAreShownButNeverCached() throws {
     let snapshot = UsageSnapshot(
       provider: .openAI, windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 1)],
@@ -137,8 +171,8 @@ struct ProviderDetailsTests {
     let labels = try #require(ClaudeAccountProfile.load(from: personal))
       .details(now: Self.now).map(\.label)
     #expect(labels == ["Account", "Subscribed since"])
-    // A configured directory without the file falls back to the home file.
-    #expect(ClaudeAccountProfile.defaultURLs(environment: ["CLAUDE_CONFIG_DIR": "/tmp/x"]).count == 2)
+    // A configured directory never borrows the default account profile.
+    #expect(ClaudeAccountProfile.defaultURLs(environment: ["CLAUDE_CONFIG_DIR": "/tmp/x"]).count == 1)
 
     let team = try temporaryFile(
       #"{"oauthAccount":{"emailAddress":"w@corp.com","organizationName":"Corp","organizationType":"team","organizationRole":"billing_admin"}}"#)

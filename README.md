@@ -86,7 +86,22 @@ that folder, spelled the same way; changing the folder starts the card over.
 its sign-in on disk; for a key plan it also deletes the key Reserve saved. To
 use an added account in your own terminal, run the helper with its variable
 (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`) pointing at its folder.
-Activity from this Mac is not yet counted for added accounts.
+Activity from this Mac is not yet counted for added accounts. Claude's first
+card always reads its ordinary home, even when Reserve is launched from a
+terminal using another `CLAUDE_CONFIG_DIR`. Before accepting limits, Reserve
+checks that the sign-in's organization matches that folder's account profile;
+a shared email alone is not enough. Once verified, the card keeps that
+organization binding across restarts. If Claude Code switches organizations,
+Reserve asks for a new sign-in instead of silently replacing the card's limits.
+Passive status-line readings cannot replace verified limits while tracking
+multiple Claude accounts.
+
+After tracking several Claude accounts, Reserve keeps local Claude token totals
+in Insights as **Claude on this Mac**, separate from subscription cards. Existing
+transcripts do not identify the organization responsible for each message, so
+Reserve cannot reliably split that history between personal and Team plans.
+This history is counted once and covers the default Claude folder; added-account
+folders are not scanned. Provider-reported limits remain separate for each account.
 
 For API spend, choosing a provider whose first key is already saved adds a
 second account in **Settings > API** with its own key field, for example a
@@ -293,15 +308,42 @@ Settings > API measures consumption instead of subscription limits. Paste a key
 there. It stays in the macOS Keychain on this Mac and is off until you save one:
 
 - OpenAI, an organization admin key, read from the Costs API;
-- Anthropic, an organization admin key, read from the Cost Report API;
+- Anthropic, an organization-scoped personal/service-account key whose linked
+  account can read billing, or a legacy admin key, read from the Cost Report API.
+  **A configured Claude Console organization is required.** Anthropic's
+  [Admin API](https://platform.claude.com/docs/en/manage-claude/admin-api) is unavailable
+  to Individual accounts, including those with an Organization-scoped personal key.
+  Key scope does not change account type. Organization setup is available on the
+  [Console Organization page](https://platform.claude.com/settings/organization).
+  Create current keys on [Claude Console's API keys page](https://platform.claude.com/settings/keys)
+  and choose Organization scope. Any other key that Anthropic refuses on the
+  Admin API is checked through the Models API instead and reads "Key works ·
+  spend unavailable". A key that needs a workspace Reserve cannot look up asks
+  for a standard `sk-ant-api03-` key.
+  Organization endpoints use the Admin API guide's `x-api-key` header, including
+  personal/service-account keys; model validation uses Bearer authentication.
+  Request failures include fixed diagnostic categories, never provider free text.
+  If an HTTP 400 explicitly names the absent workspace header,
+  Reserve discovers the default active workspace and retries with the documented
+  `anthropic-workspace-id` header. This does not narrow the organization cost report.
+  Recovery does not depend on a particular error sentence and cannot repeat once
+  the header is supplied.
+  A failed latest check is shown even when an older reading exists, and replacing
+  a key clears that previous key's validation. This makes no model calls and does
+  not invent a zero spend reading;
 - OpenRouter, the API key itself, read from that key's usage endpoint: today,
   this week, this month, and the credit balance when the key is capped;
 - xAI, a management key, read from the prepaid balance API: spend against
   purchased credits when the transaction list explains the balance, and the
   remaining balance on its own when it does not;
 - TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
-  endpoint, so Reserve lists the models that key can send and the documented
-  input price. It does not call System One, which would consume the account;
+  endpoint, so Reserve lists model names, descriptions and release dates.
+  Expanded details distinguish the published price and default context limits
+  from live account data, and direct you to the console for organization rate
+  limits. The summary explicitly says spend is unavailable. It does not call
+  System One, which would consume the account. Published facts come from
+  [TypeSafe's model documentation](https://docs.typesafe.ai/models), checked
+  October 18, 2026;
 - DeepSeek, an API key, read from the user balance endpoint: the remaining
   balance in the currency DeepSeek reports (USD first when the account holds
   both USD and CNY), split into granted and topped-up credit, and whether the
@@ -311,9 +353,12 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   vouchers and cash. Keys from the China platform (api.moonshot.cn) are not
   supported.
 
-OpenAI and Anthropic admin keys and xAI management keys can only read billing.
-OpenRouter, TypeSafe, DeepSeek and Moonshot have no read-only key: the key you
-paste can also call models, so create one just for Reserve.
+OpenAI and Anthropic admin keys and xAI management keys do not perform inference.
+Ordinary Anthropic, OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also
+call models, so create one just for Reserve.
+
+Settings updates and clears API error explanations even while a key field has
+focus, so a previous key's error cannot linger while a fresh result arrives.
 
 Where a provider groups its billing, Reserve asks for the grouping and shows
 what the spend went on: models for Anthropic, billing line items for OpenAI.
@@ -338,10 +383,21 @@ They do not represent savings on a subscription bill.
 Subscription prices remain user-editable. Details distinguish reported, typical,
 and manually entered prices. Empty detail rows are omitted.
 
-Insights can compare 7, 30, or 90 days from the existing local history cache
-without rescanning session files. Daily heatmaps distinguish a known quiet day
-from a day Reserve has not observed and report how much of the selected period
-is covered.
+Insights has provider and source filters, Cost / Tokens / Limits views, and
+Today, 7-, 30-, and 90-day ranges. Daily trends, provider shares, token-type
+totals, cache savings, and searchable model / day / provider breakdowns use
+published history without rescanning session files when filters change.
+Smooth trend lines connect available days across gaps; missing days remain
+unavailable in the heatmap, tooltips, and totals.
+The daily heatmap includes local history and provider-reported daily history
+(such as Cursor), with each row's source and coverage labeled. Recorded history
+remains visible when live monitoring for a provider is disabled. Missing days
+stay distinct from known zeroes. Monthly plans and provider account totals keep
+their own labeled periods; API estimates show pricing coverage. Older cache
+records may lack token-type or model details; these appear as unavailable until
+new records supply them. Cumulative Codex records with several models or an
+incomplete context stay unattributed. Limits show the latest quota readings and
+reset times.
 
 Cursor's account insights come from provider-reported aggregate usage. Reserve
 labels their dollar total **Provider-reported usage value** rather than estimated

@@ -1,6 +1,23 @@
 import Darwin
 import Foundation
 
+/// Bounds both published history and resumable work. Claude's per-file
+/// deduplication rows can legitimately exceed the old 12 MiB index limit well
+/// before the scanner reaches its 5,000-file limit. Checkpoints also carry a
+/// base64 copy of those rows, so need a separate, larger envelope.
+enum LocalHistoryStorageLimits {
+  static let indexBytes = 64 * 1024 * 1024
+  static let checkpointBytes = indexBytes * 2
+}
+
+public enum LocalHistoryStorageError: LocalizedError, Sendable, Equatable {
+  case capacityExceeded
+
+  public var errorDescription: String? {
+    "Local history is too large to save. Last saved totals are unchanged."
+  }
+}
+
 /// Identity of a cache file from one validated descriptor.
 ///
 /// Device, inode, size and change time together catch replacement, rewrite and
@@ -97,7 +114,7 @@ enum LocalHistoryCheckpointStore {
     return checkpoint
   }
 
-  /// Returns false when the encoded checkpoint exceeds the published index cap.
+  /// Returns false when the encoded checkpoint exceeds its storage cap.
   /// The previous partial file is left in place in that case.
   static func save(
     _ checkpoint: LocalHistoryCheckpoint,

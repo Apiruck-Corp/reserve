@@ -21,3 +21,24 @@ The same target is part of `make check` and the pull-request CI job. One run, te
 ## Identity coverage
 
 `make lifecycle-test` includes a check that an exhausted reading keeps the dashboard view, the OpenAI tile, an unchanged tile, and the open card. It also types into the OpenAI subscription field and requires that text to remain while Grok's updated time changes. Additional fixtures verify live Settings preferences and heatmaps, deferred layout changes, expanded API privacy, component-share readings, permission guidance, and release of dashboard view trees.
+
+## Insights chart ranges
+
+Today uses hourly Claude/Codex usage from timestamped local logs. The plot spans
+local midnight through its latest scan, fills the available width, and marks
+the current hour as partial. Daily account totals and sources without timestamps
+are not spread across hours. Provider-account filtering explains the daily-only
+coverage. Missing hourly prices remain gaps. The
+7-, 30- and 90-day ranges use the selected dates across the full plot width.
+Their curves retain the dates of measured samples; missing days are still
+unavailable. Value axes use only the selected providers, metric and period,
+with readable ticks and headroom above the highest reading. Heatmap cells fill
+their row for every supported range; hover targets follow the resized cells.
+
+The native UI gate exercises Today versus 7-day chart selection, range-sized
+heatmaps, and the existing curve checks. `InsightChartScaleTests` checks period
+and provider rescaling, headroom, zero/unknown values, fractional prices and
+extreme finite inputs. For visual fixtures, the debug-only
+`--render-insights-opaque PATH --insights-days 1|7|30|90` route uses synthetic
+daily and hourly history; `--insights-no-hourly` checks the unavailable state. `--insights-cost`, `--appearance dark`, and `--accent ember` select
+the metric and appearance. These renders never load real provider credentials.

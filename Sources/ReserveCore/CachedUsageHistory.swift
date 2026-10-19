@@ -9,16 +9,18 @@ public struct CachedUsageDay: Codable, Equatable, Sendable {
   public let tokens: Int64?
   public let costUSD: Double?
   public let fetchedAt: Date
+  public let detail: UsageDayDetail?
 
-  public init(day: String, tokens: Int64?, costUSD: Double?, fetchedAt: Date) {
+  public init(day: String, tokens: Int64?, costUSD: Double?, fetchedAt: Date, detail: UsageDayDetail? = nil) {
     self.day = CachedUsageHistory.isValidDayKey(day) ? day : ""
     self.tokens = Self.sanitizedTokens(tokens)
     self.costUSD = Self.sanitizedCost(costUSD)
     self.fetchedAt = fetchedAt
+    self.detail = detail
   }
 
   private enum CodingKeys: String, CodingKey {
-    case day, tokens, costUSD, fetchedAt
+    case day, tokens, costUSD, fetchedAt, detail
   }
 
   public init(from decoder: Decoder) throws {
@@ -27,7 +29,8 @@ public struct CachedUsageDay: Codable, Equatable, Sendable {
     let tokens = try container.decodeIfPresent(Int64.self, forKey: .tokens)
     let costUSD = try container.decodeIfPresent(Double.self, forKey: .costUSD)
     let fetchedAt = try container.decode(Date.self, forKey: .fetchedAt)
-    self.init(day: day, tokens: tokens, costUSD: costUSD, fetchedAt: fetchedAt)
+    self.init(day: day, tokens: tokens, costUSD: costUSD, fetchedAt: fetchedAt,
+      detail: try container.decodeIfPresent(UsageDayDetail.self, forKey: .detail))
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -36,6 +39,7 @@ public struct CachedUsageDay: Codable, Equatable, Sendable {
     try container.encodeIfPresent(self.tokens, forKey: .tokens)
     try container.encodeIfPresent(self.costUSD, forKey: .costUSD)
     try container.encode(self.fetchedAt, forKey: .fetchedAt)
+    try container.encodeIfPresent(self.detail, forKey: .detail)
   }
 
   /// Negative counts are not usage. Non-finite JSON numbers fail `Int64` decode.

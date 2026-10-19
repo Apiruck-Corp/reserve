@@ -209,6 +209,24 @@ struct CachedUsageHistoryTests {
     #expect(decoded.days[1].tokens == 0)
   }
 
+  @Test func observedTokenTypesAndModelsSurviveAnArchiveOnlyRead() async throws {
+    let fixture = try HistoryFixture()
+    defer { fixture.remove() }
+    let now = date("2026-09-19", timeZone: "UTC")
+    let context = #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#
+    let usage = #"{"timestamp":"2026-09-19T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10}}}}"#
+    try Data((context + "\n" + usage + "\n").utf8).write(to: fixture.codex.appendingPathComponent("detail.jsonl"))
+    let scanner = fixture.scanner()
+    _ = try await scanner.scan(now: now, providers: [.openAI])
+    try FileManager.default.removeItem(at: fixture.codex)
+    let before = try Data(contentsOf: fixture.cache)
+    let history = await fixture.scanner().cachedHistory(now: now, providers: [.openAI])
+    let detail = try #require(history[.openAI]?.days.first?.detail)
+    #expect(detail.input == 100 && detail.cached == 80 && detail.output == 10)
+    #expect(detail.models["gpt-5.4"]?.tokens == 110)
+    #expect(try Data(contentsOf: fixture.cache) == before)
+  }
+
   @Test func cacheOnlyReadSurvivesSourceRootRemoval() async throws {
     let fixture = try HistoryFixture()
     defer { fixture.remove() }

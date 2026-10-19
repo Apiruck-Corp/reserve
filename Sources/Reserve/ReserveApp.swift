@@ -626,22 +626,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     formatter.timeZone = calendar.timeZone
     formatter.dateFormat = "yyyy-MM-dd"
     let start = calendar.startOfDay(for: now)
-    var days: [InsightHistoryDay] = []
-    for offset in 0..<12 {
-      guard let date = calendar.date(byAdding: .day, value: -offset, to: start) else { continue }
-      days.append(InsightHistoryDay(
-        day: formatter.string(from: date),
-        tokens: Int64(1_000 * (offset + 1)),
-        costUSD: offset == 3 ? nil : Double(offset + 1)))
+    for (index, provider) in [ProviderID.openAI, .anthropic, .grok].enumerated() {
+      var days: [InsightHistoryDay] = []
+      for offset in 0..<90 {
+        guard let date = calendar.date(byAdding: .day, value: -offset, to: start) else { continue }
+        if provider == .grok && offset % 4 == 0 { continue }
+        let scale = Int64((sin(Double(offset) * 0.7 + Double(index)) + 1.2) * 22_000_000)
+        let input = max(0, scale) * Int64(index == 1 ? 2 : 1)
+        let cached = input / 2
+        let output = input / 12
+        let tokens = input + output + (provider == .anthropic ? cached : 0)
+        let cost = Double(tokens) / 1_000_000 * 1.5
+        let model = ["gpt-5.4", "claude-opus-4-6", "grok-4"][index]
+        let detail = UsageDayDetail(input: input, cached: cached, cacheWrite: 0, output: output,
+          cacheSavingsUSD: Double(cached) / 1_000_000, unpricedCacheReads: 0,
+          models: [model: InsightModelUsage(tokens: tokens, costUSD: cost)])
+        days.append(InsightHistoryDay(day: formatter.string(from: date), tokens: tokens,
+          costUSD: offset == 3 ? nil : cost, detail: offset > 25 ? nil : detail))
+      }
+      store.publishDailyHistoryForTesting(days, provider: provider)
     }
-    store.publishDailyHistoryForTesting(days, provider: .openAI)
-    store.insightHistoryDays = 90
+    store.localHistoryEnabled = true
+    var hourly: [ProviderID: HourlyUsageHistory] = [:]
+    for (index, provider) in [ProviderID.openAI, .anthropic].enumerated() {
+      let starts = HourlyUsageHistory.hourStarts(now: now)
+      let points = starts.enumerated().map { hour, start in
+        let value = Int64((sin(Double(hour) * 1.4 + Double(index)) + 1.2) * 4_000_000)
+        let input = provider == .openAI ? value * 9 / 10 : value / 4
+        let cached = value / 2
+        let output = value - input - (provider == .anthropic ? cached : 0)
+        let cost = Double(value) / 1_000_000 * 1.5
+        let detail = UsageDayDetail(input: input, cached: cached, cacheWrite: 0, output: output,
+          cacheSavingsUSD: Double(cached) / 1_000_000, unpricedCacheReads: 0,
+          models: [["gpt-5.4", "claude-opus-4-6"][index]: InsightModelUsage(tokens: value, costUSD: cost)])
+        return HourlyUsagePoint(start: start, tokens: value, costUSD: cost, detail: detail)
+      }
+      hourly[provider] = HourlyUsageHistory(provider: provider, dayStart: starts[0], observedAt: now, hours: points)
+    }
+    if !CommandLine.arguments.contains("--insights-no-hourly") { store.publishHourlyHistoryForTesting(hourly) }
+    let rangeIndex = CommandLine.arguments.firstIndex(of: "--insights-days")
+    let requested = rangeIndex.flatMap { index in
+      CommandLine.arguments.indices.contains(index + 1)
+        ? Int(CommandLine.arguments[index + 1]) : nil
+    }
+    store.insightHistoryDays = requested.flatMap { [1, 7, 30, 90].contains($0) ? $0 : nil } ?? 30
     let appearanceName = CommandLine.arguments.contains("dark")
       ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
     do {
       try settings.renderInsightsOpaque(
         to: URL(fileURLWithPath: path),
-        appearance: NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!)
+        appearance: NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!,
+        metric: CommandLine.arguments.contains("--insights-cost") ? .cost
+          : CommandLine.arguments.contains("--insights-limits") ? .limits : .tokens)
       Self.finishUISelfTest(success: true, details: "opaque insights rendered to \(path)")
     } catch {
       Self.finishUISelfTest(success: false, details: "opaque insights render failed: \(error)")

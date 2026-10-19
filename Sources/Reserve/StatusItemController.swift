@@ -1093,7 +1093,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   func popoverDidClose(_ notification: Notification) {
-    self.settingsWindow?.level = .floating
+    // Levels only order Settings against the open popover. Afterwards it is an
+    // ordinary window again, free to go behind the next app that is clicked.
+    self.settingsWindow?.level = .normal
     self.stopMouseMonitors()
     self.lockedStatusItemLength = nil
     self.updateStatusIcon()
@@ -1444,7 +1446,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// includes account, organization, email, path, or raw error text.
   private func shareSelectedUsage() {
     let provider = self.store.expandedProvider ?? self.store.accounts.first { self.store.isEnabled($0) }
-    guard let provider, let state = self.store.states[provider] else { return }
+    guard let provider, let state = self.store.orderedStates.first(where: { $0.provider == provider }) else { return }
     let usage = state.snapshot?.accountUsage ?? state.localUsage
     let model = UsageShareCardBuilder.model(
       provider: provider,
@@ -1823,12 +1825,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         views.compactMap { ($0 as? NSTextField)?.stringValue },
         Set(views.compactMap { $0.identifier?.rawValue }))
     }
-    let waiting = labels(state(.openAI, localHistoryEnabled: true))
+    var scanning = state(.openAI, localHistoryEnabled: true)
+    scanning.localHistoryUpdating = true
+    let waiting = labels(scanning)
+    let idle = labels(state(.openAI, localHistoryEnabled: true))
+    var failed = scanning
+    failed.localHistoryUpdating = false
+    failed.localHistoryError = UsageStore.localHistoryFailureMessage(
+      LocalHistoryStorageError.capacityExceeded)
+    let failure = labels(failed)
+    // Even an in-flight retry must keep the failure visible without claiming
+    // a first load is still gathering activity.
+    failed.localHistoryUpdating = true
+    let retry = labels(failed)
+    var shared = state(.anthropic, localHistoryEnabled: true)
+    shared.hasUnattributedClaudeHistory = true
+    let sharedHistory = labels(shared)
     let off = labels(state(.openAI, localHistoryEnabled: false))
     let account = labels(state(.cursor, localHistoryEnabled: false))
     let never = labels(state(.copilot, localHistoryEnabled: true))
     return waiting.identifiers.contains("usage-history-note-openAI")
       && waiting.texts.contains("Gathering activity from this Mac…")
+      && idle.texts.contains("Local activity has not been loaded yet.")
+      && !idle.texts.contains("Gathering activity from this Mac…")
+      && failure.texts.contains(failed.localHistoryError!)
+      && !failure.identifiers.contains("usage-history-note-openAI")
+      && retry.texts.contains(failed.localHistoryError!)
+      && !retry.identifiers.contains("usage-history-note-openAI")
+      && !sharedHistory.identifiers.contains("usage-history-note-anthropic")
       && off.texts.contains("Activity from this Mac is off · turn it on in Settings")
       // Cursor's history is its account's, so the local switch does not describe it.
       && account.texts.contains("Gathering account activity…")

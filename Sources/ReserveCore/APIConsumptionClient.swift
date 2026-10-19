@@ -31,13 +31,13 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   }
 
   /// What kind of key the provider issues. OpenAI and Anthropic admin keys and
-  /// xAI management keys read billing and cannot call a model. OpenRouter,
-  /// TypeSafe, DeepSeek and Moonshot issue ordinary API keys: the key that reads
-  /// the account can also call models, so a dedicated key is the one to paste.
+  /// xAI management keys read billing and cannot call a model. Ordinary Anthropic,
+  /// OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also call models,
+  /// so a dedicated key is the one to paste.
   public var keyKind: String {
     switch self {
     case .openAI: "Admin key"
-    case .anthropic: "Admin key"
+    case .anthropic: "API key"
     case .openRouter: "API key"
     case .xAI: "Management key"
     case .typeSafe: "API key"
@@ -49,7 +49,7 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   public var keyHint: String {
     switch self {
     case .openAI: "sk-admin-…"
-    case .anthropic: "sk-ant-admin…"
+    case .anthropic: "sk-ant-api03-…"
     case .openRouter: "sk-or-…"
     case .xAI: "xai-…"
     case .typeSafe: "ts-…"
@@ -63,7 +63,7 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   public var keySettingsURL: URL {
     switch self {
     case .openAI: URL(string: "https://platform.openai.com/settings/organization/admin-keys")!
-    case .anthropic: URL(string: "https://platform.claude.com/settings/admin-keys")!
+    case .anthropic: URL(string: "https://platform.claude.com/settings/keys")!
     case .openRouter: URL(string: "https://openrouter.ai/settings/keys")!
     case .xAI: URL(string: "https://console.x.ai/team/default/settings")!
     case .typeSafe: URL(string: "https://console.typesafe.ai/settings/keys")!
@@ -515,7 +515,135 @@ public struct APIConsumptionClient: Sendable {
   /// Cost Report API. Costs arrive as decimal strings of cents, daily. `limit`
   /// defaults to 7 buckets, so a month has to ask for 31 and then follow the
   /// cursor, or the reading silently stops a week into the month.
+  ///
+  /// Only Console organizations can read the Admin API. Any other key that
+  /// Anthropic refuses there is checked against the Models API instead, so a
+  /// working key reads "Key works" rather than an error about billing. Bad
+  /// requests, outages and rate limits are reported as they are.
   private func fetchAnthropic(_ key: String) async throws -> APIConsumptionSnapshot {
+    let isAdmin = key.hasPrefix("sk-ant-admin")
+    var workspaceID: String?
+    var discoveryAttempted = false
+    do {
+      do {
+        return try await self.fetchAnthropicCosts(key, workspaceID: nil)
+      } catch is AnthropicWorkspaceRequired {
+        // Identity-linked keys can need a workspace execution context too.
+        // This header does not filter the organization's cost report.
+        discoveryAttempted = true
+        do {
+          workspaceID = try await self.anthropicDefaultWorkspace(key)
+        } catch is AnthropicWorkspaceRequired {
+          throw AnthropicWorkspaceUnresolved(
+            message: "Anthropic requires a workspace context, but workspace discovery requires one too.")
+        }
+        do {
+          return try await self.fetchAnthropicCosts(key, workspaceID: workspaceID)
+        } catch is AnthropicWorkspaceRequired {
+          throw AnthropicWorkspaceUnresolved(
+            message: "Anthropic still requires a workspace context after Reserve supplied the default workspace.")
+        }
+      }
+    } catch UsageProviderError.unauthorized(let message) {
+      if isAdmin { throw UsageProviderError.unauthorized(message) }
+    } catch let unresolved as AnthropicWorkspaceUnresolved {
+      if isAdmin { throw UsageProviderError.invalidResponse(unresolved.message) }
+    }
+    return try await self.validateAnthropicModelKey(
+      key, workspaceID: workspaceID, mayDiscoverWorkspace: !discoveryAttempted)
+  }
+
+  private func anthropicDefaultWorkspace(_ key: String) async throws -> String {
+    let pages = try await self.pages(
+      AnthropicWorkspacesPage.self, provider: .anthropic, maximumPages: 4,
+      request: { cursor in
+        var components = URLComponents(string: "https://api.anthropic.com/v1/organizations/workspaces")!
+        components.queryItems = [
+          URLQueryItem(name: "include_default", value: "true"),
+          URLQueryItem(name: "limit", value: "1000"),
+        ] + (cursor.map { [URLQueryItem(name: "after_id", value: $0)] } ?? [])
+        return Self.anthropicRequest(url: components.url!, key: key)
+      }, cursor: { ($0.hasMore ?? false, $0.lastID) })
+    var seen: Set<String> = []
+    let active = pages.flatMap(\.data).filter { workspace in
+      seen.insert(workspace.id).inserted && workspace.archivedAt == nil && workspace.id.hasPrefix("wrkspc_")
+        && workspace.id.count <= 128
+        && workspace.id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
+    }
+    let defaults = active.filter {
+      ["default", "default workspace"].contains($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+    if defaults.count == 1 { return defaults[0].id }
+    if active.count == 1 { return active[0].id }
+    throw AnthropicWorkspaceUnresolved(
+      message: "Anthropic requires a workspace context. Reserve could not identify a single default workspace.")
+  }
+
+  /// The Admin API guide specifies x-api-key for identity keys too; the
+  /// general API guide uses Bearer. Follow each endpoint's documented form.
+  private static func anthropicRequest(url: URL, key: String, workspaceID: String? = nil) -> URLRequest {
+    var request = URLRequest(url: url)
+    if key.hasPrefix("sk-ant-admin") || url.path.hasPrefix("/v1/organizations/") {
+      request.setValue(key, forHTTPHeaderField: "x-api-key")
+    } else {
+      request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    }
+    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+    if let workspaceID { request.setValue(workspaceID, forHTTPHeaderField: "anthropic-workspace-id") }
+    return request
+  }
+
+  private func validateAnthropicModelKey(
+    _ key: String, workspaceID: String?, mayDiscoverWorkspace: Bool
+  ) async throws -> APIConsumptionSnapshot {
+    let request = Self.anthropicRequest(
+      url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!, key: key, workspaceID: workspaceID)
+    let data: Data
+    do {
+      data = try await self.data(for: request, provider: .anthropic)
+    } catch UsageProviderError.unauthorized {
+      // Never expose either endpoint's free-text error, which can echo secrets.
+      throw UsageProviderError.unauthorized(
+        "Anthropic refused this key. Check that it is active in Claude Console.")
+    } catch is AnthropicWorkspaceRequired {
+      guard mayDiscoverWorkspace else {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      }
+      let discovered: String
+      do {
+        discovered = try await self.anthropicDefaultWorkspace(key)
+      } catch UsageProviderError.unauthorized {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      } catch is AnthropicWorkspaceRequired {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      } catch is AnthropicWorkspaceUnresolved {
+        throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
+      }
+      // Outages, rate limits and bad requests during discovery propagate as
+      // they are, keeping any Retry-After deadline.
+      return try await self.validateAnthropicModelKey(key, workspaceID: discovered, mayDiscoverWorkspace: false)
+    }
+    let page = try Self.decode(AnthropicModelsPage.self, from: data, provider: .anthropic)
+    let names = page.data.map { $0.displayName ?? $0.id }
+    return APIConsumptionSnapshot(
+      provider: .anthropic,
+      windows: [],
+      note: APIConsumptionNote(headline: "Key works", detail: "spend unavailable"),
+      fetchedAt: self.now(),
+      source: "Anthropic Models API",
+      details: [
+        UsageDetail("Spend", "Shared only with Claude Console organizations"),
+        UsageDetail("Models", names.isEmpty ? "None returned" : names.prefix(4).joined(separator: ", ")),
+      ])
+  }
+
+  /// Identity-linked keys act inside a workspace, and only organization admins
+  /// can look its ID up. A standard Console key carries its workspace itself.
+  static let anthropicWorkspaceKeyMessage =
+    "This key needs a workspace that Anthropic only shares with organization admins. "
+    + "Use a standard key (sk-ant-api03-…) from Claude Console instead."
+
+  private func fetchAnthropicCosts(_ key: String, workspaceID: String?) async throws -> APIConsumptionSnapshot {
     let now = self.now()
     let start = Calendar(identifier: .gregorian).dateInterval(of: .month, for: now)?.start ?? now
     let ending = min(now, start.addingTimeInterval(31 * 24 * 60 * 60))
@@ -536,10 +664,7 @@ public struct APIConsumptionClient: Sendable {
       guard let url = components.url else {
         throw UsageProviderError.invalidResponse("Anthropic cost URL could not be formed.")
       }
-      var request = URLRequest(url: url)
-      request.setValue(key, forHTTPHeaderField: "x-api-key")
-      request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-      return request
+      return Self.anthropicRequest(url: url, key: key, workspaceID: workspaceID)
     }
 
     let pages = try await self.groupedPages(
@@ -747,21 +872,27 @@ public struct APIConsumptionClient: Sendable {
       windows: [],
       note: APIConsumptionNote(
         headline: names.count == 1 ? "1 model" : "\(names.count) models",
-        detail: names.prefix(4).joined(separator: ", ")
-          + " · $0.042 per million tokens in, output free"),
+        detail: names.prefix(4).joined(separator: ", ") + " · spend unavailable"),
       fetchedAt: now,
       source: "TypeSafe Models API",
-      details: [UsageDetail("Price", "$0.042 per million input tokens · output free")]
-        + named.prefix(UsageDetail.maximumCount - 1).map { model in
-          let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-          let released = UsageDateParser.iso8601(model.releaseDate)
-            ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
-          // The model's own description is a paragraph: in a detail row it is
-          // truncated to a fragment that says nothing. The release date is the
-          // fact that fits, so the row carries only that.
-          return UsageDetail(
-            name, released.map { "Released \(UsageDetailFormat.date($0))" } ?? "Available")
-        })
+      // Published facts are explicitly separate from this key's live metadata.
+      // Source: https://docs.typesafe.ai/models (checked 2026-10-18).
+      details: [
+        UsageDetail("Spend and balance", "Not exposed by the documented API"),
+        UsageDetail("Published price", "$0.042 per million input tokens · output free (docs, 18 Oct 2026)"),
+        UsageDetail("Default context (docs)", "64k tokens per request · 32k per question"),
+        UsageDetail("Rate limits", "Organization-specific · see TypeSafe console"),
+      ] + named.prefix((UsageDetail.maximumCount - 4) / 2).flatMap { model in
+        let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let released = UsageDateParser.iso8601(model.releaseDate)
+          ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
+        var facts = [UsageDetail(
+          name, released.map { "Released \(UsageDetailFormat.date($0))" } ?? "Available")]
+        if let description = model.description?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty {
+          facts.append(UsageDetail("\(name) description", description))
+        }
+        return facts
+      })
   }
 
   // MARK: DeepSeek
@@ -951,6 +1082,11 @@ public struct APIConsumptionClient: Sendable {
     switch http.statusCode {
     case 200: return data
     case 401, 403:
+      if provider == .anthropic, request.url?.path == "/v1/organizations/workspaces" {
+        throw UsageProviderError.unauthorized(
+          "Anthropic refused workspace lookup (HTTP \(http.statusCode)). "
+            + "Spend needs an admin role in a Claude Console organization.")
+      }
       throw UsageProviderError.unauthorized(
         Self.refusalMessage(
           provider: provider, status: http.statusCode, body: data,
@@ -960,12 +1096,71 @@ public struct APIConsumptionClient: Sendable {
         retryAt: HTTPRetryAfter.deadline(
           from: http.value(forHTTPHeaderField: "Retry-After"), now: self.now()))
     case 400, 404, 422:
+      if provider == .anthropic {
+        if http.statusCode == 400, Self.anthropicRequiresWorkspace(
+          data, workspaceWasSupplied: request.value(forHTTPHeaderField: "anthropic-workspace-id") != nil)
+        {
+          throw AnthropicWorkspaceRequired()
+        }
+        let endpoint: String
+        switch request.url?.path {
+        case "/v1/models": endpoint = "Models API"
+        case "/v1/organizations/cost_report": endpoint = "Cost Report API"
+        case "/v1/organizations/workspaces": endpoint = "Workspaces API"
+        default: endpoint = "API"
+        }
+        throw UsageProviderError.invalidResponse(
+          "Anthropic \(endpoint) rejected the request (HTTP \(http.statusCode))."
+            + Self.anthropicRequestErrorHints(data))
+      }
       throw UsageProviderError.invalidResponse(
         "\(provider.displayName) rejected this consumption request (HTTP \(http.statusCode)).")
     default:
       throw UsageProviderError.unavailable(
         "\(provider.displayName) consumption request returned HTTP \(http.statusCode).")
     }
+  }
+
+  /// Recover a missing workspace header without relying on a particular English
+  /// sentence. An explicit reference to that header is required, and a request
+  /// which already supplied it must never trigger discovery again.
+  static func anthropicRequiresWorkspace(_ data: Data, workspaceWasSupplied: Bool = false) -> Bool {
+    guard !workspaceWasSupplied, data.count <= 16_384,
+      Self.providerErrorCode(in: data) == "invalid_request_error",
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let error = root["error"] as? [String: Any], let message = error["message"] as? String
+    else { return false }
+    return message.lowercased().contains("anthropic-workspace-id")
+  }
+
+  /// Fixed categories provide a useful diagnosis without returning provider
+  /// text, identifiers, or even a fragment of a credential echoed in an error.
+  static func anthropicRequestErrorHints(_ data: Data) -> String {
+    guard data.count <= 16_384,
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let error = root["error"] as? [String: Any], let message = error["message"] as? String
+    else { return "" }
+    let text = message.lowercased()
+    let categories: [(String, [String])] = [
+      ("workspace context", ["workspace"]),
+      ("organization scope", ["organization", "organisation"]),
+      ("API version", ["anthropic-version"]),
+      ("request limit", ["limit"]),
+      ("OAuth", ["oauth"]),
+      ("authentication", ["authentication", "authorization", "bearer", "x-api-key"]),
+      ("API key", ["api key", "api_key"]),
+      ("access permission", ["permission", "access denied", "not authorized"]),
+      ("account billing", ["billing", "credit", "balance", "subscription"]),
+      ("request header", ["header"]),
+      ("required input", ["required", "missing", "must provide", "must specify"]),
+      ("invalid input", ["invalid", "malformed"]),
+      ("unsupported operation", ["not supported", "unsupported", "not available"]),
+      ("beta feature", ["beta"]),
+    ]
+    let matched = categories.compactMap { label, terms in
+      terms.contains(where: text.contains) ? label : nil
+    }
+    return matched.isEmpty ? "" : " Response categories: " + matched.joined(separator: ", ") + "."
   }
 
   /// The key the request carried, only to tell an admin key from another.
@@ -983,7 +1178,23 @@ public struct APIConsumptionClient: Sendable {
   static func refusalMessage(
     provider: APIConsumptionProvider, status: Int, body: Data, key: String?
   ) -> String {
-    var message = "\(provider.displayName) refused this \(provider.keyKind.lowercased())."
+    if provider == .anthropic, let key, !key.hasPrefix("sk-ant-admin") {
+      // A non-admin prefix does not exclude billing: organization-scoped
+      // personal/service-account keys inherit the linked account's permissions.
+      // Keep the actual HTTP status; never echo the provider's free-text error.
+      let reason: String
+      switch Self.providerErrorCode(in: body) {
+      case "authentication_error", "invalid_api_key", "invalid_key", "unauthorized":
+        reason = "Authentication refused for this endpoint."
+      case "permission_error", "insufficient_permissions", "forbidden", "permission_denied":
+        reason = "Permission denied."
+      default: reason = "Access denied."
+      }
+      return "Anthropic billing request refused (HTTP \(status)). \(reason) "
+        + "Check Console account type and billing permission. Individual accounts do not support the Admin API."
+    }
+    let kind = provider == .anthropic ? "admin key" : provider.keyKind.lowercased()
+    var message = "\(provider.displayName) refused this \(kind)."
     switch Self.providerErrorCode(in: body) {
     case "authentication_error", "invalid_api_key", "invalid_key", "unauthorized":
       message += " The key is invalid or has been revoked."
@@ -995,7 +1206,7 @@ public struct APIConsumptionClient: Sendable {
     }
     if let prefix = provider.adminKeyPrefix, let key {
       if !key.hasPrefix(prefix) {
-        message += " If it is a regular API key, use an \(provider.keyKind.lowercased()) (\(provider.keyHint)) instead."
+        message += " If it is a regular API key, use an admin key (\(provider.keyHint)) instead."
       } else if provider == .anthropic, status == 403 {
         message += " Admin keys work only for a Claude Console organization where you are an admin."
       }
@@ -1306,6 +1517,41 @@ private struct XAValidation: Decodable {
     case teamId
     case scopeId
   }
+}
+
+private struct AnthropicWorkspaceRequired: Error {}
+private struct AnthropicWorkspaceUnresolved: Error { let message: String }
+
+private struct AnthropicWorkspacesPage: Decodable {
+  struct Workspace: Decodable {
+    let id: String
+    let name: String
+    let archivedAt: String?
+    enum CodingKeys: String, CodingKey {
+      case id, name
+      case archivedAt = "archived_at"
+    }
+  }
+  let data: [Workspace]
+  let hasMore: Bool?
+  let lastID: String?
+  enum CodingKeys: String, CodingKey {
+    case data
+    case hasMore = "has_more"
+    case lastID = "last_id"
+  }
+}
+
+private struct AnthropicModelsPage: Decodable {
+  struct Model: Decodable {
+    let id: String
+    let displayName: String?
+    enum CodingKeys: String, CodingKey {
+      case id
+      case displayName = "display_name"
+    }
+  }
+  let data: [Model]
 }
 
 private struct TypeSafeModelsPage: Decodable {

@@ -127,6 +127,7 @@ final class DashboardViewController: NSViewController {
       parts.append(String(reflecting: summary.billingRenewsAt))
       parts.append(String(reflecting: summary.nextRenewal))
       parts.append(summary.localHistoryEnabled ? "local-history" : "-")
+      parts.append(summary.hasUnattributedClaudeHistory ? "unattributed-history" : "-")
       parts.append(summary.historyPossible ? "history-possible" : "-")
       parts.append(String(reflecting: summary.localHistoryCheckedAt))
       parts.append(summary.localHistoryError ?? "-")
@@ -2608,6 +2609,10 @@ private final class UsageDetailGrid: NSView {
     var rows = summary.details.enumerated().map { index, detail in
       RowSpec(kind: .fact, id: "detail-\(index)", label: detail.label, value: detail.value)
     }
+    if summary.hasUnattributedClaudeHistory {
+      rows.append(RowSpec(kind: .note, id: "unattributed-claude-history", label: "",
+        value: "Claude token history on this Mac cannot be split by account. See Insights for available device history; plan limits above are account-specific."))
+    }
     if let usage {
       rows.append(RowSpec(
         kind: .cell, id: "tokens-today",
@@ -2719,11 +2724,15 @@ private final class UsageDetailGrid: NSView {
       rows.append(RowSpec(
         kind: .note, id: "usage-local-history-error-\(provider)", label: "", value: failure))
     }
-    if usage == nil, summary.historyPossible {
+    if usage == nil, summary.historyPossible, summary.localHistoryError == nil,
+      !summary.hasUnattributedClaudeHistory
+    {
       let message = !summary.localHistorySupported
         ? "Gathering account activity…"
         : summary.localHistoryEnabled
-          ? "Gathering activity from this Mac…"
+          ? (summary.localHistoryUpdating
+            ? "Gathering activity from this Mac…"
+            : "Local activity has not been loaded yet.")
           : "Activity from this Mac is off · turn it on in Settings"
       rows.append(RowSpec(
         kind: .note, id: "usage-history-note-\(provider)", label: "", value: message))

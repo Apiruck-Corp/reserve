@@ -11,6 +11,8 @@ enum RefreshReliabilitySelfTest {
       if !condition { failures.append(message) }
     }
 
+    await self.checkModelOnlyBillingExplanation(expect: expect)
+    await self.checkAnthropicKeyReplacementUI(expect: expect)
     await self.checkLockedKeyRecovery(expect: expect)
     await self.checkStaleAPIResponseAndSaveCancellation(expect: expect)
     await self.checkDeleteFailure(expect: expect)
@@ -23,6 +25,149 @@ enum RefreshReliabilitySelfTest {
     await self.checkHistoryContinuationRespectsPowerMode(expect: expect)
     await self.checkCanceledLimiterWaiter(expect: expect)
     return failures
+  }
+
+  private static func checkModelOnlyBillingExplanation(expect: (Bool, String) -> Void) async {
+    let fixture = Fixture("model-only-billing")
+    fixture.defaults.set(true, forKey: "apiConsumption.anthropic.enabled")
+    let response = LockedValue("spend unavailable")
+    let requestFailure = LockedValue(false)
+    let store = UsageStore(
+      defaults: fixture.defaults, startAutomatically: false,
+      notificationsActive: false, cache: fixture.cache,
+      apiKeys: APIConsumptionKeyAccess(
+        availability: { _ in .present }, load: { _ in "sk-ant-usr-fixture" },
+        save: { _, _ in }, delete: { _ in }),
+      apiConsumptionFetch: { _, _ in
+        if requestFailure.value {
+          throw UsageProviderError.invalidResponse("Anthropic Models API rejected the request (HTTP 400).")
+        }
+        return APIConsumptionSnapshot(
+          provider: .anthropic, windows: [],
+          note: APIConsumptionNote(headline: "Key works", detail: response.value),
+          source: "Anthropic Models API", details: [])
+      })
+    _ = store.refreshAPIConsumption(.anthropic)
+    _ = await self.eventually { store.apiConsumption[.anthropic] != nil }
+    let settings = SettingsWindowController(store: store, updater: nil, setupProvider: { _ in })
+    defer { settings.window?.close() }
+    settings.show(.api)
+    func field(_ id: String) -> NSTextField? {
+      LifecycleSelfTest.descendants(of: settings.window?.contentView ?? NSView())
+        .compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == id }
+    }
+    expect(field("api-status-anthropic")?.stringValue == "Key works · spend unavailable"
+      && field("api-error-anthropic")?.isHidden == true,
+      "a working Anthropic key read as a problem in API Settings")
+    guard let input = field("api-key-anthropic"), let window = settings.window else {
+      expect(false, "model-only key field missing"); return
+    }
+    window.makeFirstResponder(input)
+    (input.currentEditor() as? NSTextView)?.insertText("unsaved-fixture", replacementRange: NSRange(location: 0, length: 0))
+    response.value = "spend unavailable · refreshed"
+    _ = store.refreshAPIConsumption(.anthropic)
+    _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Key works · " + response.value }
+    expect(field("api-status-anthropic")?.stringValue == "Key works · " + response.value,
+      "the model-only reading stayed stale while editing")
+    expect(field("api-key-anthropic") === input && input.stringValue == "unsaved-fixture",
+      "a model-only refresh discarded the active key draft")
+    requestFailure.value = true
+    _ = store.refreshAPIConsumption(.anthropic)
+    _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Latest check failed" }
+    expect(field("api-status-anthropic")?.stringValue == "Latest check failed"
+      && field("api-error-anthropic")?.stringValue.contains("Models API") == true,
+      "a fresh HTTP 400 was masked by the old Key valid heading")
+    try? await store.saveAPIConsumptionKey("sk-ant-usr-replacement-fixture", for: .anthropic)
+    _ = await self.eventually { !store.apiConsumptionRefreshing.contains(.anthropic) }
+    _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Needs attention" }
+    expect(store.apiConsumption[.anthropic] == nil
+      && field("api-status-anthropic")?.stringValue == "Needs attention",
+      "a replacement key inherited the previous key's validation result")
+  }
+
+  /// Drive the actual Settings action with an active AppKit field editor.
+  /// In-memory credentials and fixed errors keep this independent of Keychain/network.
+  private static func checkAnthropicKeyReplacementUI(expect: (Bool, String) -> Void) async {
+    for submitWithReturn in [false, true] {
+      let fixture = Fixture("anthropic-replacement-ui")
+      fixture.defaults.set(true, forKey: "apiConsumption.anthropic.enabled")
+      var savedKey = "sk-ant-api03-fixture-old"
+      let adminKey = "sk-ant-admin01-fixture-new"
+      let lastFetched = LockedValue("")
+      let adminError = LockedValue<String?>("Admin fixture: authentication refused")
+      let store = UsageStore(
+        defaults: fixture.defaults, startAutomatically: false,
+        notificationsActive: false, cache: fixture.cache,
+        apiKeys: APIConsumptionKeyAccess(
+          availability: { _ in .present }, load: { _ in savedKey },
+          save: { value, _ in savedKey = value }, delete: { _ in savedKey = "" }),
+        apiConsumptionFetch: { _, key in
+          lastFetched.value = key
+          if !key.hasPrefix("sk-ant-admin") {
+            throw UsageProviderError.unauthorized("Regular fixture: If it is a regular API key, use an admin key instead.")
+          }
+          if let error = adminError.value { throw UsageProviderError.unauthorized(error) }
+          return self.apiSnapshot(.anthropic, source: "validated-admin-fixture")
+        })
+      _ = store.refreshAPIConsumption(.anthropic)
+      _ = await self.eventually { store.apiConsumptionErrors[.anthropic] != nil }
+      let settings = SettingsWindowController(store: store, updater: nil, setupProvider: { _ in })
+      defer { settings.window?.close() }
+      settings.show(.api)
+      func field(_ id: String) -> NSTextField? {
+        LifecycleSelfTest.descendants(of: settings.window?.contentView ?? NSView())
+          .compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == id }
+      }
+      guard let input = field("api-key-anthropic"), let window = settings.window,
+        let button = LifecycleSelfTest.descendants(of: window.contentView ?? NSView())
+          .compactMap({ $0 as? NSButton }).first(where: { $0.identifier?.rawValue == "api-save-anthropic" })
+      else { expect(false, "Anthropic replacement controls missing"); continue }
+      window.makeFirstResponder(input)
+      guard let editor = input.currentEditor() as? NSTextView else {
+        expect(false, "Anthropic key editor missing"); continue
+      }
+      editor.insertText(adminKey, replacementRange: NSRange(location: 0, length: editor.string.count))
+      let sender: NSControl = submitWithReturn ? input : button
+      expect(NSApp.sendAction(sender.action!, to: sender.target, from: sender),
+        "Anthropic replacement action was not delivered")
+      _ = await self.eventually { lastFetched.value == adminKey && !store.apiConsumptionRefreshing.contains(.anthropic) }
+      expect(savedKey == adminKey && lastFetched.value == adminKey,
+        "Anthropic replacement sent the old key instead of the pasted admin key")
+      _ = await self.eventually { field("api-error-anthropic")?.stringValue == adminError.value }
+      expect(field("api-error-anthropic")?.stringValue == adminError.value,
+        "Anthropic replacement kept the old regular-key explanation")
+
+      // A new result must update the explanation while the next draft is edited.
+      if let nextInput = field("api-key-anthropic") {
+        window.makeFirstResponder(nextInput)
+        (nextInput.currentEditor() as? NSTextView)?.insertText("unsaved-next-key", replacementRange: NSRange(location: 0, length: 0))
+        adminError.value = "Admin fixture: permission refused"
+        _ = store.refreshAPIConsumption(.anthropic)
+        _ = await self.eventually { store.apiConsumptionErrors[.anthropic] == adminError.value }
+        _ = await self.eventually { field("api-error-anthropic")?.stringValue == adminError.value }
+        expect(field("api-error-anthropic")?.stringValue == adminError.value,
+          "Anthropic error explanation stayed stale while editing a key")
+        expect(field("api-key-anthropic") === nextInput,
+          "Updating the Anthropic error interrupted the key editor")
+        adminError.value = nil
+        _ = store.refreshAPIConsumption(.anthropic)
+        _ = await self.eventually { store.apiConsumption[.anthropic] != nil && store.apiConsumptionErrors[.anthropic] == nil }
+        _ = await self.eventually { field("api-error-anthropic")?.isHidden == true }
+        expect(field("api-error-anthropic")?.isHidden == true
+          && field("api-error-anthropic")?.stringValue == "",
+          "A successful admin refresh left the old error visible while editing")
+        adminError.value = "Admin fixture: new failure"
+        _ = store.refreshAPIConsumption(.anthropic)
+        _ = await self.eventually { store.apiConsumptionErrors[.anthropic] == adminError.value }
+        _ = await self.eventually { field("api-error-anthropic")?.stringValue == adminError.value }
+        expect(field("api-error-anthropic")?.isHidden == false
+          && field("api-error-anthropic")?.stringValue == adminError.value,
+          "A new admin error stayed hidden while editing")
+        expect(field("api-key-anthropic") === nextInput
+          && nextInput.stringValue == "unsaved-next-key",
+          "Updating admin errors discarded or interrupted the unsaved key")
+      }
+    }
   }
 
   private static func checkLockedKeyRecovery(expect: (Bool, String) -> Void) async {

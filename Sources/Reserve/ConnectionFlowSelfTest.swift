@@ -541,6 +541,7 @@ enum ConnectionFlowSelfTest {
     failures += await self.checkRefreshScheduling(in: directory)
     failures += await self.checkManualRefreshScansLocalHistory(in: directory)
     failures += await self.checkCachedHistoryPublication(in: directory)
+    failures += await self.checkHourlyHistoryBeforeBackfill(in: directory)
     failures += await self.checkLoginHandoff(in: directory)
     failures += await self.checkEarlyCompletions(in: directory)
     failures += self.checkPhaseTable()
@@ -847,6 +848,39 @@ enum ConnectionFlowSelfTest {
     expect(!failedText.contains { $0.contains("/Users") || $0.contains(".jsonl") || $0.contains("private") },
       "expanded detail showed a path from the failed scan")
 
+    let capacityFailure = HistoryScanFailure()
+    let oversized = Self.historyRefreshStore(
+      directory: directory, name: "capacity", planKeys: planKeys,
+      scan: { _, _ in
+        if await capacityFailure.consume() { throw LocalHistoryStorageError.capacityExceeded }
+        return [.openAI: replacement]
+      })
+    oversized.insightsVisible = false
+    oversized.refreshAll(manual: true)
+    await self.settle { !oversized.isRefreshingAll && !oversized.isScanningLocalUsage }
+    let capacityState = oversized.orderedStates.first { $0.provider == .openAI }!
+    let capacityMessage = UsageStore.localHistoryFailureMessage(
+      LocalHistoryStorageError.capacityExceeded)
+    expect(capacityState.localHistoryError == capacityMessage
+      && capacityMessage.contains("too large to save"),
+      "a history storage failure lost its specific explanation")
+    let capacityCard = ProviderDashboardCard(
+      summary: AllowanceBuilder.summary(for: capacityState), now: Date(),
+      isSelectedForMenuBar: false, isExpanded: true,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    capacityCard.layoutSubtreeIfNeeded()
+    let capacityText = LifecycleSelfTest.descendants(of: capacityCard).compactMap {
+      ($0 as? NSTextField)?.stringValue
+    }
+    expect(capacityText.contains(capacityMessage)
+      && !capacityText.contains("Gathering activity from this Mac…"),
+      "a stopped history scan still claimed it was gathering activity")
+    oversized.refreshAll(manual: true)
+    await self.settle { !oversized.isRefreshingAll && !oversized.isScanningLocalUsage }
+    let recovered = oversized.orderedStates.first { $0.provider == .openAI }
+    expect(recovered?.localUsage?.inputTokens == 80 && recovered?.localHistoryError == nil,
+      "a successful retry did not replace the storage error with fresh history")
+
     let retryFlag = HistoryScanFailure()
     let retry = Self.historyRefreshStore(
       directory: directory, name: "retry", planKeys: planKeys,
@@ -907,7 +941,8 @@ enum ConnectionFlowSelfTest {
     scan: @escaping @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
     ,
     cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
-    dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil
+    dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
+    hourlyScanner: LocalHourlyUsageScanner? = nil
   ) -> UsageStore {
     let suite = "Reserve.LocalHistoryRefresh.\(name).\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -936,9 +971,50 @@ enum ConnectionFlowSelfTest {
       },
       localUsageScan: scan,
       cachedLocalUsageLoad: cachedLocalUsageLoad,
+      hourlyUsageScanner: hourlyScanner,
       dailyHistoryLoad: dailyHistoryLoad,
       planKeys: planKeys)
     return store
+  }
+
+  private static func checkHourlyHistoryBeforeBackfill(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) { if !value { failures.append(message) } }
+    do {
+      let root = directory.appendingPathComponent("hourly-first")
+      let codex = root.appendingPathComponent("codex")
+      let claude = root.appendingPathComponent("claude")
+      for folder in [codex, claude] {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      }
+      let now = Date()
+      let stamp = ISO8601DateFormatter().string(from: now)
+      let context = #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#
+      let usage = #"{"timestamp":"\#(stamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10}}}}"#
+      try Data((context + "\n" + usage + "\n").utf8).write(to: codex.appendingPathComponent("session.jsonl"))
+      let scanner = LocalHourlyUsageScanner(roots: .init(codex: codex, claude: claude, grok: root),
+        cacheURL: root.appendingPathComponent("hourly.json"))
+      let gate = HistoryScanGate()
+      let keys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
+      let store = self.historyRefreshStore(directory: root, name: "hourly-first", planKeys: keys,
+        scan: { _, _ in await gate.enter(); return [:] }, hourlyScanner: scanner)
+      store.insightHistoryDays = 1
+      store.localHistoryEnabled = true
+      store.refreshAll(manual: true)
+      await self.settle { store.publishedHourlyHistory[.openAI] != nil && store.isScanningLocalUsage }
+      let series = store.insightSeries(for: .openAI)
+      expect(store.isScanningLocalUsage && series.days.last?.tokens == 110,
+        "Today waited for the blocked historical backfill")
+      expect(series.days.last?.detail?.cached == 50
+        && series.days.last?.detail?.models["gpt-5.4"]?.tokens == 110,
+        "hourly publication did not supply Today's cache and model detail")
+      await gate.release()
+      await self.settle { !store.isScanningLocalUsage }
+      expect(store.insightSeries(for: .openAI).days.last?.tokens == 110,
+        "historical publication replaced Today's timestamped totals")
+      store.localHistoryEnabled = false
+    } catch { failures.append("hourly-first fixture failed: \(type(of: error))") }
+    return failures
   }
 
   /// Production publication goes through the injected cache loader, not the
@@ -1000,11 +1076,41 @@ enum ConnectionFlowSelfTest {
     expect(series.coveredDays >= 1, "published cache days did not reach Insights")
     expect(series.days.contains { $0.day == today && $0.tokens == 40 && $0.costUSD == 1.5 },
       "today's published cost was dropped")
+    // Provider account days share the heatmap path; never add them to local totals.
+    let account = InsightHistoryRange.series(provider: .cursor, days: 7, now: now,
+      published: [:], accountDays: [DailyUsage(day: today, tokens: 99)])
+    expect(account.available && account.origin == .providerAccount && account.coveredDays == 1,
+      "Cursor account history did not produce heatmap days")
+    let local = InsightHistoryRange.series(provider: .openAI, days: 7, now: now,
+      published: [.openAI: [InsightHistoryDay(day: today, tokens: 40, costUSD: 1.5)]],
+      accountDays: [DailyUsage(day: today, tokens: 999), DailyUsage(day: yesterday, tokens: 888)])
+    expect(local.origin == .localDevice && local.coveredDays == 1 && local.days.last?.tokens == 40,
+      "account days were mixed into the local range")
+    store.setEnabled(.openAI, enabled: false, refreshImmediately: false)
+    store.publishCachedHistory([.openAI: history])
+    expect(store.insightSeries(for: .openAI, now: now).coveredDays == 2,
+      "disabling live monitoring hid a provider's recorded history")
+    store.setEnabled(.openAI, enabled: true, refreshImmediately: false)
     let loadsAfterScan = loadCounter.count
     store.insightHistoryDays = 90
     expect(loadCounter.count == loadsAfterScan, "range change after publication reloaded the cache")
     expect(await scans.count == scansBefore + 1, "range change after publication scanned again")
+    let hourlyNow = Date()
+    let hourlyStart = Calendar.current.startOfDay(for: hourlyNow)
+    let hourly = HourlyUsageHistory(provider: .openAI, dayStart: hourlyStart, observedAt: hourlyNow,
+      hours: [HourlyUsagePoint(start: hourlyStart, tokens: 40, costUSD: 1.5)])
+    store.publishHourlyHistoryForTesting([.openAI: hourly])
+    expect(store.insightHourlyHistory(now: hourlyNow)[.openAI] == hourly,
+      "published hourly history did not reach Insights")
+    expect(store.insightHourlyHistory(now: hourlyNow.addingTimeInterval(86400)).isEmpty,
+      "yesterday's hourly timeline survived a day change")
+    store.insightHistoryDays = 1
+    expect(store.insightHourlyHistory(now: hourlyNow)[.openAI] == hourly
+      && loadCounter.count == loadsAfterScan,
+      "selecting Today discarded hourly history or read session files")
     store.localHistoryEnabled = false
+    expect(store.publishedHourlyHistory.isEmpty && store.insightHourlyHistory(now: hourlyNow).isEmpty,
+      "disabling history left hourly detail visible")
     expect(store.publishedDailyHistory.isEmpty, "disabling history left published days visible")
     expect(store.orderedStates.first { $0.provider == .openAI }?.localHistoryError == nil,
       "disabling history left a scan error visible")
@@ -1324,6 +1430,71 @@ enum ConnectionFlowSelfTest {
     expect(!store.accounts.contains(codex) && FileManager.default.fileExists(atPath: codexFolder)
       && defaults.string(forKey: "\(codex.rawValue).configDirectory") == nil,
       "removing a Codex account did not forget it, or deleted its folder")
+    // Personal Max is exhausted tonight while a Team seat has capacity.
+    // A shared email and a retained dashboard must not join either reading.
+    if let team = try? store.addClaudeAccount() {
+      let now = Date()
+      let personal = UsageSnapshot(provider: .anthropic, planName: "Max", windows: [
+        UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100,
+          windowMinutes: 10080, resetsAt: now.addingTimeInterval(3600)),
+      ], source: "Fixture personal")
+      let nimbus = UsageSnapshot(provider: team, planName: "Team", windows: [
+        UsageWindow(id: "five-hour", label: "5 hours", usedPercent: 16,
+          windowMinutes: 300, resetsAt: now.addingTimeInterval(7200)),
+      ], source: "Fixture Team")
+      _ = store.replaceSnapshotForSelfTest(.anthropic, snapshot: personal)
+      _ = store.replaceSnapshotForSelfTest(team, snapshot: nimbus)
+      let deviceUsage = LocalUsageSummary(provider: .anthropic, periodDays: 30,
+        inputTokens: 123, outputTokens: 456, apiEquivalentCostUSD: 1)
+      store.seedLocalUsageForSelfTest(deviceUsage, provider: .anthropic)
+      let states = store.orderedStates.filter { $0.provider.isAnthropic }
+      let summaries = states.map { AllowanceBuilder.summary(for: $0, now: now) }
+      expect(summaries.first { $0.provider == .anthropic }?.primary?.remainingPercent == 0,
+        "personal exhaustion was replaced by the Team allowance")
+      expect(summaries.first { $0.provider == team }?.primary?.remainingPercent == 84,
+        "the Team allowance was replaced by personal exhaustion")
+      expect(summaries.allSatisfy { $0.localUsage == nil && $0.hasUnattributedClaudeHistory },
+        "device token history was credited to a Claude subscription")
+      expect(store.states[.anthropic]?.localUsage == deviceUsage && store.states[team]?.localUsage == nil,
+        "device history was discarded or duplicated across Claude accounts")
+      expect(store.insightHistoryName(for: .anthropic) == "Claude on this Mac",
+        "Insights named device-wide history after the personal subscription")
+      let personalEnvironment = store.helperEnvironment(for: .anthropic, base: ["CLAUDE_CONFIG_DIR": "/tmp/team"])
+      expect(personalEnvironment["CLAUDE_CONFIG_DIR"] == nil, "the personal helper followed an inherited Team directory")
+      let actions = DashboardActions(refreshAll: {}, connectProvider: { _ in },
+        selectMenuBarProvider: { _ in }, openSettings: {}, openInsights: {}, dismiss: {},
+        toggleProviderDetail: { _ in }, quit: {}, apiConsumptionReadings: { [] })
+      let dashboard = UsageDashboardView(states: states, selectedMenuBarProvider: team,
+        expandedProvider: .anthropic, isRefreshing: false, now: now, maximumHeight: 2000, actions: actions)
+      expect(Self.text(in: dashboard).contains("0% left")
+        && Self.text(in: dashboard).contains("84% left"), "the two Claude overview tiles share a reading")
+      expect(!Self.text(in: dashboard).contains("Local tokens today"),
+        "the personal detail card presented unsplittable device tokens as account usage")
+      expect(dashboard.apply(states: states, selectedMenuBarProvider: team, expandedProvider: team,
+        isRefreshing: false, refreshStartedAt: nil, now: now, maximumHeight: 2000, actions: actions),
+        "switching the retained card to Team failed")
+      expect(Self.text(in: dashboard).contains(team.displayName + " · Team"),
+        "the Team detail card retained personal content")
+      // Both cards signed in to one organization: the added folder keeps the
+      // reading, the first card asks for the other sign-in.
+      let second = ProviderID(rawValue: "anthropic@selftest2")!
+      let sameOrganization: (ProviderID) -> String? = { _ in "org-team" }
+      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
+        organization: sameOrganization) == team, "the first card kept a duplicate of the added Team reading")
+      expect(UsageStore.claudeOrganizationOwner(of: team, among: [.anthropic, team],
+        organization: sameOrganization) == nil, "the added Team card lost its own reading")
+      expect(UsageStore.claudeOrganizationOwner(of: second, among: [.anthropic, team, second],
+        organization: sameOrganization) == team, "the later added card kept a duplicate reading")
+      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
+        organization: { $0 == team ? "org-team" : "org-personal" }) == nil,
+        "two organizations were treated as one account")
+      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
+        organization: { $0 == team ? nil : "org-personal" }) == nil,
+        "an unidentified card was treated as a duplicate")
+      try? store.removeAccount(team)
+      expect(store.hasUnattributedClaudeHistory(for: .anthropic),
+        "removing Team reassigned old device history to the personal account")
+    } else { failures.append("added accounts: a second Claude account could not be created") }
     try? FileManager.default.removeItem(at: home)
     failures += await self.checkAddedAPIAccounts()
     return failures
@@ -1534,6 +1705,10 @@ enum ConnectionFlowSelfTest {
       && reloaded.effectiveRefreshIntervalMinutes(now: now, constrained: true) == 30,
       "adaptive: a fixed choice followed the dashboard or power state")
     return failures
+  }
+
+  private static func text(in view: NSView) -> [String] {
+    LifecycleSelfTest.descendants(of: view).compactMap { ($0 as? NSTextField)?.stringValue }
   }
 
   private static func field(_ identifier: String, in panel: ProviderConnectionPanel?) -> NSTextField? {

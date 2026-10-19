@@ -125,6 +125,7 @@ struct ProviderSummary {
   /// The last sign-in could not even be launched; the card says so instead of
   /// a plain "Sign in" that would fail the same way.
   var signInCouldNotStart = false
+  var hasUnattributedClaudeHistory = false
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
@@ -308,7 +309,8 @@ enum AllowanceBuilder {
       localHistoryUpdating: state.localHistoryUpdating && capabilities.contains(.localHistory),
       details: PrivacyPresentation.details(
         state.snapshot?.details ?? [], hidingPersonal: state.hidesPersonalInfo),
-      signInCouldNotStart: state.signInCouldNotStart)
+      signInCouldNotStart: state.signInCouldNotStart,
+      hasUnattributedClaudeHistory: state.hasUnattributedClaudeHistory)
   }
 
   /// API-key plans need no local tool, so the lookup is skipped for them.

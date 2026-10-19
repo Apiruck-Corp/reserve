@@ -51,7 +51,7 @@ final class UsageHeatmapView: NSView {
       if let tokens = day.tokens {
         let fraction = peak > 0 ? CGFloat(tokens) / CGFloat(peak) : 0
         let alpha = tokens == 0 ? 0.18 : 0.25 + 0.75 * min(1, fraction)
-        ReserveColor.chartPrimary.withAlphaComponent(alpha).setFill()
+        InsightTrendView.color(self.series.provider).withAlphaComponent(alpha).setFill()
         path.fill()
       } else {
         ReserveColor.subtle.setStroke()
@@ -83,7 +83,7 @@ final class UsageHeatmapView: NSView {
   }
 
   static func cellIndex(at x: CGFloat, dayCount: Int, width: CGFloat) -> Int? {
-    guard dayCount > 0, width > 0 else { return nil }
+    guard dayCount > 0, width > 0, x >= 0, x <= width else { return nil }
     let layout = Self.layout(dayCount: dayCount, width: width)
     let stride = layout.cell + layout.gap
     guard stride > 0 else { return nil }
@@ -95,10 +95,11 @@ final class UsageHeatmapView: NSView {
   }
 
   static func layout(dayCount: Int, width: CGFloat) -> (cell: CGFloat, gap: CGFloat) {
-    guard dayCount > 0 else { return (0, 0) }
-    let gap: CGFloat = dayCount > 40 ? 1 : 2
+    guard dayCount > 0, width > 0 else { return (0, 0) }
+    let preferredGap: CGFloat = dayCount > 40 ? 1 : 2
+    let gap = min(preferredGap, width / CGFloat(2 * dayCount))
     let available = max(0, width - gap * CGFloat(max(0, dayCount - 1)))
-    let cell = min(8, max(2, available / CGFloat(dayCount)))
+    let cell = available / CGFloat(dayCount)
     return (cell, gap)
   }
 
@@ -144,6 +145,6 @@ final class UsageHeatmapView: NSView {
     } else {
       dates = ""
     }
-    return "\(series.provider.displayName), \(series.coveredDays) of \(series.requestedDays) days cached, \(missing) missing. A missing day is not zero.\(dates)"
+    return "\(series.provider.displayName), \(series.coveredDays) of \(series.requestedDays) days cached (\(series.origin == .providerAccount ? "provider account" : "this Mac")), \(missing) missing. A missing day is not zero.\(dates)"
   }
 }

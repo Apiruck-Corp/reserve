@@ -115,8 +115,16 @@ final class ReserveUpdater:
   }
 
   private func restoreReserveWindows() {
-    for entry in self.loweredWindowLevels.values where entry.window.level == .normal {
-      entry.window.level = entry.level
+    // Raised levels only order Settings against the open menu-bar popover.
+    // If the popover closed during the update, nothing is raised again:
+    // Settings must stay an ordinary window that can go behind other apps.
+    let popoverIsOpen = NSApplication.shared.windows.contains {
+      $0.isVisible && $0.className.contains("Popover")
+    }
+    if popoverIsOpen {
+      for entry in self.loweredWindowLevels.values where entry.window.level == .normal {
+        entry.window.level = entry.level
+      }
     }
     self.loweredWindowLevels.removeAll()
   }
