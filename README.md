@@ -336,14 +336,6 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
 - xAI, a management key, read from the prepaid balance API: spend against
   purchased credits when the transaction list explains the balance, and the
   remaining balance on its own when it does not;
-- TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
-  endpoint, so Reserve lists model names, descriptions and release dates.
-  Expanded details distinguish the published price and default context limits
-  from live account data, and direct you to the console for organization rate
-  limits. The summary explicitly says spend is unavailable. It does not call
-  System One, which would consume the account. Published facts come from
-  [TypeSafe's model documentation](https://docs.typesafe.ai/models), checked
-  October 18, 2026;
 - DeepSeek, an API key, read from the user balance endpoint: the remaining
   balance in the currency DeepSeek reports (USD first when the account holds
   both USD and CNY), split into granted and topped-up credit, and whether the
@@ -354,8 +346,12 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   supported.
 
 OpenAI and Anthropic admin keys and xAI management keys do not perform inference.
-Ordinary Anthropic, OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also
+Ordinary Anthropic, OpenRouter, DeepSeek and Moonshot keys can also
 call models, so create one just for Reserve.
+
+TypeSafe is no longer supported: it publishes no usage or spend, so a row could
+only list model names. Reserve deletes a saved TypeSafe key from the Keychain at
+launch.
 
 Settings updates and clears API error explanations even while a key field has
 focus, so a previous key's error cannot linger while a fresh result arrives.

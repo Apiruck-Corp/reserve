@@ -57,27 +57,6 @@ struct APIConsumptionDetailsTests {
     #expect(self.byLabel(snapshot)["Your own provider keys"] == nil)
   }
 
-  @Test func typeSafeListsEveryModelWithItsReleaseDate() async throws {
-    let snapshot = try await self.client(
-      #"""
-      {"models":[{"name":"jev-latest","description":"Flagship System One model","release_date":"2026-05-01"},
-                 {"name":"jev-preview","description":null,"release_date":null},
-                 {"name":"  "}]}
-      """#
-    ).fetch(.typeSafe, apiKey: "ts-test")
-    let details = self.byLabel(snapshot)
-    #expect(snapshot.details.first?.label == "Spend and balance")
-    #expect(details["jev-latest"]?.hasPrefix("Released ") == true)
-    #expect(details["jev-latest description"] == "Flagship System One model")
-    #expect(details["Published price"]?.contains("docs, 18 Oct 2026") == true)
-    #expect(details["Default context (docs)"] == "64k tokens per request · 32k per question")
-    #expect(details["Rate limits"]?.contains("console") == true)
-    #expect(details["Spend and balance"] == "Not exposed by the documented API")
-    #expect(details["jev-preview"] == "Available")
-    #expect(snapshot.details.count == 7)
-    #expect(snapshot.note?.headline == "2 models")
-  }
-
   @Test func adminCostsShowDailyFiguresAndEveryContributor() async throws {
     // Buckets on the 1st, the 12th and today (the 17th).
     let body = #"""

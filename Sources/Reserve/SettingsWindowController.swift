@@ -676,7 +676,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [
             self.bullets([
               "Your providers, to read your limits",
-              "OpenAI, Anthropic, OpenRouter, xAI, TypeSafe, DeepSeek and Moonshot APIs, only after you save a key",
+              "OpenAI, Anthropic, OpenRouter, xAI, DeepSeek and Moonshot APIs, only after you save a key",
               "Z.ai (api.z.ai) and Kimi Code (api.kimi.com) usage endpoints, only after you save a plan key",
               "Their official status pages",
               "GitHub, only to look for a Reserve update",
@@ -1239,9 +1239,6 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     switch provider.provider {
     case .anthropic:
       help = "Spend needs an admin key from a Claude Console organization. Other keys only show that they work."
-    case .typeSafe:
-      help = "TypeSafe reports available models, descriptions and release dates. "
-        + "Its documented API does not expose account spend or balance."
     default: help = nil
     }
     if let help {

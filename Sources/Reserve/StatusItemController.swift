@@ -1746,11 +1746,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         UsageDetail("Key", "laptop"), UsageDetail("All time", "$40.50"),
         UsageDetail("Credit limit", "$20.00 · resets monthly"),
       ])
-    let typeSafe = APIConsumptionSnapshot(
-      provider: .typeSafe, windows: [],
-      note: APIConsumptionNote(headline: "2 models", detail: "jev-latest, jev-preview"),
-      fetchedAt: now, source: "self-test",
-      details: [UsageDetail("jev-latest", "Flagship System One model")])
     // Balance providers report what is left, so they arrive as a note.
     let deepSeek = APIConsumptionSnapshot(
       provider: .deepSeek, windows: [],
@@ -1774,8 +1769,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         error: "xAI refused this management key. Check that it has billing read access.",
         isRefreshing: false, isExpanded: true),
       APIConsumptionReading(
-        provider: .typeSafe, snapshot: typeSafe, error: nil, isRefreshing: false),
-      APIConsumptionReading(
         provider: .deepSeek, snapshot: deepSeek, error: nil, isRefreshing: false,
         isExpanded: true),
       APIConsumptionReading(
@@ -1791,10 +1784,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let identifiers = Self.descendants(of: view).compactMap { $0.identifier?.rawValue }
     return identifiers.filter { $0 == "api-detail-openRouter" }.count == 3
       && identifiers.filter { $0 == "api-detail-xAI" }.count == 1
-      && !identifiers.contains("api-detail-typeSafe")
       && identifiers.filter { $0 == "api-detail-deepSeek" }.count == 3
       && !identifiers.contains("api-detail-moonshot")
-      && ["openRouter", "xAI", "typeSafe", "deepSeek", "moonshot"].allSatisfy {
+      && ["openRouter", "xAI", "deepSeek", "moonshot"].allSatisfy {
         identifiers.contains("disclose-api-\($0)")
       }
   }

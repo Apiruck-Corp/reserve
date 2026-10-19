@@ -475,7 +475,8 @@ final class UsageStore {
       }
     }
     if productionStore {
-      Task { await APIConsumptionKeychain.deleteLegacyTypefaceAccount() }
+      let retired = self.retiredAPIAccountRawValues
+      Task { await APIConsumptionKeychain.deleteRetiredAccounts(retired) }
     }
   }
 
@@ -2088,7 +2089,26 @@ final class UsageStore {
     }
   }
 
+  /// Raw values of API accounts whose provider Reserve no longer reads. Their
+  /// Keychain items are deleted at launch; their settings already were.
+  private var retiredAPIAccountRawValues: [String] = APIConsumptionKeychain.retiredProviderNames
+
   private func loadAPIAccounts() {
+    let saved = self.defaults.stringArray(forKey: Self.addedAPIAccountsKey) ?? []
+    let retired = saved.filter { raw in
+      APIConsumptionKeychain.retiredProviderNames.contains {
+        raw.hasPrefix($0 + String(ProviderID.instanceSeparator))
+      }
+    }
+    if !retired.isEmpty {
+      self.retiredAPIAccountRawValues += retired
+      self.defaults.set(saved.filter { !retired.contains($0) }, forKey: Self.addedAPIAccountsKey)
+    }
+    for raw in self.retiredAPIAccountRawValues {
+      for suffix in ["enabled", "label", "ordinal"] {
+        self.defaults.removeObject(forKey: "apiConsumption.\(raw).\(suffix)")
+      }
+    }
     var seen: Set<APIAccountID> = []
     self.addedAPIAccounts = (self.defaults.stringArray(forKey: Self.addedAPIAccountsKey) ?? [])
       .compactMap(APIAccountID.init(rawValue:))
@@ -2665,7 +2685,6 @@ final class UsageStore {
       "apiConsumption.anthropic.enabled": false,
       "apiConsumption.openRouter.enabled": false,
       "apiConsumption.xAI.enabled": false,
-      "apiConsumption.typeSafe.enabled": false,
       "apiConsumption.deepSeek.enabled": false,
       "apiConsumption.moonshot.enabled": false,
       "appearance.mode": AppearanceMode.system.rawValue,
@@ -2674,7 +2693,6 @@ final class UsageStore {
       "menuBar.showsRemaining": true,
       "menuBar.showsReset": true,
     ])
-    self.defaults.removeObject(forKey: "apiConsumption.typeface.enabled")
   }
 
   /// Notifies every observer. A change made from inside an observer is coalesced

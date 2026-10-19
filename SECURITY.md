@@ -27,7 +27,7 @@ before the impact and complexity are understood.
 Reserve is a same-user desktop utility. It reads explicitly documented local
 provider state, starts fixed provider commands, and connects to fixed provider
 and GitHub HTTPS destinations. An optional API measurement stores a pasted
-OpenAI, Anthropic, OpenRouter, xAI, TypeSafe, DeepSeek, or Moonshot key in the
+OpenAI, Anthropic, OpenRouter, xAI, DeepSeek, or Moonshot key in the
 macOS Keychain and sends that key only to the matching provider's configured
 HTTPS billing or balance host. Z.ai and Kimi plan measurements use separate
 Keychain items and send their keys only to `api.z.ai` and `api.kimi.com`,

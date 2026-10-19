@@ -15,6 +15,9 @@ import Testing
     #expect(APIAccountID(rawValue: "anthropic@ab12cd34") == added)
     #expect(APIAccountID(rawValue: "anthropic") == .anthropic)
     #expect(APIAccountID(rawValue: "typeface") == nil)
+    #expect(APIAccountID(rawValue: "typeSafe") == nil)
+    #expect(APIAccountID(rawValue: "typeSafe@ab12cd34") == nil)
+    #expect(!APIConsumptionProvider.allCases.map(\.rawValue).contains("typeSafe"))
     #expect(APIAccountID(rawValue: "anthropic@bad/instance") == nil)
     #expect(APIAccountID(provider: .anthropic, instance: "") == nil)
   }
