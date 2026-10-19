@@ -29,7 +29,8 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
   init(store: UsageStore, width: CGFloat, filters: Filters, changed: @escaping (Filters) -> Void) {
     self.store = store; self.contentWidth = width; self.filters = filters; self.changed = changed
     super.init(frame: .zero)
-    self.orientation = .vertical; self.alignment = .leading; self.spacing = 24
+    self.orientation = .vertical; self.alignment = .leading
+    self.spacing = 14 + 2 * SettingsSectionCard.outset.height
     self.identifier = NSUserInterfaceItemIdentifier("insights-dashboard")
     self.widthAnchor.constraint(equalToConstant: width).isActive = true
     self.rebuild()
@@ -65,14 +66,16 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
     self.addArrangedSubview(self.filterBar())
     let keys = InsightHistoryRange.dayKeys(count: self.store.insightHistoryDays, now: Date())
     self.addArrangedSubview(self.label(self.filters.metric == .limits ? "Current provider readings" : "\(keys.first ?? "")  –  \(keys.last ?? "")", color: .secondaryLabelColor))
+    // Each block sits on the theme's card surface, as Settings sections do.
+    let card = { (view: NSView) in SettingsSectionCard(content: view, width: self.contentWidth) }
     if self.filters.metric == .limits {
-      self.addArrangedSubview(self.limits(selected))
+      self.addArrangedSubview(card(self.limits(selected)))
     } else {
-      self.addArrangedSubview(self.overview(selected))
-      self.addArrangedSubview(self.totals())
+      self.addArrangedSubview(card(self.overview(selected)))
+      self.addArrangedSubview(card(self.totals()))
     }
-    self.addArrangedSubview(self.heatmap(selected))
-    if self.filters.metric != .limits { self.addArrangedSubview(self.breakdownSection()) }
+    self.addArrangedSubview(card(self.heatmap(selected)))
+    if self.filters.metric != .limits { self.addArrangedSubview(card(self.breakdownSection())) }
     self.addArrangedSubview(self.references(selected))
   }
 
@@ -110,6 +113,7 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
     source.isEnabled = self.filters.metric != .limits
     let metric = NSSegmentedControl(labels: ["Cost", "Tokens", "Limits"], trackingMode: .selectOne,
       target: self, action: #selector(self.metricChanged(_:)))
+    metric.selectedSegmentBezelColor = ReserveColor.accent
     metric.selectedSegment = self.filters.metric.rawValue
     metric.identifier = NSUserInterfaceItemIdentifier("insights-metric")
     metric.setAccessibilityLabel("Usage metric")
@@ -242,6 +246,7 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
     search.setAccessibilityLabel("Filter breakdown")
     let group = NSSegmentedControl(labels: ["Model", "Day", "Provider"], trackingMode: .selectOne,
       target: self, action: #selector(self.groupChanged(_:)))
+    group.selectedSegmentBezelColor = ReserveColor.accent
     group.selectedSegment = self.filters.group.rawValue
     group.identifier = NSUserInterfaceItemIdentifier("insights-breakdown-group")
     let heading = self.row([title, self.spacer(), search, group], width: self.contentWidth)

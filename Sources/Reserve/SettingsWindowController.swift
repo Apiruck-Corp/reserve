@@ -3,9 +3,9 @@ import ServiceManagement
 import ReserveCore
 
 /// Reserve's settings, built the way macOS builds settings: a toolbar of panes
-/// above a resizable window that takes the system's own appearance. No page
-/// titles, no introductory copy, no themed canvas — the toolbar already says
-/// where you are.
+/// above a resizable window. No page titles and no introductory copy; the
+/// toolbar already says where you are. Sections sit on the chosen theme's
+/// cards and window color, like the dashboard.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, NSToolbarDelegate,
   NSWindowDelegate, NSMenuDelegate
@@ -306,6 +306,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         values[id] = field.stringValue
       }
     window.title = self.pane.title
+    // The chosen theme reaches Settings the way it reaches the dashboard.
+    window.backgroundColor = ReserveColor.background
     let content = self.makeContentView()
     for field in Self.descendants(of: content).compactMap({ $0 as? NSTextField }) {
       if let id = field.identifier?.rawValue, let draft = drafts[id] {
@@ -1876,6 +1878,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       target: self,
       action: #selector(self.appearanceModeChanged(_:)))
     control.identifier = NSUserInterfaceItemIdentifier("appearance-mode")
+    control.selectedSegmentBezelColor = ReserveColor.accent
     control.selectedSegment =
       AppearanceMode.allCases.firstIndex(of: self.store.appearanceMode) ?? 0
     control.segmentDistribution = .fillEqually
@@ -1925,7 +1928,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     stack.identifier = NSUserInterfaceItemIdentifier(identifier)
     stack.orientation = .vertical
     stack.alignment = .leading
-    stack.spacing = 22
+    // Section cards are drawn just outside their content; keep a clear gap.
+    stack.spacing = 22 + 2 * SettingsSectionCard.outset.height - 10
     stack.translatesAutoresizingMaskIntoConstraints = false
     root.addSubview(stack)
     NSLayoutConstraint.activate([
@@ -1971,7 +1975,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if footer != nil, views.count >= 2 {
       stack.setCustomSpacing(11, after: views[views.count - 2])
     }
-    return stack
+    return SettingsSectionCard(content: stack, width: self.contentWidth)
   }
 
   /// A right-aligned label beside its control, the macOS settings idiom.
@@ -3239,7 +3243,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
-    NSColor.windowBackgroundColor.setFill()
+    ReserveColor.background.setFill()
     bounds.fill()
     view.displayIgnoringOpacity(bounds, in: context)
     NSGraphicsContext.restoreGraphicsState()
@@ -3662,6 +3666,54 @@ private final class SettingsLabel: NSTextField {
   }
 
   required init?(coder: NSCoder) { nil }
+}
+
+/// A settings or Insights section on the theme's card surface, like the
+/// dashboard's cards. The card is drawn just outside its content, so every
+/// row keeps the width and alignment it was laid out with.
+final class SettingsSectionCard: NSView {
+  static let outset = NSSize(width: 12, height: 10)
+  private let card = CALayer()
+
+  init(content: NSView, width: CGFloat) {
+    super.init(frame: .zero)
+    self.wantsLayer = true
+    self.layer?.masksToBounds = false
+    self.card.cornerRadius = 10
+    self.card.borderWidth = 1
+    self.layer?.insertSublayer(self.card, at: 0)
+    self.translatesAutoresizingMaskIntoConstraints = false
+    content.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(content)
+    NSLayoutConstraint.activate([
+      content.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      content.trailingAnchor.constraint(lessThanOrEqualTo: self.trailingAnchor),
+      content.topAnchor.constraint(equalTo: self.topAnchor),
+      content.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+      self.widthAnchor.constraint(equalToConstant: width),
+    ])
+    self.applyChrome()
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func layout() {
+    super.layout()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    self.card.frame = self.bounds.insetBy(dx: -Self.outset.width, dy: -Self.outset.height)
+    CATransaction.commit()
+  }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.applyChrome()
+  }
+
+  private func applyChrome() {
+    self.card.backgroundColor = self.resolvedCGColor(ReserveColor.section)
+    self.card.borderColor = self.resolvedCGColor(ReserveColor.hairline)
+  }
 }
 
 private enum SettingsLayout {
