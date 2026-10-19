@@ -12,6 +12,16 @@ The index is reloaded when its validated file identity changes. Deletion or corr
 
 The dashboard and Settings apply ordinary reading changes to existing controls. Details and charts update with their values; privacy changes update expanded content. See [UI update checks](UI_UPDATE_CHECKS.md) for the lifecycle and performance gates.
 
+History storage accepts a published JSON index up to 64 MiB and a resumable
+checkpoint up to 128 MiB, including its base64 record payload. Existing JSON
+indexes and checkpoints remain readable. These limits accommodate Claude's
+per-file deduplication records across several thousand session files. The
+5,000-file bound, eight-second scan passes, 64 MiB read budget and 4 MiB resident
+index threshold remain unchanged. An index that exceeds its storage limit keeps
+the last published history and reports that it is too large to save. A failed
+scan does not also claim to be gathering activity; the gathering label appears
+only during an active local scan.
+
 ## Fixture measurement
 
 A paired debug-build measurement on September 22, 2026 used 1,120 generated log files: 1,000 Codex files and 120 Claude files with 100 messages each. Both builds produced identical expected token totals. The previous checkout was 708ce2787ece694cdc6cd267efd4757c68fd2a13.
@@ -34,3 +44,51 @@ The final local check on September 22, 2026 passed all 287 Swift tests, 43 core 
 The stress run completed 30 popover and Settings open/close cycles with 9.3 MiB of physical-footprint growth against a 40 MiB budget. Eight cached-reading updates caused zero full dashboard replacements and zero region replacements; the slowest completed update took 0.03 seconds. This bounds repeated-cycle growth in the fixture; it does not establish a reduction in the installed app's idle memory.
 
 Provider recovery checks use injected failures and credentials. Universal packaging and installed-app validation remain separate release checks.
+
+### Hourly Insights
+
+`hourly-usage-index.json` is a separate 0600, bounded, atomic cache. It retains
+only the current local day, per-file offsets, numeric hour totals, model names,
+128 recent Claude correction identities, and Codex counter baselines. Paths are
+hashed and transcript text is not saved. Initial discovery reads today's modified
+Claude/Codex logs from the beginning; later passes read appended complete lines.
+Claude corrections replace their earlier hour contribution. Codex repeated
+snapshots add nothing; positive counter deltas are priced for the current model,
+with last-request usage used for initial inherited counters or resets.
+
+Each pass allows 64 MiB and eight seconds, checkpoints useful progress, and
+resumes after five seconds. Partial passes keep the last complete hourly snapshot;
+daily recovery is published independently. The 64 MiB cache bound is checked
+before replacing a saved file. A new civil day or time-zone change rebuilds this
+small index. Real hour intervals handle daylight-saving changes. Grok aggregate
+signals and provider-account daily totals have no hourly timestamps and remain
+explicitly unavailable in the hourly chart. Hourly and daily totals may differ
+because they use different sources and accounting periods.
+
+### Backfilling older Insights caches
+
+Per-file `insightDetailsVersion` is independent of the pricing migration. Older
+preview caches can already be marked `savingsPriced` while still lacking model
+rows; unchanged Claude/Codex files therefore need one versioned reparse. Claude
+uses the existing checkpoint and migration-publication safeguards, so a bounded
+prefix cannot replace complete daily totals. Finished records retain the version
+even when a model cannot be proved, avoiding repeated rescans.
+
+Cache-only reads can supply an older archive's missing token-type detail from
+retained per-file rows only when their token total matches the archive exactly.
+Archive totals and prices keep their authority. Missing sources and ambiguous
+mixed-model Codex cumulative totals remain unavailable rather than being guessed.
+
+Today is published first from complete hourly scans, including token-type and
+model detail from the same events. Historical daily backfill then runs separately;
+its completion cannot overwrite Today's timestamped totals. An empty, automatically
+focused breakdown search does not defer live publication. Nonempty searches still
+keep their field editor until editing finishes. During migration a single file may
+use the existing shared 64 MiB pass allowance (still at most eight seconds), rather
+than forcing an extra five-second continuation after every 8 MiB of that file.
+Normal append scans retain their 8 MiB per-file allowance.
+
+Hourly Claude parsing uses the assistant message's own id, model and usage fields.
+It does not re-sort full JSON before calling the compact daily parser: tool calls
+can contain their own id/model fields, which must not affect deduplication. A
+versioned hourly-cache rebuild discards the earlier representation.

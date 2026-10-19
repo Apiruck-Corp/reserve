@@ -2866,6 +2866,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard send(popup), self.store.insightHistoryDays == 1 else { return false }
     // Rebuild synchronously: production's observer coalesces this update.
     self.applyPane(animated: false)
+    guard control("insights-daily-trend", as: InsightTrendView.self)?.title == "Today's hourly estimated API value",
+      control("insights-hourly-coverage", as: NSTextField.self)?.stringValue.contains("daily totals only") == true
+    else { return false }
+    self.store.insightHistoryDays = 7
+    self.applyPane(animated: false)
+    guard control("insights-daily-trend", as: InsightTrendView.self)?.title == "Daily estimated API value"
+    else { return false }
+    self.store.insightHistoryDays = 1
+    self.applyPane(animated: false)
     guard let currentMetric = control("insights-metric", as: NSSegmentedControl.self) else { return false }
     currentMetric.selectedSegment = 2
     guard send(currentMetric), self.insightFilters.metric == .limits,

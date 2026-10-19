@@ -541,6 +541,7 @@ enum ConnectionFlowSelfTest {
     failures += await self.checkRefreshScheduling(in: directory)
     failures += await self.checkManualRefreshScansLocalHistory(in: directory)
     failures += await self.checkCachedHistoryPublication(in: directory)
+    failures += await self.checkHourlyHistoryBeforeBackfill(in: directory)
     failures += await self.checkLoginHandoff(in: directory)
     failures += await self.checkEarlyCompletions(in: directory)
     failures += self.checkPhaseTable()
@@ -847,6 +848,39 @@ enum ConnectionFlowSelfTest {
     expect(!failedText.contains { $0.contains("/Users") || $0.contains(".jsonl") || $0.contains("private") },
       "expanded detail showed a path from the failed scan")
 
+    let capacityFailure = HistoryScanFailure()
+    let oversized = Self.historyRefreshStore(
+      directory: directory, name: "capacity", planKeys: planKeys,
+      scan: { _, _ in
+        if await capacityFailure.consume() { throw LocalHistoryStorageError.capacityExceeded }
+        return [.openAI: replacement]
+      })
+    oversized.insightsVisible = false
+    oversized.refreshAll(manual: true)
+    await self.settle { !oversized.isRefreshingAll && !oversized.isScanningLocalUsage }
+    let capacityState = oversized.orderedStates.first { $0.provider == .openAI }!
+    let capacityMessage = UsageStore.localHistoryFailureMessage(
+      LocalHistoryStorageError.capacityExceeded)
+    expect(capacityState.localHistoryError == capacityMessage
+      && capacityMessage.contains("too large to save"),
+      "a history storage failure lost its specific explanation")
+    let capacityCard = ProviderDashboardCard(
+      summary: AllowanceBuilder.summary(for: capacityState), now: Date(),
+      isSelectedForMenuBar: false, isExpanded: true,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    capacityCard.layoutSubtreeIfNeeded()
+    let capacityText = LifecycleSelfTest.descendants(of: capacityCard).compactMap {
+      ($0 as? NSTextField)?.stringValue
+    }
+    expect(capacityText.contains(capacityMessage)
+      && !capacityText.contains("Gathering activity from this Mac…"),
+      "a stopped history scan still claimed it was gathering activity")
+    oversized.refreshAll(manual: true)
+    await self.settle { !oversized.isRefreshingAll && !oversized.isScanningLocalUsage }
+    let recovered = oversized.orderedStates.first { $0.provider == .openAI }
+    expect(recovered?.localUsage?.inputTokens == 80 && recovered?.localHistoryError == nil,
+      "a successful retry did not replace the storage error with fresh history")
+
     let retryFlag = HistoryScanFailure()
     let retry = Self.historyRefreshStore(
       directory: directory, name: "retry", planKeys: planKeys,
@@ -907,7 +941,8 @@ enum ConnectionFlowSelfTest {
     scan: @escaping @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
     ,
     cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
-    dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil
+    dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
+    hourlyScanner: LocalHourlyUsageScanner? = nil
   ) -> UsageStore {
     let suite = "Reserve.LocalHistoryRefresh.\(name).\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -936,9 +971,50 @@ enum ConnectionFlowSelfTest {
       },
       localUsageScan: scan,
       cachedLocalUsageLoad: cachedLocalUsageLoad,
+      hourlyUsageScanner: hourlyScanner,
       dailyHistoryLoad: dailyHistoryLoad,
       planKeys: planKeys)
     return store
+  }
+
+  private static func checkHourlyHistoryBeforeBackfill(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) { if !value { failures.append(message) } }
+    do {
+      let root = directory.appendingPathComponent("hourly-first")
+      let codex = root.appendingPathComponent("codex")
+      let claude = root.appendingPathComponent("claude")
+      for folder in [codex, claude] {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      }
+      let now = Date()
+      let stamp = ISO8601DateFormatter().string(from: now)
+      let context = #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#
+      let usage = #"{"timestamp":"\#(stamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10}}}}"#
+      try Data((context + "\n" + usage + "\n").utf8).write(to: codex.appendingPathComponent("session.jsonl"))
+      let scanner = LocalHourlyUsageScanner(roots: .init(codex: codex, claude: claude, grok: root),
+        cacheURL: root.appendingPathComponent("hourly.json"))
+      let gate = HistoryScanGate()
+      let keys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
+      let store = self.historyRefreshStore(directory: root, name: "hourly-first", planKeys: keys,
+        scan: { _, _ in await gate.enter(); return [:] }, hourlyScanner: scanner)
+      store.insightHistoryDays = 1
+      store.localHistoryEnabled = true
+      store.refreshAll(manual: true)
+      await self.settle { store.publishedHourlyHistory[.openAI] != nil && store.isScanningLocalUsage }
+      let series = store.insightSeries(for: .openAI)
+      expect(store.isScanningLocalUsage && series.days.last?.tokens == 110,
+        "Today waited for the blocked historical backfill")
+      expect(series.days.last?.detail?.cached == 50
+        && series.days.last?.detail?.models["gpt-5.4"]?.tokens == 110,
+        "hourly publication did not supply Today's cache and model detail")
+      await gate.release()
+      await self.settle { !store.isScanningLocalUsage }
+      expect(store.insightSeries(for: .openAI).days.last?.tokens == 110,
+        "historical publication replaced Today's timestamped totals")
+      store.localHistoryEnabled = false
+    } catch { failures.append("hourly-first fixture failed: \(type(of: error))") }
+    return failures
   }
 
   /// Production publication goes through the injected cache loader, not the
@@ -1019,7 +1095,22 @@ enum ConnectionFlowSelfTest {
     store.insightHistoryDays = 90
     expect(loadCounter.count == loadsAfterScan, "range change after publication reloaded the cache")
     expect(await scans.count == scansBefore + 1, "range change after publication scanned again")
+    let hourlyNow = Date()
+    let hourlyStart = Calendar.current.startOfDay(for: hourlyNow)
+    let hourly = HourlyUsageHistory(provider: .openAI, dayStart: hourlyStart, observedAt: hourlyNow,
+      hours: [HourlyUsagePoint(start: hourlyStart, tokens: 40, costUSD: 1.5)])
+    store.publishHourlyHistoryForTesting([.openAI: hourly])
+    expect(store.insightHourlyHistory(now: hourlyNow)[.openAI] == hourly,
+      "published hourly history did not reach Insights")
+    expect(store.insightHourlyHistory(now: hourlyNow.addingTimeInterval(86400)).isEmpty,
+      "yesterday's hourly timeline survived a day change")
+    store.insightHistoryDays = 1
+    expect(store.insightHourlyHistory(now: hourlyNow)[.openAI] == hourly
+      && loadCounter.count == loadsAfterScan,
+      "selecting Today discarded hourly history or read session files")
     store.localHistoryEnabled = false
+    expect(store.publishedHourlyHistory.isEmpty && store.insightHourlyHistory(now: hourlyNow).isEmpty,
+      "disabling history left hourly detail visible")
     expect(store.publishedDailyHistory.isEmpty, "disabling history left published days visible")
     expect(store.orderedStates.first { $0.provider == .openAI }?.localHistoryError == nil,
       "disabling history left a scan error visible")

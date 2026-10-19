@@ -5,13 +5,30 @@ import ReserveCore
 final class InsightTrendView: NSView {
   private let series: [InsightHistorySeries]
   private let metric: InsightDashboardView.Metric
-  init(series: [InsightHistorySeries], metric: InsightDashboardView.Metric) {
-    self.series = series; self.metric = metric
+  private let providerNames: [ProviderID: String]
+  private let periodDays: Int
+  private let hourly: [HourlyUsageHistory]
+  private var isSingleDay: Bool { self.periodDays == 1 }
+  var title: String {
+    if self.isSingleDay {
+      return self.metric == .tokens ? "Today's hourly processed tokens" : "Today's hourly estimated API value"
+    }
+    return self.metric == .tokens ? "Daily processed tokens" : "Daily estimated API value"
+  }
+
+  init(series: [InsightHistorySeries], metric: InsightDashboardView.Metric,
+       providerNames: [ProviderID: String] = [:], periodDays: Int? = nil,
+       hourly: [HourlyUsageHistory] = []) {
+    self.series = series.filter(\.available); self.metric = metric; self.providerNames = providerNames
+    self.hourly = hourly.filter { !$0.hours.isEmpty }
+    self.periodDays = periodDays ?? series.map(\.requestedDays).max() ?? 30
     super.init(frame: .zero)
     self.setAccessibilityElement(true)
-    let title = metric == .tokens ? "Daily processed tokens by provider" : "Daily estimated API value by provider"
-    self.setAccessibilityLabel(title + ". Smooth lines connect available days; missing days remain unavailable.")
-    self.toolTip = "Smooth lines connect available days. Missing days remain unavailable."
+    let explanation = self.isSingleDay
+      ? "Hourly usage from timestamped local logs. The current hour is partial. Daily account totals may differ."
+      : "Smooth lines connect available days. Missing days remain unavailable."
+    self.setAccessibilityLabel(self.title + ". " + explanation)
+    self.toolTip = explanation
     self.addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseMoved, .inVisibleRect], owner: self))
   }
   required init?(coder: NSCoder) { nil }
@@ -44,39 +61,171 @@ final class InsightTrendView: NSView {
     let value = self.metric == .tokens ? day.tokens.map(Double.init) : day.costUSD
     return value.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
   }
+  private var scale: InsightChartScale {
+    InsightChartScale(values: self.isSingleDay
+      ? self.hourly.flatMap { $0.hours.compactMap(self.hourValue) }
+      : self.series.flatMap { $0.days.compactMap(self.value) },
+      minimumStep: self.metric == .tokens ? 1 : 0.000001)
+  }
+
+  private func axisValue(_ amount: Double) -> String {
+    if self.metric == .tokens {
+      return DashboardFormat.tokens(Int64(min(Double(Int64.max - 1024), amount)))
+    }
+    let step = self.scale.ticks.dropFirst().first ?? 0.01
+    if step > 0, step < 0.01 {
+      let decimals = min(6, max(2, Int(ceil(-log10(step)))))
+      return String(format: "$%.*f", decimals, amount)
+    }
+    return DashboardFormat.money(amount)
+  }
+
+  private func plotRect(scale: InsightChartScale) -> NSRect {
+    let font = NSFont.systemFont(ofSize: 11)
+    let gutter = max(40, ceil(scale.ticks.map {
+      let label = ($0 == 0 ? "0" : self.axisValue($0)) as NSString
+      return label.size(withAttributes: [.font: font]).width
+    }.max() ?? 0) + 10)
+    return NSRect(x: gutter, y: 28, width: max(1, self.bounds.width - gutter - 12),
+      height: max(1, self.bounds.height - 44))
+  }
+
   override func draw(_ dirtyRect: NSRect) {
-    let plot = NSRect(x: 52, y: 26, width: max(1, self.bounds.width - 60), height: max(1, self.bounds.height - 40))
+    let scale = self.scale
+    let plot = self.plotRect(scale: scale)
     let values = self.series.flatMap { $0.days.compactMap(self.value) }
-    let peak = max(1, values.max() ?? 0)
     let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
-    for step in 0...3 {
-      let y = plot.minY + plot.height * CGFloat(step) / 3
+    if self.isSingleDay, self.hourly.isEmpty {
+      self.drawHourly(plot: plot, scale: scale, attributes: attributes)
+      return
+    }
+    for amount in scale.ticks {
+      let y = plot.minY + plot.height * CGFloat(amount / scale.maximum)
       NSColor.separatorColor.setStroke()
       let line = NSBezierPath(); line.move(to: NSPoint(x: plot.minX, y: y)); line.line(to: NSPoint(x: plot.maxX, y: y)); line.stroke()
-      let amount = peak * Double(step) / 3
-      let title = self.metric == .tokens ? DashboardFormat.tokens(Int64(min(Double(Int64.max - 1024), amount))) : DashboardFormat.money(amount)
-      (title as NSString).draw(at: NSPoint(x: 0, y: y - 6), withAttributes: attributes)
+      let title = (amount == 0 ? "0" : self.axisValue(amount)) as NSString
+      let width = title.size(withAttributes: attributes).width
+      title.draw(at: NSPoint(x: plot.minX - width - 10, y: y - 6), withAttributes: attributes)
+    }
+    if self.isSingleDay {
+      self.drawHourly(plot: plot, scale: scale, attributes: attributes)
+      return
     }
     for item in self.series {
-      let points = self.plotPoints(item, plot: plot, peak: peak)
+      let points = self.plotPoints(item, plot: plot, peak: scale.maximum)
       let path = Self.smoothPath(points)
+      if let first = points.first, let last = points.last, points.count > 1,
+        let area = path.copy() as? NSBezierPath {
+        area.line(to: NSPoint(x: last.x, y: plot.minY))
+        area.line(to: NSPoint(x: first.x, y: plot.minY))
+        area.close()
+        Self.color(item.provider).withAlphaComponent(0.10).setFill()
+        area.fill()
+      }
       Self.color(item.provider).setStroke()
       path.stroke()
       // A single observation has no line to draw, so keep it visible as a dot.
       if points.count == 1, let point = points.first {
         Self.color(item.provider).setFill()
-        NSBezierPath(ovalIn: NSRect(x: point.x - 2, y: point.y - 2, width: 4, height: 4)).fill()
+        NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
       }
     }
     if values.isEmpty {
       let text = self.metric == .tokens ? "Daily history unavailable" : "Daily prices unavailable"
       (text as NSString).draw(at: NSPoint(x: plot.midX - 80, y: plot.midY), withAttributes: attributes)
     }
-    if let days = self.series.first?.days, let first = days.first, let last = days.last {
-      (first.day as NSString).draw(at: NSPoint(x: plot.minX, y: 3), withAttributes: attributes)
-      let size = (last.day as NSString).size(withAttributes: attributes)
-      (last.day as NSString).draw(at: NSPoint(x: plot.maxX - size.width, y: 3), withAttributes: attributes)
+    if let days = self.series.max(by: { $0.days.count < $1.days.count })?.days, !days.isEmpty {
+      let tickCount = min(5, days.count)
+      let indices = tickCount == 1 ? [0] : Set((0..<tickCount).map {
+        Int((Double($0) * Double(days.count - 1) / Double(tickCount - 1)).rounded())
+      }).sorted()
+      for index in indices {
+        let title = Self.dateLabel(days[index].day) as NSString
+        let width = title.size(withAttributes: attributes).width
+        let x = days.count == 1 ? plot.midX
+          : plot.minX + plot.width * CGFloat(index) / CGFloat(days.count - 1)
+        let left = min(plot.maxX - width, max(plot.minX, x - width / 2))
+        title.draw(at: NSPoint(x: left, y: 3), withAttributes: attributes)
+      }
     }
+  }
+
+  private func hourValue(_ hour: HourlyUsagePoint) -> Double? {
+    self.metric == .tokens ? Double(hour.tokens) : hour.costUSD
+  }
+
+  private static func timeLabel(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.timeStyle = .short
+    return formatter.string(from: date)
+  }
+
+  private func drawHourly(plot: NSRect, scale: InsightChartScale,
+                          attributes: [NSAttributedString.Key: Any]) {
+    guard let reference = self.hourly.max(by: { $0.observedAt < $1.observedAt }),
+      reference.observedAt > reference.dayStart else {
+      ("Hourly detail unavailable" as NSString).draw(
+        at: NSPoint(x: plot.midX - 65, y: plot.midY), withAttributes: attributes)
+      return
+    }
+    let duration = reference.observedAt.timeIntervalSince(reference.dayStart)
+    func x(_ date: Date) -> CGFloat {
+      plot.minX + plot.width * CGFloat(max(0, min(1, date.timeIntervalSince(reference.dayStart) / duration)))
+    }
+    for history in self.hourly {
+      // Draw separate runs when price information is missing; do not imply a
+      // zero or a known price across an unpriced hour.
+      var runs: [[NSPoint]] = [[]]
+      for hour in history.hours {
+        guard let value = self.hourValue(hour) else {
+          if !runs[runs.count - 1].isEmpty { runs.append([]) }
+          continue
+        }
+        runs[runs.count - 1].append(NSPoint(x: x(hour.start),
+          y: plot.minY + plot.height * CGFloat(value / scale.maximum)))
+      }
+      if let last = history.hours.last, let value = self.hourValue(last) {
+        runs[runs.count - 1].append(NSPoint(x: x(history.observedAt),
+          y: plot.minY + plot.height * CGFloat(value / scale.maximum)))
+      }
+      for points in runs where !points.isEmpty {
+        let path = Self.smoothPath(points)
+        if let first = points.first, let last = points.last, points.count > 1,
+          let area = path.copy() as? NSBezierPath {
+          area.line(to: NSPoint(x: last.x, y: plot.minY))
+          area.line(to: NSPoint(x: first.x, y: plot.minY)); area.close()
+          Self.color(history.provider).withAlphaComponent(0.10).setFill(); area.fill()
+        }
+        Self.color(history.provider).setStroke(); path.stroke()
+        for point in points {
+          Self.color(history.provider).setFill()
+          NSBezierPath(ovalIn: NSRect(x: point.x - 2.5, y: point.y - 2.5, width: 5, height: 5)).fill()
+        }
+      }
+    }
+    let step = [1, 2, 3, 4, 6].first { Double($0 * 4) * 3600 >= duration } ?? 6
+    var ticks = stride(from: 0.0, to: duration * 0.87, by: Double(step) * 3600).map {
+      reference.dayStart.addingTimeInterval($0)
+    }
+    ticks.append(reference.observedAt)
+    for date in ticks {
+      let title = (date == reference.observedAt && Date().timeIntervalSince(date) < 60 ? "Now" : Self.timeLabel(date)) as NSString
+      let width = title.size(withAttributes: attributes).width
+      title.draw(at: NSPoint(x: min(plot.maxX - width, max(plot.minX, x(date) - width / 2)), y: 3),
+        withAttributes: attributes)
+    }
+  }
+
+  private static func dateLabel(_ day: String) -> String {
+    let reader = DateFormatter()
+    reader.locale = Locale(identifier: "en_US_POSIX")
+    reader.timeZone = .gmt
+    reader.dateFormat = "yyyy-MM-dd"
+    guard let date = reader.date(from: day) else { return day }
+    let label = DateFormatter()
+    label.timeZone = .gmt
+    label.dateFormat = "MMM d"
+    return label.string(from: date)
   }
   private func plotPoints(_ item: InsightHistorySeries, plot: NSRect, peak: Double) -> [NSPoint] {
     item.days.enumerated().compactMap { index, day in
@@ -159,14 +308,58 @@ final class InsightTrendView: NSView {
         }
       }
     }
+    // Every supported range fills its heatmap width, including a single day,
+    // and hover targets follow the resized cells rather than the old 8pt cap.
+    for count in [1, 7, 30, 90] {
+      for width in [CGFloat(240), 600] {
+        let layout = UsageHeatmapView.layout(dayCount: count, width: width)
+        let used = layout.cell * CGFloat(count) + layout.gap * CGFloat(count - 1)
+        guard abs(used - width) < 0.001,
+          UsageHeatmapView.cellIndex(at: width - layout.cell / 2, dayCount: count, width: width) == count - 1,
+          UsageHeatmapView.cellIndex(at: -1, dayCount: count, width: width) == nil else { return false }
+      }
+    }
+    let today = InsightHistorySeries(provider: .openAI,
+      days: [InsightHistoryDay(day: "2026-10-19", tokens: 20_800_000, costUSD: nil)],
+      coveredDays: 1, requestedDays: 1, available: true)
+    let todayView = InsightTrendView(series: [today], metric: .tokens)
+    guard todayView.isSingleDay, todayView.title.contains("Today's"),
+      todayView.hourly.isEmpty, todayView.scale.maximum > 0,
+      !InsightTrendView(series: [series], metric: .tokens).isSingleDay else { return false }
+    let start = Calendar.current.startOfDay(for: Date())
+    let hourly = HourlyUsageHistory(provider: .openAI, dayStart: start,
+      observedAt: start.addingTimeInterval(5400), hours: [
+        HourlyUsagePoint(start: start, tokens: 100, costUSD: 0.001),
+        HourlyUsagePoint(start: start.addingTimeInterval(3600), tokens: 200, costUSD: nil),
+      ])
+    let hourlyView = InsightTrendView(series: [today], metric: .tokens, hourly: [hourly])
+    let costView = InsightTrendView(series: [today], metric: .cost, hourly: [hourly])
+    guard hourlyView.title == "Today's hourly processed tokens",
+      hourlyView.scale.maximum > 200, hourlyView.scale.maximum < 1000,
+      costView.scale.maximum > 0.001, costView.scale.maximum < 0.01 else { return false }
     return Self.smoothPath([]).elementCount == 0
       && Self.smoothPath([.zero]).elementCount == 1
   }
 
   override func mouseMoved(with event: NSEvent) {
     let point = self.convert(event.locationInWindow, from: nil)
-    guard let days = self.series.first?.days, !days.isEmpty else { return }
-    let fraction = max(0, min(1, (point.x - 52) / max(1, self.bounds.width - 60)))
+    let plot = self.plotRect(scale: self.scale)
+    if self.isSingleDay {
+      guard let reference = self.hourly.max(by: { $0.observedAt < $1.observedAt }) else { return }
+      let fraction = max(0, min(1, (point.x - plot.minX) / plot.width))
+      let date = reference.dayStart.addingTimeInterval(
+        reference.observedAt.timeIntervalSince(reference.dayStart) * Double(fraction))
+      self.toolTip = self.hourly.compactMap { history in
+        guard let hour = history.hours.last(where: { $0.start <= date }) else { return nil }
+        let end = min(hour.start.addingTimeInterval(3600), history.observedAt)
+        let partial = end < hour.start.addingTimeInterval(3600) ? " (partial hour)" : ""
+        let value = self.hourValue(hour).map(self.axisValue) ?? "Price unavailable"
+        return "\(self.providerNames[history.provider] ?? history.provider.displayName): \(value) · \(Self.timeLabel(hour.start)) \(TimeZone.current.abbreviation(for: hour.start) ?? "")–\(Self.timeLabel(end))\(partial)"
+      }.joined(separator: "\n")
+      return
+    }
+    guard let days = self.series.max(by: { $0.days.count < $1.days.count })?.days, !days.isEmpty else { return }
+    let fraction = max(0, min(1, (point.x - plot.minX) / plot.width))
     let index = Int((fraction * CGFloat(days.count - 1)).rounded())
     self.toolTip = ([days[index].day] + self.series.compactMap { series in
       guard series.days.indices.contains(index) else { return nil }

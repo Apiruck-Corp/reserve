@@ -22,6 +22,8 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
   private var breakdown = NSStackView()
   private var providerOptions: [ProviderID] = []
   private var referenceSignature = ""
+  private var hourly: [ProviderID: HourlyUsageHistory] = [:]
+  private var hourlyStatus = ""
   private var deferredRefresh = false
   private var retainedHeatmaps: [String: UsageHeatmapView] = [:]
   private var retainedTotal: NSTextField?
@@ -49,6 +51,8 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
     self.series = self.store.accounts.map { self.store.insightSeries(for: $0, origin: self.historyOrigin) }
       .filter { self.store.isEnabled($0.provider) || $0.coveredDays > 0 }
     self.referenceSignature = self.referencesSignature()
+    self.hourly = self.store.insightHourlyHistory()
+    self.hourlyStatus = self.store.hourlyHistoryStatus
     self.providerOptions = self.series.map(\.provider)
     if let provider = self.filters.provider, !self.providerOptions.contains(provider) {
       self.filters.provider = nil
@@ -83,9 +87,12 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
   func refresh() {
     let current = self.store.accounts.map { self.store.insightSeries(for: $0, origin: self.historyOrigin) }
       .filter { self.store.isEnabled($0.provider) || $0.coveredDays > 0 }
-    guard current != self.series || self.referenceSignature != self.referencesSignature() else { return }
+    guard current != self.series || self.referenceSignature != self.referencesSignature()
+      || self.hourly != self.store.insightHourlyHistory() || self.hourlyStatus != self.store.hourlyHistoryStatus else { return }
     if let editor = self.window?.firstResponder as? NSTextView,
-      (editor.delegate as? NSSearchField)?.identifier?.rawValue == "insights-breakdown-search" {
+      let field = editor.delegate as? NSSearchField,
+      field.identifier?.rawValue == "insights-breakdown-search",
+      !field.stringValue.isEmpty || editor.hasMarkedText() {
       self.deferredRefresh = true
       return
     }
@@ -133,7 +140,8 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
       : self.report.costUSD.map { "≈ " + DashboardFormat.money($0) } ?? "Unavailable"
     let headline = self.label(value, size: 34, weight: .semibold, color: .labelColor)
     headline.identifier = NSUserInterfaceItemIdentifier("insights-headline")
-    let caption = self.filters.metric == .tokens ? "Processed tokens · \(self.report.activeDays) active days"
+    let active = self.report.activeDays
+    let caption = self.filters.metric == .tokens ? "Processed tokens · \(active) active \(active == 1 ? "day" : "days")"
       : "Estimated API value · \(self.report.pricedDays)/\(self.report.coveredDays) provider-days priced"
     var summary: [NSView] = [headline, self.label(caption, color: .secondaryLabelColor)]
     let rows = self.sorted(self.report.providerRows)
@@ -153,13 +161,34 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
     let left = self.column(summary, spacing: 14)
     left.widthAnchor.constraint(equalToConstant: 286).isActive = true
     let chartWidth = self.contentWidth - 318
-    let title = self.label(self.filters.metric == .tokens ? "Daily processed tokens" : "Daily estimated API value",
+    let chart = InsightTrendView(series: selected, metric: self.filters.metric,
+      providerNames: Dictionary(uniqueKeysWithValues: selected.map { ($0.provider, self.historyName($0.provider)) }),
+      periodDays: self.store.insightHistoryDays,
+      hourly: self.filters.source == 2 ? [] : selected.compactMap { self.hourly[$0.provider] })
+    let title = self.label(chart.title,
       size: 13, weight: .medium, color: .labelColor)
-    let chart = InsightTrendView(series: selected, metric: self.filters.metric)
     chart.widthAnchor.constraint(equalToConstant: chartWidth).isActive = true
     chart.heightAnchor.constraint(equalToConstant: 218).isActive = true
     chart.identifier = NSUserInterfaceItemIdentifier("insights-daily-trend")
-    let right = self.column([title, chart], spacing: 10)
+    var chartViews: [NSView] = [title, chart]
+    if self.store.insightHistoryDays == 1 {
+      let available = self.filters.source == 2 ? [] : selected.compactMap { self.hourly[$0.provider] }
+      let note: String
+      if self.filters.source == 2 {
+        note = "Account history has daily totals only. Choose This Mac for hourly usage."
+      } else if let latest = available.map(\.observedAt).max() {
+        let formatter = DateFormatter(); formatter.timeStyle = .short
+        let missing = selected.filter { $0.coveredDays > 0 && self.hourly[$0.provider] == nil }.map { self.historyName($0.provider) }
+        note = "This Mac · through \(formatter.string(from: latest)) · current hour partial. Daily totals at left may differ."
+          + (missing.isEmpty ? "" : " No hourly detail: " + missing.joined(separator: ", ") + ".")
+      } else {
+        note = self.hourlyStatus + " Daily totals cannot be split into hours."
+      }
+      let caption = self.label(note, size: 11, color: .secondaryLabelColor, wraps: true, width: chartWidth)
+      caption.identifier = NSUserInterfaceItemIdentifier("insights-hourly-coverage")
+      chartViews.append(caption)
+    }
+    let right = self.column(chartViews, spacing: 10)
     let row = self.row([left, right], width: self.contentWidth, spacing: 32)
     row.alignment = .top
     return row
@@ -208,7 +237,8 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
   }
 
   private func heatmap(_ selected: [InsightHistorySeries]) -> NSView {
-    let title = self.label("Daily heatmap", size: 13, weight: .semibold, color: .labelColor)
+    let title = self.label(self.store.insightHistoryDays == 1 ? "Today's coverage" : "Daily heatmap",
+      size: 13, weight: .semibold, color: .labelColor)
     var rows: [NSView] = [title]
     for series in selected where series.available {
       let name = self.label(self.historyName(series.provider), color: .labelColor)
@@ -225,7 +255,8 @@ final class InsightDashboardView: NSStackView, NSSearchFieldDelegate {
         map.widthAnchor.constraint(equalToConstant: self.contentWidth - 355).isActive = true
       }
       let source = series.origin == .providerAccount ? "account" : "this Mac"
-      let coverage = self.label("\(series.coveredDays)/\(series.requestedDays) days · \(source)", size: 11, color: .secondaryLabelColor)
+      let unit = series.requestedDays == 1 ? "day" : "days"
+      let coverage = self.label("\(series.coveredDays)/\(series.requestedDays) \(unit) · \(source)", size: 11, color: .secondaryLabelColor)
       coverage.alignment = .right
       coverage.widthAnchor.constraint(equalToConstant: 160).isActive = true
       rows.append(self.row([self.dot(series.provider), name, map, coverage], width: self.contentWidth, spacing: 4))

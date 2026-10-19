@@ -363,17 +363,18 @@ public actor LocalUsageScanner {
     calendar.timeZone = self.timeZone
     return calendar
   }
-  private let maximumCacheBytes = 12 * 1024 * 1024
+  private var maximumCacheBytes = LocalHistoryStorageLimits.indexBytes
   /// Migration checkpoints also carry the original day buckets and encode
   /// their record payload as base64. Keep that temporary envelope separately
-  /// bounded; the published index still has its original 12 MB limit.
-  private var maximumCheckpointBytes: Int { self.maximumCacheBytes * 2 }
+  /// bounded independently from the published index.
+  private let maximumCheckpointBytes = LocalHistoryStorageLimits.checkpointBytes
   private let maximumLineBytes = 1024 * 1024
   private let codexTailBytes = 8 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
   private var maximumBytesPerScan = 64 * 1024 * 1024
   private let maximumResidentIndexBytes = 4 * 1024 * 1024
   private var maximumBytesPerFileScan = 8 * 1024 * 1024
+  private var maximumMigrationFileBytes = 64 * 1024 * 1024
   private let maximumLinesPerFile = 100_000
   private let maximumScanDuration: TimeInterval = 8
   private let watchChanges: Bool
@@ -521,7 +522,13 @@ public actor LocalUsageScanner {
     for (provider, days) in index.dailyHistory where selected.contains(provider) {
       var byDay = merged[provider] ?? [:]
       for (key, day) in days where Self.isArchiveDayKey(key) {
-        byDay[key] = day
+        var archived = day
+        // Older archives saved only a total even when retained per-file rows
+        // still contain the token split. Enrich only an exactly backed total.
+        if archived.detail == nil, let observed = byDay[key], observed.tokens == archived.tokens {
+          archived.detail = observed.detail
+        }
+        byDay[key] = archived
       }
       merged[provider] = byDay
     }
@@ -706,7 +713,7 @@ public actor LocalUsageScanner {
           device: metadata.device,
           inode: metadata.inode,
           changedAt: metadata.changedAt,
-          savingsPriced: true, codexPricingVersion: 1)
+          savingsPriced: true, codexPricingVersion: 1, insightDetailsVersion: 1)
         try self.storeParsed(record!, key: key, box: box, ledger: ledger, budget: budget)
       }
     }
@@ -811,6 +818,8 @@ public actor LocalUsageScanner {
       let scanResult = try self.scanLines(
         opened, from: updated.offset,
         discardingOversizedLine: updated.discardingOversizedLine ?? false,
+        fileByteLimit: (staleSavings || staleDays || continueSavingsMigration)
+          ? self.maximumMigrationFileBytes : self.maximumBytesPerFileScan,
         deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
       ) { data in
         guard let row = Self.parseClaudeLine(
@@ -849,6 +858,7 @@ public actor LocalUsageScanner {
       // keeps the priced flag, so a trailing partial line does not turn the
       // next scan into a migration that refuses to publish.
       updated.savingsPriced = migrating ? updated.offset >= metadata.size : true
+      if updated.savingsPriced == true { updated.insightDetailsVersion = 1 }
       record = updated
       // A savings reparse starts again at byte 0, so a per-file cap would
       // publish a prefix and drop the rest of the file. Time out instead and
@@ -1141,6 +1151,7 @@ public actor LocalUsageScanner {
     _ file: DescriptorBoundFile,
     from offset: Int64,
     discardingOversizedLine: Bool,
+    fileByteLimit: Int,
     deadline: Date,
     budget: ScanBudget?,
     remainingBytes: inout Int,
@@ -1151,7 +1162,7 @@ public actor LocalUsageScanner {
     let buffer = BoundedLineBuffer(
       maximumBytes: self.maximumLineBytes,
       discardingOversizedLine: discardingOversizedLine)
-    var fileBytesRemaining = min(self.maximumBytesPerFileScan, remainingBytes)
+    var fileBytesRemaining = min(fileByteLimit, remainingBytes)
     var consumedBytes = 0
     var lineCount = 0
     do {
@@ -1197,7 +1208,28 @@ public actor LocalUsageScanner {
       let timestampText = Self.jsonString(named: "timestamp", in: data),
       let timestamp = Self.parseDate(timestampText)
     else { return nil }
-    let model = Self.jsonString(named: "model", in: data) ?? "claude-opus-5"
+    return Self.claudeRow(usage: usage, timestamp: timestamp,
+      model: Self.jsonString(named: "model", in: data) ?? "claude-opus-5",
+      messageID: Self.jsonString(named: "id", in: data),
+      requestID: Self.jsonString(named: "requestId", in: data),
+      timeZone: timeZone, previousTimeZone: previousTimeZone)
+  }
+
+  /// JSON dictionaries may have arbitrary field order. In particular a tool's
+  /// nested id/model must never replace the assistant message's identity.
+  static func parseClaudeObject(_ object: [String: Any], timeZone: TimeZone = .current) -> CachedRow? {
+    guard object["type"] as? String == "assistant",
+      let message = object["message"] as? [String: Any],
+      let usage = message["usage"] as? [String: Any],
+      let stamp = object["timestamp"] as? String, let timestamp = Self.parseDate(stamp) else { return nil }
+    return Self.claudeRow(usage: usage, timestamp: timestamp,
+      model: message["model"] as? String ?? "claude-opus-5",
+      messageID: message["id"] as? String, requestID: object["requestId"] as? String,
+      timeZone: timeZone, previousTimeZone: nil)
+  }
+
+  private static func claudeRow(usage: [String: Any], timestamp: Date, model: String,
+    messageID: String?, requestID: String?, timeZone: TimeZone, previousTimeZone: TimeZone?) -> CachedRow? {
     let input = Self.int64(usage["input_tokens"])
     let cached = Self.int64(usage["cache_read_input_tokens"])
     let cacheWrite = Self.int64(usage["cache_creation_input_tokens"])
@@ -1205,8 +1237,6 @@ public actor LocalUsageScanner {
     let creation = usage["cache_creation"] as? [String: Any]
     let oneHour = min(cacheWrite, Self.int64(creation?["ephemeral_1h_input_tokens"]))
     guard saturatingNonnegativeSum(input, cached, cacheWrite, output) > 0 else { return nil }
-    let messageID = Self.jsonString(named: "id", in: data)
-    let requestID = Self.jsonString(named: "requestId", in: data)
     let key = messageID.flatMap { message in requestID.map { "\(message):\($0)" } }
     return CachedRow(
       key: key,
@@ -1359,7 +1389,7 @@ public actor LocalUsageScanner {
     let data = try encoder.encode(index)
     try budget.ensureTime()
     guard data.count <= self.maximumCacheBytes else {
-      throw UsageProviderError.invalidResponse("local usage index exceeded 12 MB")
+      throw LocalHistoryStorageError.capacityExceeded
     }
     let hook = self.beforePublishHook
     self.beforePublishHook = nil
@@ -1415,7 +1445,7 @@ public actor LocalUsageScanner {
     Self.dateParsers.dayKey(date, timeZone: timeZone)
   }
 
-  private static func parseDate(_ text: String) -> Date? {
+  static func parseDate(_ text: String) -> Date? {
     Self.dateParsers.parse(text)
   }
 
@@ -2193,10 +2223,15 @@ public actor LocalUsageScanner {
 
   func testingSetMaximumBytesPerFile(_ maximumBytes: Int) {
     self.maximumBytesPerFileScan = max(0, maximumBytes)
+    self.maximumMigrationFileBytes = max(0, maximumBytes)
   }
 
   func testingSetResidentIndexByteLimit(_ maximumBytes: Int?) {
     self.residentIndexByteLimitOverride = maximumBytes.map { max(0, $0) }
+  }
+
+  func testingSetMaximumIndexBytes(_ maximumBytes: Int) {
+    self.maximumCacheBytes = max(0, maximumBytes)
   }
 
   func testingHasResidentIndex() -> Bool {
@@ -2355,9 +2390,14 @@ private struct CachedFile: Codable {
   var rebucketedFromDays: [String: UsageTotals]? = nil
   var rebucketedFromTimeZone: String? = nil
 
+  /// Versioned separately from pricing: caches written before Insights detail
+  /// must re-read unchanged sources once, even when savings are already priced.
+  var insightDetailsVersion: Int? = nil
+
   /// Legacy rows with cache reads, and an unfinished reparse, need another pass.
   /// A finished pass stays put even when the model has no rate.
   var needsSavingsRefresh: Bool {
+    if (self.provider == .openAI || self.provider == .anthropic), self.insightDetailsVersion != 1 { return true }
     if self.provider == .openAI, self.codexPricingVersion != 1 { return true }
     if self.savingsPriced == true { return false }
     if self.savingsPriced == false { return true }
@@ -2582,7 +2622,7 @@ struct UsageTotals: Codable, Equatable {
   }
 }
 
-private enum Pricing {
+enum Pricing {
   private struct Rates {
     let input: Double
     let cached: Double

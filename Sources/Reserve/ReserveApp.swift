@@ -628,7 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let start = calendar.startOfDay(for: now)
     for (index, provider) in [ProviderID.openAI, .anthropic, .grok].enumerated() {
       var days: [InsightHistoryDay] = []
-      for offset in 0..<30 {
+      for offset in 0..<90 {
         guard let date = calendar.date(byAdding: .day, value: -offset, to: start) else { continue }
         if provider == .grok && offset % 4 == 0 { continue }
         let scale = Int64((sin(Double(offset) * 0.7 + Double(index)) + 1.2) * 22_000_000)
@@ -646,7 +646,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
       store.publishDailyHistoryForTesting(days, provider: provider)
     }
-    store.insightHistoryDays = 30
+    store.localHistoryEnabled = true
+    var hourly: [ProviderID: HourlyUsageHistory] = [:]
+    for (index, provider) in [ProviderID.openAI, .anthropic].enumerated() {
+      let starts = HourlyUsageHistory.hourStarts(now: now)
+      let points = starts.enumerated().map { hour, start in
+        let value = Int64((sin(Double(hour) * 1.4 + Double(index)) + 1.2) * 4_000_000)
+        let input = provider == .openAI ? value * 9 / 10 : value / 4
+        let cached = value / 2
+        let output = value - input - (provider == .anthropic ? cached : 0)
+        let cost = Double(value) / 1_000_000 * 1.5
+        let detail = UsageDayDetail(input: input, cached: cached, cacheWrite: 0, output: output,
+          cacheSavingsUSD: Double(cached) / 1_000_000, unpricedCacheReads: 0,
+          models: [["gpt-5.4", "claude-opus-4-6"][index]: InsightModelUsage(tokens: value, costUSD: cost)])
+        return HourlyUsagePoint(start: start, tokens: value, costUSD: cost, detail: detail)
+      }
+      hourly[provider] = HourlyUsageHistory(provider: provider, dayStart: starts[0], observedAt: now, hours: points)
+    }
+    if !CommandLine.arguments.contains("--insights-no-hourly") { store.publishHourlyHistoryForTesting(hourly) }
+    let rangeIndex = CommandLine.arguments.firstIndex(of: "--insights-days")
+    let requested = rangeIndex.flatMap { index in
+      CommandLine.arguments.indices.contains(index + 1)
+        ? Int(CommandLine.arguments[index + 1]) : nil
+    }
+    store.insightHistoryDays = requested.flatMap { [1, 7, 30, 90].contains($0) ? $0 : nil } ?? 30
     let appearanceName = CommandLine.arguments.contains("dark")
       ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
     do {

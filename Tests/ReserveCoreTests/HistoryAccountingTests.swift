@@ -4,6 +4,126 @@ import Testing
 
 @Suite("Local history accounting")
 struct HistoryAccountingTests {
+  @Test func alreadyPricedLegacyRecordsBackfillTokenSplitAndModelsOnce() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let claude = #"{"timestamp":"2026-10-19T10:00:00Z","type":"assistant","requestId":"r","message":{"id":"m","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":5}}}"# + "\n"
+    try Data(claude.utf8).write(to: fixture.claude.appendingPathComponent("session.jsonl"))
+    try fixture.writeCodex("session.jsonl", input: 200, writes: 10, output: 5, at: now)
+    let codexFile = fixture.codex.appendingPathComponent("session.jsonl")
+    let context = #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"# + "\n"
+    try (Data(context.utf8) + Data(contentsOf: codexFile)).write(to: codexFile)
+    _ = try await fixture.scanner(zone: "UTC").scan(now: now, providers: [.anthropic, .openAI])
+    // Simulate the actual installed preview's cache: priced and current, but
+    // predating model dictionaries and the daily detail envelope.
+    var object = try fixture.index()
+    func legacy(_ value: Any) -> Any {
+      if var dict = value as? [String: Any] {
+        for name in ["models", "detail", "insightDetailsVersion"] { dict.removeValue(forKey: name) }
+        for (key, item) in dict { dict[key] = legacy(item) }
+        return dict
+      }
+      if let array = value as? [Any] { return array.map(legacy) }
+      return value
+    }
+    object = legacy(object) as! [String: Any]
+    try fixture.writeIndex(object)
+    let scanner = fixture.scanner(zone: "UTC")
+    let cached = await scanner.cachedHistory(now: now, providers: [.anthropic, .openAI])
+    #expect(cached[.anthropic]?.days.last?.detail?.cached == 100)
+    #expect(cached[.anthropic]?.days.last?.detail?.models.isEmpty == true)
+    let result = try await scanner.scan(now: now, providers: [.anthropic, .openAI])
+    #expect(result[.anthropic]?.totalTokens == 135)
+    let history = await scanner.cachedHistory(now: now, providers: [.anthropic, .openAI])
+    #expect(history[.anthropic]?.days.last?.detail?.models["claude-opus-5"]?.tokens == 135)
+    #expect(history[.openAI]?.days.last?.detail?.models["gpt-5.4"]?.tokens == 205)
+    #expect(history[.anthropic]?.days.last?.detail?.cacheWrite == 20)
+    #expect(await scanner.scanMetrics.filesParsed == 2)
+    _ = try await scanner.scan(now: now, providers: [.anthropic, .openAI])
+    #expect(await scanner.scanMetrics.filesParsed == 2)
+    let reloaded = await fixture.scanner(zone: "UTC").cachedHistory(now: now, providers: [.anthropic, .openAI])
+    #expect(reloaded == history)
+  }
+
+  @Test func historyAboveTheOldStorageLimitPublishesReloadsAndDeduplicates() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let fileCount = 384
+    let rowsPerFile = 128
+    func line(file: Int, row: Int, input: Int = 10) -> String {
+      let message = String(repeating: "m", count: 48) + "-\(file)-\(row)"
+      let request = String(repeating: "r", count: 48) + "-\(file)-\(row)"
+      return #"{"timestamp":"2026-10-19T12:00:00Z","type":"assistant","requestId":"\#(request)","message":{"id":"\#(message)","model":"claude-opus-5","usage":{"input_tokens":\#(input),"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":1}}}"#
+    }
+    for file in 0..<fileCount {
+      let lines = (0..<rowsPerFile).map { line(file: file, row: $0) }
+      try Data((lines.joined(separator: "\n") + "\n").utf8).write(
+        to: fixture.claude.appendingPathComponent("session-\(file).jsonl"))
+    }
+    let expected = Int64(fileCount * rowsPerFile * 131)
+    let legacy = fixture.scanner(zone: "UTC")
+    await legacy.testingSetMaximumIndexBytes(12 * 1024 * 1024)
+    await legacy.testingSetBudget(maximumDuration: .seconds(60))
+    await #expect(throws: LocalHistoryStorageError.capacityExceeded) {
+      _ = try await legacy.scan(now: now, providers: [.anthropic])
+    }
+    #expect(await legacy.testingCheckpointExists())
+    let scanner = fixture.scanner(zone: "UTC")
+    // This fixture isolates storage capacity from the per-pass time budget.
+    await scanner.testingSetBudget(maximumDuration: .seconds(60))
+    let first = try await scanner.scan(now: now, providers: [.anthropic])
+    #expect(first[.anthropic]?.totalTokens == expected)
+    #expect(await scanner.scanMetrics.resumes == 1)
+    let published = try Data(contentsOf: fixture.cache)
+    #expect(published.count > 12 * 1024 * 1024)
+    #expect(published.count <= LocalHistoryStorageLimits.indexBytes)
+    #expect(await scanner.testingHasResidentIndex() == false)
+
+    let restarted = fixture.scanner(zone: "UTC")
+    let cached = try await restarted.cachedUsage(now: now, providers: [.anthropic])
+    #expect(cached[.anthropic]?.totalTokens == expected)
+    let history = await restarted.cachedHistory(now: now, providers: [.anthropic])
+    #expect(history[.anthropic]?.days.last?.tokens == expected)
+
+    // A revised streaming row replaces its persisted contribution after a
+    // restart instead of being counted twice or losing its original tokens.
+    let session = fixture.claude.appendingPathComponent("session-0.jsonl")
+    let handle = try FileHandle(forWritingTo: session)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((line(file: 0, row: 127, input: 25) + "\n").utf8))
+    try handle.close()
+    await restarted.testingSetBudget(maximumDuration: .seconds(60))
+    let revised = try await restarted.scan(now: now, providers: [.anthropic])
+    #expect(revised[.anthropic]?.totalTokens == expected + 15)
+    #expect(await restarted.testingCheckpointExists() == false)
+  }
+
+  @Test func capacityFailurePreservesThePublishedHistory() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    try await fixture.seedLegacyClaude(now: now)
+    let published = try Data(contentsOf: fixture.cache)
+    let scanner = fixture.scanner(zone: "UTC")
+    await scanner.testingSetMaximumIndexBytes(published.count + 512)
+    let lines = (0..<128).map { row in
+      Fixture.claudeLine(stamp: "2026-10-19T12:00:00Z", input: 20)
+        .replacingOccurrences(of: "m1", with: "message-\(row)")
+    }
+    try Data((lines.joined(separator: "\n") + "\n").utf8).write(
+      to: fixture.claude.appendingPathComponent("new.jsonl"))
+    await #expect(throws: LocalHistoryStorageError.capacityExceeded) {
+      _ = try await scanner.scan(now: now, providers: [.anthropic])
+    }
+    #expect(try Data(contentsOf: fixture.cache) == published)
+    #expect(await scanner.testingCheckpointExists())
+    let cached = try await fixture.scanner(zone: "UTC").cachedUsage(
+      now: now, providers: [.anthropic])
+    #expect(cached[.anthropic]?.todayTokens == 11)
+  }
+
   @Test func storedRowsKeepTheirDeduplicationKeyInTheTable() throws {
     let key = "message-id:request-id"
     let row = CachedRow(key: key, dayKey: "2026-10-08",
@@ -48,7 +168,7 @@ struct HistoryAccountingTests {
     var records = try JSONSerialization.data(withJSONObject: try #require(object["records"]))
     // JSON whitespace keeps the decoded fixture small while its base64
     // envelope exercises the separate migration-file allowance.
-    records.append(Data(repeating: 32, count: 10 * 1024 * 1024 - records.count))
+    records.append(Data(repeating: 32, count: 20 * 1024 * 1024 - records.count))
     let checkpoint = LocalHistoryCheckpoint(
       version: 1,
       anchor: LocalHistoryIndexFile.anchor(url: fixture.cache, maximumBytes: 12 * 1024 * 1024),
@@ -56,8 +176,11 @@ struct HistoryAccountingTests {
       dirtyProviders: [ProviderID.anthropic.rawValue], pruneProviders: [], tokens: [:],
       recordsJSON: records)
     #expect(try LocalHistoryCheckpointStore.save(
-      checkpoint, cacheURL: fixture.cache, maximumBytes: 24 * 1024 * 1024,
+      checkpoint, cacheURL: fixture.cache,
+      maximumBytes: LocalHistoryStorageLimits.checkpointBytes,
       fileManager: .default))
+    #expect(try Data(contentsOf: LocalHistoryCheckpoint.url(for: fixture.cache)).count
+      > 24 * 1024 * 1024)
     let scanner = fixture.scanner(zone: "America/New_York")
     let usage = try await scanner.scan(now: now, providers: [.anthropic])
     #expect(usage[.anthropic]?.totalTokens == 11)

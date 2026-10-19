@@ -140,6 +140,10 @@ final class UsageStore {
   /// Production uses one scanner so its in-memory index survives between
   /// scans. Test and preview stores leave this nil so they never watch this
   /// Mac's session roots.
+  private let hourlyUsageScanner: LocalHourlyUsageScanner?
+  private(set) var publishedHourlyHistory: [ProviderID: HourlyUsageHistory] = [:]
+  private(set) var hourlyHistoryStatus = "Hourly detail has not been loaded yet."
+
   private let localUsageScanner: LocalUsageScanner?
   private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
   private let cachedLocalUsageLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary]
@@ -222,6 +226,8 @@ final class UsageStore {
         self.localScanTask?.cancel()
         self.localScanTask = nil
         self.isScanningLocalUsage = false
+        self.publishedHourlyHistory = [:]
+        self.hourlyHistoryStatus = "Local history is off."
         self.localHistoryScanError = nil
         self.localScanNeedsContinuation = false
         self.lastLocalUsageScanAt = nil
@@ -366,6 +372,7 @@ final class UsageStore {
     cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
     localUsageProgress: (@Sendable () async -> (incomplete: Bool, checkpoints: Int))? = nil,
     localScanContinuationDelay: Duration = .seconds(5),
+    hourlyUsageScanner: LocalHourlyUsageScanner? = nil,
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
     openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
@@ -382,13 +389,15 @@ final class UsageStore {
     self.serviceStatusFetch = serviceStatusFetch
     self.now = now
     let productionStore = planKeys == nil && apiKeys == nil && fetchOverride == nil
-      && localUsageScan == nil && cachedLocalUsageLoad == nil && localUsageProgress == nil && startAutomatically
+      && localUsageScan == nil && cachedLocalUsageLoad == nil && localUsageProgress == nil
+      && hourlyUsageScanner == nil && startAutomatically
     self.usesProductionKeychain = productionStore
     self.honorsHostRefreshEnvironment = productionStore
     self.loginHandoffDeadline = loginHandoffDeadline
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.localUsageScanner = productionStore ? Self.makeProductionLocalUsageScanner() : nil
+    self.hourlyUsageScanner = hourlyUsageScanner ?? (productionStore ? LocalHourlyUsageScanner() : nil)
     if let localUsageScan {
       self.localUsageScan = localUsageScan
     } else if let scanner = self.localUsageScanner {
@@ -1281,6 +1290,13 @@ final class UsageStore {
     let known = Set(self.accounts)
     let loaded = await self.dailyHistoryLoad(known, now)
     self.publishCachedHistory(loaded)
+    if let scanner = self.hourlyUsageScanner, self.localHistoryEnabled {
+      let hourly = await scanner.cachedHistory(now: now)
+      if self.localHistoryEnabled {
+        self.publishedHourlyHistory = hourly
+        self.publishHourlyToday(now: now)
+      }
+    }
   }
 
   var notificationsEnabled: Bool {
@@ -3022,6 +3038,9 @@ final class UsageStore {
       }
     }
     await self.loadCachedLocalUsage(now: self.now())
+    let enabledForHours = Set(self.accounts.filter { self.isEnabled($0) })
+    await self.performHourlyUsageScan(providers: enabledForHours, generation: generation, notify: notify)
+    if self.localScanNeedsContinuation, self.discretionaryRefreshIsSuppressed() { return }
     var continuing = false
     while !Task.isCancelled {
       guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
@@ -3075,17 +3094,88 @@ final class UsageStore {
     }
   }
 
+  /// Independent hourly recovery cannot hide successfully recovered daily totals.
+  private func performHourlyUsageScan(providers: Set<ProviderID>, generation: Int, notify: Bool) async {
+    guard let scanner = self.hourlyUsageScanner, self.localHistoryEnabled,
+      self.localScanGeneration == generation, !Task.isCancelled else { return }
+    self.hourlyHistoryStatus = "Loading hourly detail from this Mac…"
+    if notify { self.changed() }
+    var continuing = false
+    while !Task.isCancelled, self.localHistoryEnabled, self.localScanGeneration == generation {
+      if continuing, self.discretionaryRefreshIsSuppressed() {
+        self.hourlyHistoryStatus = "Hourly update paused. Saved hours remain visible."
+        return
+      }
+      let before = await scanner.checkpoints
+      do {
+        let histories = try await scanner.scan(now: self.now(), providers: providers)
+        guard !Task.isCancelled, self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+        self.publishedHourlyHistory = histories
+        self.publishHourlyToday(now: self.now())
+        self.localScanNeedsContinuation = false
+        self.hourlyHistoryStatus = histories.isEmpty
+          ? "No timestamped hourly history is available for these sources."
+          : "Hourly detail comes from timestamped logs on this Mac."
+        if notify { self.changed() }
+        return
+      } catch is CancellationError { return }
+      catch {
+        guard !Task.isCancelled, self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+        if case UsageProviderError.timedOut = error,
+          await scanner.scanIncomplete, await scanner.checkpoints > before {
+          self.localScanNeedsContinuation = true
+          continuing = true
+          do { try await Task.sleep(for: self.localScanContinuationDelay) }
+          catch { return }
+          continue
+        }
+        self.localScanNeedsContinuation = false
+        self.hourlyHistoryStatus = "Hourly detail could not be updated. Daily totals are still available."
+        if notify { self.changed() }
+        return
+      }
+    }
+  }
+
+  private func publishHourlyToday(now: Date) {
+    for (provider, history) in self.insightHourlyHistory(now: now) {
+      let day = history.dailyUsage()
+      var days = self.publishedDailyHistory[provider] ?? []
+      days.removeAll { $0.day == day.day }
+      days.append(InsightHistoryDay(day: day.day, tokens: day.tokens, costUSD: day.costUSD, detail: day.detail))
+      self.publishedDailyHistory[provider] = days.sorted { $0.day < $1.day }
+    }
+  }
+
+  func insightHourlyHistory(now: Date = Date()) -> [ProviderID: HourlyUsageHistory] {
+    guard self.localHistoryEnabled else { return [:] }
+    let dayStart = Calendar.current.startOfDay(for: now)
+    return self.publishedHourlyHistory.filter {
+      $0.value.dayStart == dayStart && $0.value.observedAt <= now
+    }
+  }
+
+  func publishHourlyHistoryForTesting(_ histories: [ProviderID: HourlyUsageHistory]) {
+    self.publishedHourlyHistory = histories
+    self.publishHourlyToday(now: self.now())
+    self.hourlyHistoryStatus = "Hourly detail comes from timestamped logs on this Mac."
+    self.changed()
+  }
+
   /// What the dashboard may say about a failed local scan. Paths, file names
   /// and raw scanner text stay out of the interface.
   static func localHistoryFailureMessage(_ error: Error) -> String {
+    if let storageError = error as? LocalHistoryStorageError {
+      return storageError.localizedDescription
+    }
     guard let providerError = error as? UsageProviderError else {
-      return "Local history could not be read. Totals are from the last successful scan."
+      return "Local history could not be updated. Totals are from the last successful scan."
     }
     switch providerError {
     case .timedOut:
       return "Local history scan timed out. Totals are from the last successful scan."
     default:
-      return "Local history could not be read. Totals are from the last successful scan."
+      return "Local history could not be updated. Totals are from the last successful scan."
     }
   }
 

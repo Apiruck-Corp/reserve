@@ -2724,11 +2724,15 @@ private final class UsageDetailGrid: NSView {
       rows.append(RowSpec(
         kind: .note, id: "usage-local-history-error-\(provider)", label: "", value: failure))
     }
-    if usage == nil, summary.historyPossible {
+    if usage == nil, summary.historyPossible, summary.localHistoryError == nil,
+      !summary.hasUnattributedClaudeHistory
+    {
       let message = !summary.localHistorySupported
         ? "Gathering account activity…"
         : summary.localHistoryEnabled
-          ? "Gathering activity from this Mac…"
+          ? (summary.localHistoryUpdating
+            ? "Gathering activity from this Mac…"
+            : "Local activity has not been loaded yet.")
           : "Activity from this Mac is off · turn it on in Settings"
       rows.append(RowSpec(
         kind: .note, id: "usage-history-note-\(provider)", label: "", value: message))
