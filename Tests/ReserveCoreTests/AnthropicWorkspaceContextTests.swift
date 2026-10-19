@@ -60,10 +60,12 @@ struct AnthropicWorkspaceContextTests {
       }
     })
     let snapshot = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture")
-    #expect(snapshot.note?.headline == "Key valid")
-    #expect(snapshot.details.first { $0.label == "Billing response" }?.value.contains("HTTP 403") == true)
+    #expect(snapshot.note?.headline == "Key works")
     #expect(snapshot.windows.isEmpty)
-    #expect(await sent.value.count == 5)
+    // Refused billing, models without context, discovery, models with the default.
+    #expect(await sent.value.map { $0.url!.path } == [
+      "/v1/organizations/cost_report", "/v1/models", "/v1/organizations/workspaces", "/v1/models",
+    ])
   }
 
   @Test func ordinaryBadRequestsDoNotTriggerWorkspaceDiscovery() async {
@@ -92,7 +94,8 @@ struct AnthropicWorkspaceContextTests {
     await #expect(throws: UsageProviderError.self) {
       _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture")
     }
-    #expect(await sent.value.count == 2)
+    // Billing, discovery once, then the key check, which cannot discover again.
+    #expect(await sent.value.count == 3)
   }
 
   @Test func multipleNonDefaultWorkspacesAreNotChosenArbitrarily() async {
@@ -107,7 +110,8 @@ struct AnthropicWorkspaceContextTests {
     await #expect(throws: UsageProviderError.self) {
       _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-fixture")
     }
-    #expect(await sent.value.count == 2)
+    #expect(await sent.value.count == 3)
+    #expect(await sent.value.filter { $0.url?.path == "/v1/organizations/workspaces" }.count == 1)
   }
 
   @Test func discoveryFollowsItsOwnCursorAndRetriesWithTheDefault() async throws {
@@ -187,7 +191,22 @@ struct AnthropicWorkspaceContextTests {
   }
 
   @Test(arguments: [401, 403])
-  func discoveryRefusalExplainsEligibilityWithoutAssumingTheAccountType(_ status: Int) async {
+  func discoveryRefusalFallsBackToAShortKeyCheck(_ status: Int) async throws {
+    let client = APIConsumptionClient(requestHandler: { request in
+      switch request.url?.path {
+      case "/v1/organizations/workspaces":
+        return Self.reply(request, status, #"{"error":{"type":"permission_error","message":"sk-ant-usr-private-fixture"}}"#)
+      case "/v1/models": return Self.reply(request, 200, #"{"data":[{"id":"claude-fixture"}]}"#)
+      default: return Self.reply(request, 400, Self.missing)
+      }
+    })
+    let snapshot = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-private-fixture")
+    #expect(snapshot.note?.headline == "Key works")
+    #expect(snapshot.note?.detail == "spend unavailable")
+  }
+
+  @Test(arguments: [401, 403])
+  func aKeyThatNeedsAnUndiscoverableWorkspaceSaysWhatToUse(_ status: Int) async {
     let client = APIConsumptionClient(requestHandler: { request in
       if request.url?.path == "/v1/organizations/workspaces" {
         return Self.reply(request, status, #"{"error":{"type":"permission_error","message":"sk-ant-usr-private-fixture"}}"#)
@@ -196,11 +215,9 @@ struct AnthropicWorkspaceContextTests {
     })
     do {
       _ = try await client.fetch(.anthropic, apiKey: "sk-ant-usr-private-fixture")
-      Issue.record("discovery refusal was treated as success")
-    } catch UsageProviderError.unauthorized(let message) {
-      #expect(message.contains("HTTP \(status)"))
-      #expect(message.contains("Individual accounts cannot use the Admin API"))
-      #expect(message.contains("for organization accounts, check"))
+      Issue.record("an unusable key was treated as working")
+    } catch UsageProviderError.unavailable(let message) {
+      #expect(message == APIConsumptionClient.anthropicWorkspaceKeyMessage)
       #expect(!message.contains("sk-ant-usr-private-fixture"))
       #expect(message.count <= 240)
     } catch { Issue.record("unexpected error \(error)") }

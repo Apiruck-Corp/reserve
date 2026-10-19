@@ -30,7 +30,7 @@ enum RefreshReliabilitySelfTest {
   private static func checkModelOnlyBillingExplanation(expect: (Bool, String) -> Void) async {
     let fixture = Fixture("model-only-billing")
     fixture.defaults.set(true, forKey: "apiConsumption.anthropic.enabled")
-    let response = LockedValue("Anthropic billing request refused (HTTP 403). Permission denied.")
+    let response = LockedValue("spend unavailable")
     let requestFailure = LockedValue(false)
     let store = UsageStore(
       defaults: fixture.defaults, startAutomatically: false,
@@ -43,8 +43,9 @@ enum RefreshReliabilitySelfTest {
           throw UsageProviderError.invalidResponse("Anthropic Models API rejected the request (HTTP 400).")
         }
         return APIConsumptionSnapshot(
-          provider: .anthropic, windows: [], note: APIConsumptionNote(headline: "Key valid"),
-          source: "Anthropic Models API", details: [UsageDetail("Billing response", response.value)])
+          provider: .anthropic, windows: [],
+          note: APIConsumptionNote(headline: "Key works", detail: response.value),
+          source: "Anthropic Models API", details: [])
       })
     _ = store.refreshAPIConsumption(.anthropic)
     _ = await self.eventually { store.apiConsumption[.anthropic] != nil }
@@ -55,21 +56,21 @@ enum RefreshReliabilitySelfTest {
       LifecycleSelfTest.descendants(of: settings.window?.contentView ?? NSView())
         .compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == id }
     }
-    expect(field("api-error-anthropic")?.stringValue == response.value
-      && field("api-error-anthropic")?.isHidden == false,
-      "model-only validation hid the billing refusal in API Settings")
+    expect(field("api-status-anthropic")?.stringValue == "Key works · spend unavailable"
+      && field("api-error-anthropic")?.isHidden == true,
+      "a working Anthropic key read as a problem in API Settings")
     guard let input = field("api-key-anthropic"), let window = settings.window else {
       expect(false, "model-only key field missing"); return
     }
     window.makeFirstResponder(input)
     (input.currentEditor() as? NSTextView)?.insertText("unsaved-fixture", replacementRange: NSRange(location: 0, length: 0))
-    response.value = "Anthropic billing request refused (HTTP 401). Authentication refused."
+    response.value = "spend unavailable · refreshed"
     _ = store.refreshAPIConsumption(.anthropic)
-    _ = await self.eventually { field("api-error-anthropic")?.stringValue == response.value }
-    expect(field("api-error-anthropic")?.stringValue == response.value,
-      "model-only billing diagnostics stayed stale while editing")
+    _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Key works · " + response.value }
+    expect(field("api-status-anthropic")?.stringValue == "Key works · " + response.value,
+      "the model-only reading stayed stale while editing")
     expect(field("api-key-anthropic") === input && input.stringValue == "unsaved-fixture",
-      "model-only billing diagnostics discarded the active key draft")
+      "a model-only refresh discarded the active key draft")
     requestFailure.value = true
     _ = store.refreshAPIConsumption(.anthropic)
     _ = await self.eventually { field("api-status-anthropic")?.stringValue == "Latest check failed" }

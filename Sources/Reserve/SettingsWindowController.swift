@@ -1234,8 +1234,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let help: String?
     switch provider.provider {
     case .anthropic:
-      help = "Spend reporting requires a Claude Console organization. Individual accounts do not support the Admin API. "
-        + "Use an organization-scoped key with billing access; key scope alone does not change account type."
+      help = "Spend needs an admin key from a Claude Console organization. Other keys only show that they work."
     case .typeSafe:
       help = "TypeSafe reports available models, descriptions and release dates. "
         + "Its documented API does not expose account spend or balance."
@@ -1780,14 +1779,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     NSWorkspace.shared.open(url)
   }
 
-  /// Model validation can succeed while billing fails. Keep that sanitized
-  /// billing response visible in Settings alongside the model-only reading.
   private func apiExplanation(for provider: APIAccountID) -> String? {
-    if let error = self.store.apiConsumptionErrors[provider] { return error }
-    guard provider.provider == .anthropic,
-      let snapshot = self.store.apiConsumption[provider], snapshot.source == "Anthropic Models API"
-    else { return nil }
-    return snapshot.details.first { $0.label == "Billing response" }?.value
+    self.store.apiConsumptionErrors[provider]
   }
 
   private func apiReading(for provider: APIAccountID, saved: Bool) -> String {

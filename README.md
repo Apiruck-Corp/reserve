@@ -316,10 +316,10 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   Key scope does not change account type. Organization setup is available on the
   [Console Organization page](https://platform.claude.com/settings/organization).
   Create current keys on [Claude Console's API keys page](https://platform.claude.com/settings/keys)
-  and choose Organization scope. If an ordinary key
-  cannot read billing, Reserve checks it through the Models API and shows
-  "Key valid" with billing unavailable when that succeeds. The details retain
-  the billing HTTP status without repeating provider error text or credentials.
+  and choose Organization scope. Any other key that Anthropic refuses on the
+  Admin API is checked through the Models API instead and reads "Key works ·
+  spend unavailable". A key that needs a workspace Reserve cannot look up asks
+  for a standard `sk-ant-api03-` key.
   Organization endpoints use the Admin API guide's `x-api-key` header, including
   personal/service-account keys; model validation uses Bearer authentication.
   Request failures include fixed diagnostic categories, never provider free text.

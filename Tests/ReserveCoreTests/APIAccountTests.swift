@@ -31,6 +31,6 @@ import Testing
     #expect(added.displayName == "Anthropic · Nimbus")
     APIAccountLabels.set("  ", for: added)
     #expect(added.displayName == "Anthropic · added account")
-    #expect(added.keyKind == "API key" && added.keyHint == "sk-ant-usr-…")
+    #expect(added.keyKind == "API key" && added.keyHint == "sk-ant-api03-…")
   }
 }

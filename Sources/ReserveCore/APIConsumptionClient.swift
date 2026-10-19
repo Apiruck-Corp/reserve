@@ -49,7 +49,7 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   public var keyHint: String {
     switch self {
     case .openAI: "sk-admin-…"
-    case .anthropic: "sk-ant-usr-…"
+    case .anthropic: "sk-ant-api03-…"
     case .openRouter: "sk-or-…"
     case .xAI: "xai-…"
     case .typeSafe: "ts-…"
@@ -515,35 +515,42 @@ public struct APIConsumptionClient: Sendable {
   /// Cost Report API. Costs arrive as decimal strings of cents, daily. `limit`
   /// defaults to 7 buckets, so a month has to ask for 31 and then follow the
   /// cursor, or the reading silently stops a week into the month.
+  ///
+  /// Only Console organizations can read the Admin API. Any other key that
+  /// Anthropic refuses there is checked against the Models API instead, so a
+  /// working key reads "Key works" rather than an error about billing. Bad
+  /// requests, outages and rate limits are reported as they are.
   private func fetchAnthropic(_ key: String) async throws -> APIConsumptionSnapshot {
+    let isAdmin = key.hasPrefix("sk-ant-admin")
+    var workspaceID: String?
+    var discoveryAttempted = false
     do {
-      return try await self.fetchAnthropicReading(key, workspaceID: nil)
-    } catch is AnthropicWorkspaceRequired {
-      // Organization-scoped identity keys can need a workspace execution
-      // context too. This header does not filter the organization's cost report.
-      let workspaceID: String
       do {
-        workspaceID = try await self.anthropicDefaultWorkspace(key)
+        return try await self.fetchAnthropicCosts(key, workspaceID: nil)
       } catch is AnthropicWorkspaceRequired {
-        throw UsageProviderError.invalidResponse(
-          "Anthropic requires a workspace context, but workspace discovery requires one too.")
+        // Identity-linked keys can need a workspace execution context too.
+        // This header does not filter the organization's cost report.
+        discoveryAttempted = true
+        do {
+          workspaceID = try await self.anthropicDefaultWorkspace(key)
+        } catch is AnthropicWorkspaceRequired {
+          throw AnthropicWorkspaceUnresolved(
+            message: "Anthropic requires a workspace context, but workspace discovery requires one too.")
+        }
+        do {
+          return try await self.fetchAnthropicCosts(key, workspaceID: workspaceID)
+        } catch is AnthropicWorkspaceRequired {
+          throw AnthropicWorkspaceUnresolved(
+            message: "Anthropic still requires a workspace context after Reserve supplied the default workspace.")
+        }
       }
-      do {
-        return try await self.fetchAnthropicReading(key, workspaceID: workspaceID)
-      } catch is AnthropicWorkspaceRequired {
-        throw UsageProviderError.invalidResponse(
-          "Anthropic still requires a workspace context after Reserve supplied the default workspace.")
-      }
+    } catch UsageProviderError.unauthorized(let message) {
+      if isAdmin { throw UsageProviderError.unauthorized(message) }
+    } catch let unresolved as AnthropicWorkspaceUnresolved {
+      if isAdmin { throw UsageProviderError.invalidResponse(unresolved.message) }
     }
-  }
-
-  private func fetchAnthropicReading(_ key: String, workspaceID: String?) async throws -> APIConsumptionSnapshot {
-    do {
-      return try await self.fetchAnthropicCosts(key, workspaceID: workspaceID)
-    } catch UsageProviderError.unauthorized(let billingRefusal) where !key.hasPrefix("sk-ant-admin") {
-      return try await self.validateAnthropicModelKey(
-        key, billingRefusal: billingRefusal, workspaceID: workspaceID)
-    }
+    return try await self.validateAnthropicModelKey(
+      key, workspaceID: workspaceID, mayDiscoverWorkspace: !discoveryAttempted)
   }
 
   private func anthropicDefaultWorkspace(_ key: String) async throws -> String {
@@ -568,8 +575,8 @@ public struct APIConsumptionClient: Sendable {
     }
     if defaults.count == 1 { return defaults[0].id }
     if active.count == 1 { return active[0].id }
-    throw UsageProviderError.unavailable(
-      "Anthropic requires a workspace context. Reserve could not identify a single default workspace.")
+    throw AnthropicWorkspaceUnresolved(
+      message: "Anthropic requires a workspace context. Reserve could not identify a single default workspace.")
   }
 
   /// The Admin API guide specifies x-api-key for identity keys too; the
@@ -587,7 +594,7 @@ public struct APIConsumptionClient: Sendable {
   }
 
   private func validateAnthropicModelKey(
-    _ key: String, billingRefusal: String, workspaceID: String?
+    _ key: String, workspaceID: String?, mayDiscoverWorkspace: Bool
   ) async throws -> APIConsumptionSnapshot {
     let request = Self.anthropicRequest(
       url: URL(string: "https://api.anthropic.com/v1/models?limit=100")!, key: key, workspaceID: workspaceID)
@@ -595,31 +602,34 @@ public struct APIConsumptionClient: Sendable {
     do {
       data = try await self.data(for: request, provider: .anthropic)
     } catch UsageProviderError.unauthorized {
-      // Billing refusal alone cannot establish that an ordinary key is invalid.
-      // Do not expose either endpoint's free-text error, which can echo secrets.
+      // Never expose either endpoint's free-text error, which can echo secrets.
       throw UsageProviderError.unauthorized(
-        "Anthropic could not validate this API key. Check that it is active in Claude Console. "
-          + "Spend reporting requires a Console organization; Individual accounts do not support the Admin API.")
+        "Anthropic refused this key. Check that it is active in Claude Console.")
+    } catch is AnthropicWorkspaceRequired {
+      if mayDiscoverWorkspace, let discovered = try? await self.anthropicDefaultWorkspace(key) {
+        return try await self.validateAnthropicModelKey(key, workspaceID: discovered, mayDiscoverWorkspace: false)
+      }
+      throw UsageProviderError.unavailable(Self.anthropicWorkspaceKeyMessage)
     }
     let page = try Self.decode(AnthropicModelsPage.self, from: data, provider: .anthropic)
     let names = page.data.map { $0.displayName ?? $0.id }
     return APIConsumptionSnapshot(
       provider: .anthropic,
       windows: [],
-      note: APIConsumptionNote(
-        headline: "Key valid",
-        detail: "Billing unavailable · check Console account type and permissions"),
+      note: APIConsumptionNote(headline: "Key works", detail: "spend unavailable"),
       fetchedAt: self.now(),
       source: "Anthropic Models API",
       details: [
-        UsageDetail("Key status", "Validated by Anthropic Models API"),
-        UsageDetail("Spend reporting", "Console organization, organization-scoped key and billing permission required"),
-        UsageDetail("Account eligibility", "Individual accounts do not support the Admin API; key scope does not change account type"),
-        UsageDetail("Billing response", billingRefusal),
-        UsageDetail("Credential type", key.hasPrefix("sk-ant-usr-") ? "Personal API key" : "API key"),
+        UsageDetail("Spend", "Shared only with Claude Console organizations"),
         UsageDetail("Models", names.isEmpty ? "None returned" : names.prefix(4).joined(separator: ", ")),
       ])
   }
+
+  /// Identity-linked keys act inside a workspace, and only organization admins
+  /// can look its ID up. A standard Console key carries its workspace itself.
+  static let anthropicWorkspaceKeyMessage =
+    "This key needs a workspace that Anthropic only shares with organization admins. "
+    + "Use a standard key (sk-ant-api03-…) from Claude Console instead."
 
   private func fetchAnthropicCosts(_ key: String, workspaceID: String?) async throws -> APIConsumptionSnapshot {
     let now = self.now()
@@ -1062,9 +1072,8 @@ public struct APIConsumptionClient: Sendable {
     case 401, 403:
       if provider == .anthropic, request.url?.path == "/v1/organizations/workspaces" {
         throw UsageProviderError.unauthorized(
-          "Anthropic Workspaces API refused discovery (HTTP \(http.statusCode)). "
-            + "Individual accounts cannot use the Admin API. Organization scope does not change account type; "
-            + "for organization accounts, check the linked account's role.")
+          "Anthropic refused workspace lookup (HTTP \(http.statusCode)). "
+            + "Spend needs an admin role in a Claude Console organization.")
       }
       throw UsageProviderError.unauthorized(
         Self.refusalMessage(
@@ -1499,6 +1508,7 @@ private struct XAValidation: Decodable {
 }
 
 private struct AnthropicWorkspaceRequired: Error {}
+private struct AnthropicWorkspaceUnresolved: Error { let message: String }
 
 private struct AnthropicWorkspacesPage: Decodable {
   struct Workspace: Decodable {
