@@ -493,7 +493,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       !hasScrollView
       || abs(size.height - DashboardMetrics.availableHeight(on: NSScreen.main)) <= 1
     let dashboardFits =
-      size.width == DashboardMetrics.width
+      size.width == DashboardMetrics.width(
+        showsUsage: (dashboardController.view as? UsageDashboardView)?.showsUsage ?? false)
       && size.height >= DashboardMetrics.minimumHeight
       && size.height <= DashboardMetrics.availableHeight(on: NSScreen.main)
     // Four rows of tiles plus the selected detail exceed a small display's
@@ -1067,6 +1068,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     if let selected = self.store.expandedProvider {
       self.store.requestInsights(for: selected)
     }
+    self.store.dashboardVisible = true
+    self.store.requestDashboardUsage()
     // A reopened surface has to come back in the current appearance, so this is
     // applied before the content is built rather than after it is on screen.
     self.applyAppearance()
@@ -1093,6 +1096,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   func popoverDidClose(_ notification: Notification) {
+    self.store.dashboardVisible = false
     // Levels only order Settings against the open popover. Afterwards it is an
     // ordinary window again, free to go behind the next app that is clicked.
     self.settingsWindow?.level = .normal
@@ -1509,7 +1513,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           self.store.hidesPersonalInfo.toggle()
           self.expandDashboard()
         },
-        hidesPersonalInfo: { [weak self] in self?.store.hidesPersonalInfo ?? false }))
+        hidesPersonalInfo: { [weak self] in self?.store.hidesPersonalInfo ?? false },
+        usage: { [weak self] in self?.store.dashboardUsage() },
+        selectUsagePeriod: { [weak self] days in self?.store.dashboardUsageDays = days }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller

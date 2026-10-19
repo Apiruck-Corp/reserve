@@ -21,6 +21,10 @@ struct DashboardActions {
   /// Toggles presentation masking. Originals stay in the store.
   var toggleHidePersonalInfo: () -> Void = {}
   var hidesPersonalInfo: () -> Bool = { false }
+  /// The usage column. Nil keeps the single-column dashboard.
+  var usage: () -> DashboardUsageModel? = { nil }
+  /// Today, 7 or 30 days for the usage column.
+  var selectUsagePeriod: (Int) -> Void = { _ in }
 }
 
 @MainActor
@@ -99,6 +103,7 @@ final class DashboardViewController: NSViewController {
     isRefreshing: Bool,
     hidesPersonal: Bool = false,
     apiReadings: [APIConsumptionReading] = [],
+    usage: DashboardUsageModel? = nil,
     now: Date
   ) -> String {
     var parts: [String] = [
@@ -156,6 +161,7 @@ final class DashboardViewController: NSViewController {
         parts.append(allowance.isPrimary ? "primary" : "secondary")
       }
     }
+    parts.append(usage?.signature ?? "no-usage")
     for reading in apiReadings {
       parts.append("api")
       parts.append(reading.provider.rawValue)
@@ -184,6 +190,7 @@ final class DashboardViewController: NSViewController {
       isRefreshing: refreshing,
       hidesPersonal: self.store.hidesPersonalInfo,
       apiReadings: self.actions.apiConsumptionReadings(),
+      usage: self.actions.usage(),
       now: now)
     if self.isViewLoaded, self.view is UsageDashboardView,
       signature == self.lastSignature, maximumHeight == self.lastMaximumHeight
@@ -209,7 +216,7 @@ final class DashboardViewController: NSViewController {
       // The frame is still the popover's current size here; the new height is
       // what the dashboard was laid out for.
       self.preferredContentSize = NSSize(
-        width: DashboardMetrics.width, height: dashboard.intendedHeight)
+        width: dashboard.dashboardWidth, height: dashboard.intendedHeight)
       self.contentUpdateCount += 1
       return
     }
@@ -248,31 +255,44 @@ final class DashboardViewController: NSViewController {
 
 }
 
-/// The glance view. It answers one question — which allowance needs attention,
-/// how much is left, and when does it come back — and defers everything else.
+/// The glance view. The left column answers which allowance needs attention,
+/// how much is left and when it comes back. The right column, when history
+/// exists, shows what was used and what it would cost at API prices.
 @MainActor
 final class UsageDashboardView: NSView {
+  private enum LeftScroll { case none, details, column }
+
   private let dismiss: () -> Void
   /// The height this dashboard was laid out for. The popover has to display it
   /// at this height; showing it at any other height means rows are off screen.
   private(set) var intendedHeight: CGFloat = DashboardMetrics.minimumHeight
-  /// Replacements of one provider tile, the detail card, or the API block.
+  /// Replacements of one provider tile, the detail card, the usage column, or
+  /// the API block.
   private(set) var regionRebuildCount = 0
+  /// Left column: the provider overview above the selected provider's details.
   private var column: NSStackView?
   private var detailColumn: NSStackView?
+  /// Right column: usage, then API consumption. Nil in the single-column layout.
+  private var usageColumn: NSStackView?
   private var headerView: DashboardHeaderView?
   private var overviewGrid: ProviderOverviewGrid?
   private var detailCard: ProviderDashboardCard?
   private var emptyState: NSView?
+  private var usagePanel: DashboardUsagePanel?
   private var apiSection: APIConsumptionSection?
   private var footerView: DashboardFooterView?
   private var appliedAppearance = ""
   private var showsEmpty = false
   private var providerIDs: [ProviderID] = []
-  private var isScrollable = false
-  private var scrollsDetailsOnly = false
-  private var scrollDocument: FlippedView?
-  private var scrollHeightConstraint: NSLayoutConstraint?
+  private var leftScroll = LeftScroll.none
+  private var rightScrolls = false
+  private var leftDocument: FlippedView?
+  private var rightDocument: FlippedView?
+  private var leftViewport: NSLayoutConstraint?
+  private var rightViewport: NSLayoutConstraint?
+
+  var showsUsage: Bool { self.usageColumn != nil }
+  var dashboardWidth: CGFloat { DashboardMetrics.width(showsUsage: self.showsUsage) }
 
   init(
     states: [ProviderViewState],
@@ -285,8 +305,11 @@ final class UsageDashboardView: NSView {
     actions: DashboardActions
   ) {
     let ceiling = max(DashboardMetrics.minimumHeight, maximumHeight)
+    let usage = actions.usage()
+    let width = DashboardMetrics.width(showsUsage: usage != nil)
+    let fullWidth = width - 2 * DashboardMetrics.inset
     self.dismiss = actions.dismiss
-    super.init(frame: NSRect(origin: .zero, size: DashboardMetrics.size))
+    super.init(frame: NSRect(x: 0, y: 0, width: width, height: DashboardMetrics.minimumHeight))
     self.identifier = NSUserInterfaceItemIdentifier("usage-dashboard")
     self.setAccessibilityLabel("Reserve dashboard")
     self.wantsLayer = true
@@ -294,28 +317,14 @@ final class UsageDashboardView: NSView {
 
     let summaries = states.map { AllowanceBuilder.summary(for: $0, now: now) }
 
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = DashboardMetrics.rowGap
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    self.column = stack
-    self.addSubview(stack)
-    NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: DashboardMetrics.inset),
-      stack.trailingAnchor.constraint(
-        equalTo: self.trailingAnchor, constant: -DashboardMetrics.inset),
-      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: DashboardMetrics.inset),
-      stack.bottomAnchor.constraint(
-        lessThanOrEqualTo: self.bottomAnchor, constant: -DashboardMetrics.inset),
-    ])
-
     let header = DashboardHeaderView(
       summaries: summaries, isRefreshing: isRefreshing, refreshStartedAt: refreshStartedAt,
-      now: now, actions: actions)
+      now: now, actions: actions, width: fullWidth)
     self.headerView = header
-    stack.addArrangedSubview(header)
-    stack.setCustomSpacing(DashboardMetrics.headerGap, after: header)
+
+    let stack = NSStackView.column([], spacing: DashboardMetrics.rowGap)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.column = stack
 
     let details = NSStackView.column([], spacing: DashboardMetrics.rowGap)
     details.translatesAutoresizingMaskIntoConstraints = false
@@ -338,6 +347,7 @@ final class UsageDashboardView: NSView {
           summary: summary, now: now,
           isSelectedForMenuBar: selectedMenuBarProvider == summary.provider,
           isExpanded: true, showsDisclosure: false,
+          showsUsage: usage == nil,
           connectProvider: actions.connectProvider,
           selectMenuBarProvider: actions.selectMenuBarProvider,
           toggleDetail: actions.toggleProviderDetail)
@@ -353,47 +363,105 @@ final class UsageDashboardView: NSView {
       self.emptyState = empty
       details.addArrangedSubview(empty)
     }
+    stack.addArrangedSubview(details)
+
+    var right: NSStackView?
+    if let usage {
+      let panel = DashboardUsagePanel(model: usage, now: now, selectPeriod: actions.selectUsagePeriod)
+      self.usagePanel = panel
+      let column = NSStackView.column([panel], spacing: DashboardMetrics.rowGap)
+      column.translatesAutoresizingMaskIntoConstraints = false
+      column.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth).isActive = true
+      self.usageColumn = column
+      right = column
+    }
     if let consumption = APIConsumptionSection(
       readings: actions.apiConsumptionReadings(), now: now, toggle: actions.toggleAPIDetail)
     {
       self.apiSection = consumption
-      details.addArrangedSubview(consumption)
+      (right ?? details).addArrangedSubview(consumption)
     }
 
-    stack.addArrangedSubview(details)
-    let footer = DashboardFooterView(actions: actions)
+    let footer = DashboardFooterView(actions: actions, width: fullWidth)
     self.footerView = footer
-    stack.addArrangedSubview(footer)
-    stack.setCustomSpacing(DashboardMetrics.footerGap, after: details)
+
+    for view in [header, footer] {
+      view.translatesAutoresizingMaskIntoConstraints = false
+      self.addSubview(view)
+    }
+    NSLayoutConstraint.activate([
+      header.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: DashboardMetrics.inset),
+      header.topAnchor.constraint(equalTo: self.topAnchor, constant: DashboardMetrics.inset),
+      footer.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: DashboardMetrics.inset),
+      footer.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -DashboardMetrics.inset),
+    ])
 
     // Content-sized, with a ceiling that keeps the popover clear of the menu bar
-    // and inside the screen it opens on.
-    self.layoutSubtreeIfNeeded()
-    let content = ceil(stack.fittingSize.height) + 2 * DashboardMetrics.inset
-    let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
-    self.intendedHeight = height
-    if Self.requiresScrolling(contentHeight: content, ceiling: ceiling) {
-      let detailHeight = ceil(details.fittingSize.height)
-      let fixedHeight = content - detailHeight
-      if fixedHeight + DashboardMetrics.minimumDetailsViewport < ceiling {
-        self.makeScrollable(
+    // and inside the screen it opens on. Each column scrolls on its own when
+    // it is taller than the space between the header and the footer.
+    header.layoutSubtreeIfNeeded()
+    footer.layoutSubtreeIfNeeded()
+    let bodyCeiling = ceiling - self.chromeHeight
+    let overviewHeight = self.overviewGrid.map { ceil($0.fittingSize.height) + DashboardMetrics.rowGap } ?? 0
+    let detailHeight = ceil(details.fittingSize.height)
+    let leftNatural = overviewHeight + detailHeight
+    let rightNatural = right.map { ceil($0.fittingSize.height) } ?? 0
+    let body = min(bodyCeiling, max(leftNatural, rightNatural))
+    if Self.requiresScrolling(contentHeight: leftNatural, ceiling: bodyCeiling) {
+      if overviewHeight + DashboardMetrics.minimumDetailsViewport < bodyCeiling {
+        self.leftScroll = .details
+        self.makeDetailsScrollable(
           stack: stack, details: details, contentHeight: detailHeight,
-          viewportHeight: ceiling - fixedHeight)
+          viewportHeight: bodyCeiling - overviewHeight)
       } else {
         // A large provider grid can leave too little room for a useful detail
         // viewport. Keep every tile reachable on unusually short screens.
-        self.makeWholeDashboardScrollable(stack: stack, contentHeight: content)
+        self.leftScroll = .column
       }
-      self.isScrollable = true
     }
-    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
+    self.install(
+      self.leftScroll == .column
+        ? self.scrolled(stack, width: DashboardMetrics.contentWidth, contentHeight: leftNatural,
+          viewport: bodyCeiling, isLeft: true)
+        : stack,
+      x: DashboardMetrics.inset, below: header)
+    if let right {
+      self.rightScrolls = Self.requiresScrolling(contentHeight: rightNatural, ceiling: bodyCeiling)
+      self.install(
+        self.rightScrolls
+          ? self.scrolled(right, width: DashboardMetrics.contentWidth, contentHeight: rightNatural,
+            viewport: bodyCeiling, isLeft: false)
+          : right,
+        x: DashboardMetrics.inset + DashboardMetrics.contentWidth + DashboardMetrics.columnGap,
+        below: header)
+    }
+    let height = max(DashboardMetrics.minimumHeight, self.chromeHeight + body)
+    self.intendedHeight = height
+    self.frame = NSRect(x: 0, y: 0, width: width, height: height)
     self.appliedAppearance = Self.appearanceKey()
     self.layoutSubtreeIfNeeded()
   }
 
+  /// Header, footer, their gaps and the outer inset: everything that is not a column.
+  private var chromeHeight: CGFloat {
+    let header = ceil(self.headerView?.fittingSize.height ?? 0)
+    let footer = ceil(self.footerView?.fittingSize.height ?? 0)
+    return 2 * DashboardMetrics.inset + header + DashboardMetrics.headerGap
+      + DashboardMetrics.footerGap + footer
+  }
+
+  private func install(_ view: NSView, x: CGFloat, below header: NSView) {
+    view.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(view)
+    NSLayoutConstraint.activate([
+      view.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: x),
+      view.topAnchor.constraint(equalTo: header.bottomAnchor, constant: DashboardMetrics.headerGap),
+    ])
+  }
+
   /// Updates labels, meters, and the refresh spinner when the set of controls
-  /// is unchanged. A provider list, theme, or scroll-mode change returns false
-  /// so the caller can replace the affected tree.
+  /// is unchanged. A provider list, theme, layout, or scroll-mode change
+  /// returns false so the caller can replace the affected tree.
   func apply(
     states: [ProviderViewState],
     selectedMenuBarProvider: ProviderID?,
@@ -407,6 +475,8 @@ final class UsageDashboardView: NSView {
     if Self.appearanceKey() != self.appliedAppearance { return false }
     let summaries = states.map { AllowanceBuilder.summary(for: $0, now: now) }
     if summaries.isEmpty != self.showsEmpty { return false }
+    let usage = actions.usage()
+    if (usage != nil) != self.showsUsage { return false }
     guard let column = self.column, let details = self.detailColumn,
       let header = self.headerView else { return false }
     header.apply(
@@ -449,12 +519,16 @@ final class UsageDashboardView: NSView {
         }
       }
     }
+    if let usage, let panel = self.usagePanel, panel.apply(model: usage, now: now) {
+      self.regionRebuildCount += 1
+    }
     let readings = actions.apiConsumptionReadings()
     if readings.isEmpty {
       if self.apiSection != nil { return false }
     } else if let section = self.apiSection {
       if !section.apply(readings: readings, now: now, toggle: actions.toggleAPIDetail) {
-        self.replaceAPI(readings: readings, now: now, actions: actions, column: details)
+        self.replaceAPI(
+          readings: readings, now: now, actions: actions, column: self.usageColumn ?? details)
       }
     } else {
       return false
@@ -498,6 +572,7 @@ final class UsageDashboardView: NSView {
       summary: summary, now: now,
       isSelectedForMenuBar: selectedMenuBarProvider == summary.provider,
       isExpanded: true, showsDisclosure: false,
+      showsUsage: !self.showsUsage,
       connectProvider: actions.connectProvider,
       selectMenuBarProvider: actions.selectMenuBarProvider,
       toggleDetail: actions.toggleProviderDetail)
@@ -527,29 +602,44 @@ final class UsageDashboardView: NSView {
 
   private func relayout(maximumHeight: CGFloat, keepsScrollOffset: Bool) -> Bool {
     let ceiling = max(DashboardMetrics.minimumHeight, maximumHeight)
-    let scroll = self.scrollDocument?.enclosingScrollView
-    let previousScrollOrigin = keepsScrollOffset ? scroll?.contentView.bounds.origin : .zero
+    let leftScrollView = self.leftDocument?.enclosingScrollView
+    let rightScrollView = self.rightDocument?.enclosingScrollView
+    let leftOrigin = keepsScrollOffset ? leftScrollView?.contentView.bounds.origin : .zero
+    let rightOrigin = rightScrollView?.contentView.bounds.origin
     self.layoutSubtreeIfNeeded()
     guard let column = self.column, let details = self.detailColumn else { return false }
+    let bodyCeiling = ceiling - self.chromeHeight
+    let overviewHeight = self.overviewGrid.map { ceil($0.fittingSize.height) + DashboardMetrics.rowGap } ?? 0
     let detailHeight = ceil(details.fittingSize.height)
-    // A detail-only scroll view has a fixed viewport. Replace that viewport
-    // with the detail's natural height when deciding whether scrolling is
-    // needed after a reading or display change.
-    let viewportHeight = self.scrollHeightConstraint?.constant ?? 0
-    let content = ceil(column.fittingSize.height) + 2 * DashboardMetrics.inset
-      - viewportHeight + (self.scrollsDetailsOnly ? detailHeight : 0)
-    let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
-    let needsScroll = Self.requiresScrolling(contentHeight: content, ceiling: ceiling)
-    if needsScroll != self.isScrollable { return false }
-    let fixedHeight = content - detailHeight
-    if needsScroll && self.scrollsDetailsOnly
-      != (fixedHeight + DashboardMetrics.minimumDetailsViewport < ceiling)
-    {
+    let leftNatural = overviewHeight + detailHeight
+    let rightNatural = self.usageColumn.map { ceil($0.fittingSize.height) } ?? 0
+    // The scroll arrangement is structural: crossing a boundary rebuilds.
+    let leftNeeded: LeftScroll
+    if Self.requiresScrolling(contentHeight: leftNatural, ceiling: bodyCeiling) {
+      leftNeeded = overviewHeight + DashboardMetrics.minimumDetailsViewport < bodyCeiling
+        ? .details : .column
+    } else {
+      leftNeeded = .none
+    }
+    if leftNeeded != self.leftScroll { return false }
+    if Self.requiresScrolling(contentHeight: rightNatural, ceiling: bodyCeiling) != self.rightScrolls {
       return false
     }
+    let body = min(bodyCeiling, max(leftNatural, rightNatural))
+    let height = max(DashboardMetrics.minimumHeight, self.chromeHeight + body)
     self.intendedHeight = height
-    if self.scrollsDetailsOnly {
-      self.scrollHeightConstraint?.constant = max(1, ceiling - fixedHeight)
+    switch self.leftScroll {
+    case .details:
+      self.leftViewport?.constant = max(1, bodyCeiling - overviewHeight)
+      self.leftDocument?.frame.size.height = detailHeight
+    case .column:
+      self.leftViewport?.constant = max(1, bodyCeiling)
+      self.leftDocument?.frame.size.height = ceil(column.fittingSize.height)
+    case .none: break
+    }
+    if self.rightScrolls {
+      self.rightViewport?.constant = max(1, bodyCeiling)
+      self.rightDocument?.frame.size.height = rightNatural
     }
     // In the popover this view is the window's content view, and the window
     // owns its frame: it sits inside the popover border, not at the frame
@@ -557,17 +647,13 @@ final class UsageDashboardView: NSView {
     // and made NSPopover resize around the moved view, leaving a gray band.
     // The controller publishes `intendedHeight` and the popover resizes to it.
     if self.window == nil {
-      self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
-    }
-    if needsScroll, let document = self.scrollDocument {
-      document.frame.size.height = self.scrollsDetailsOnly ? detailHeight : content
+      self.frame = NSRect(x: 0, y: 0, width: self.dashboardWidth, height: height)
     }
     self.layoutSubtreeIfNeeded()
-    if let scroll, let previousScrollOrigin, let document = self.scrollDocument {
+    for (scroll, origin) in [(leftScrollView, leftOrigin), (rightScrollView, rightOrigin)] {
+      guard let scroll, let origin, let document = scroll.documentView else { continue }
       let maximumOffset = max(0, document.frame.height - scroll.contentView.bounds.height)
-      scroll.contentView.scroll(to: NSPoint(
-        x: previousScrollOrigin.x,
-        y: min(max(0, previousScrollOrigin.y), maximumOffset)))
+      scroll.contentView.scroll(to: NSPoint(x: origin.x, y: min(max(0, origin.y), maximumOffset)))
       scroll.reflectScrolledClipView(scroll.contentView)
     }
     return true
@@ -581,8 +667,8 @@ final class UsageDashboardView: NSView {
     contentHeight > ceiling + 0.5
   }
 
-  /// Keep the glance and footer stable while a long provider card scrolls.
-  private func makeScrollable(
+  /// Keep the overview stable while a long provider card scrolls.
+  private func makeDetailsScrollable(
     stack: NSStackView, details: NSStackView, contentHeight: CGFloat,
     viewportHeight: CGFloat
   ) {
@@ -601,36 +687,40 @@ final class UsageDashboardView: NSView {
     ])
     let heightConstraint = scroll.heightAnchor.constraint(equalToConstant: viewportHeight)
     heightConstraint.isActive = true
-    self.scrollHeightConstraint = heightConstraint
-    self.scrollsDetailsOnly = true
+    self.leftViewport = heightConstraint
+    self.leftDocument = document
     self.configureScroll(scroll, document: document)
   }
 
-  /// If the provider grid itself is exceptionally tall, the whole dashboard
-  /// remains scrollable so none of its tiles become unreachable.
-  private func makeWholeDashboardScrollable(stack: NSStackView, contentHeight: CGFloat) {
-    stack.removeFromSuperview()
-    let document = FlippedView(
-      frame: NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: contentHeight))
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    document.addSubview(stack)
+  /// A whole column inside a fixed viewport.
+  private func scrolled(
+    _ content: NSStackView, width: CGFloat, contentHeight: CGFloat, viewport: CGFloat, isLeft: Bool
+  ) -> NSScrollView {
+    let document = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: contentHeight))
+    content.translatesAutoresizingMaskIntoConstraints = false
+    document.addSubview(content)
+    let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: viewport))
     NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(
-        equalTo: document.leadingAnchor, constant: DashboardMetrics.inset),
-      stack.trailingAnchor.constraint(
-        equalTo: document.trailingAnchor, constant: -DashboardMetrics.inset),
-      stack.topAnchor.constraint(equalTo: document.topAnchor, constant: DashboardMetrics.inset),
-      stack.bottomAnchor.constraint(
-        equalTo: document.bottomAnchor, constant: -DashboardMetrics.inset),
+      content.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+      content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+      content.topAnchor.constraint(equalTo: document.topAnchor),
+      content.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+      scroll.widthAnchor.constraint(equalToConstant: width),
     ])
-    let scroll = NSScrollView(frame: self.bounds)
-    scroll.autoresizingMask = [.width, .height]
-    self.addSubview(scroll)
+    let heightConstraint = scroll.heightAnchor.constraint(equalToConstant: viewport)
+    heightConstraint.isActive = true
+    if isLeft {
+      self.leftViewport = heightConstraint
+      self.leftDocument = document
+    } else {
+      self.rightViewport = heightConstraint
+      self.rightDocument = document
+    }
     self.configureScroll(scroll, document: document)
+    return scroll
   }
 
   private func configureScroll(_ scroll: NSScrollView, document: FlippedView) {
-    self.scrollDocument = document
     scroll.documentView = document
     scroll.hasVerticalScroller = true
     scroll.scrollerStyle = .overlay
@@ -680,7 +770,8 @@ private final class DashboardHeaderView: NSView {
     isRefreshing: Bool,
     refreshStartedAt: Date?,
     now: Date,
-    actions: DashboardActions
+    actions: DashboardActions,
+    width: CGFloat = DashboardMetrics.contentWidth
   ) {
     super.init(frame: .zero)
     let wordmark = ReserveLabel(
@@ -731,7 +822,7 @@ private final class DashboardHeaderView: NSView {
       stack.trailingAnchor.constraint(equalTo: self.trailingAnchor),
       stack.topAnchor.constraint(equalTo: self.topAnchor),
       stack.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
+      self.widthAnchor.constraint(equalToConstant: width),
     ])
   }
 
@@ -1452,6 +1543,8 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
   private var hasUnavailableLiveData: Bool
   private let isExpanded: Bool
   private let showsDisclosure: Bool
+  /// False beside the usage column, which already states this provider's history.
+  private let showsUsage: Bool
   private var renderedStructure = ""
   private var isHovered = false
   private var hoverTrackingArea: NSTrackingArea?
@@ -1464,6 +1557,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     isSelectedForMenuBar: Bool,
     isExpanded: Bool = false,
     showsDisclosure: Bool = true,
+    showsUsage: Bool = true,
     connectProvider: @escaping (ProviderID) -> Void,
     selectMenuBarProvider: @escaping (ProviderID) -> Void,
     toggleDetail: @escaping (ProviderID) -> Void = { _ in }
@@ -1475,6 +1569,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     self.hasUnavailableLiveData = summary.paceState == .stale
     self.isExpanded = isExpanded
     self.showsDisclosure = showsDisclosure
+    self.showsUsage = showsUsage
     super.init(frame: .zero)
     self.wantsLayer = true
     self.toolTip =
@@ -1538,7 +1633,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     }
     if isExpanded {
       rows.append(ReserveHairline(width: DashboardMetrics.cardContentWidth))
-      rows.append(UsageDetailGrid(summary: summary, now: now))
+      rows.append(UsageDetailGrid(summary: summary, now: now, showsUsage: showsUsage))
     }
 
     let stack = NSStackView.column(rows, spacing: DashboardMetrics.cardRowGap)
@@ -1600,7 +1695,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     if let grid = self.control(id: "usage-detail-\(summary.provider.rawValue)") as? UsageDetailGrid,
       !grid.apply(summary: summary, now: now), let stack = grid.superview as? NSStackView
     {
-      let replacement = UsageDetailGrid(summary: summary, now: now)
+      let replacement = UsageDetailGrid(summary: summary, now: now, showsUsage: self.showsUsage)
       stack.replaceArrangedSubview(grid, with: replacement)
       self.regionRebuildCount += 1
     }
@@ -2551,11 +2646,13 @@ private final class UsageDetailGrid: NSView {
 
   private var renderedStructure: [String] = []
   private var bindings: [RowBinding] = []
+  private let showsUsage: Bool
 
-  init(summary: ProviderSummary, now: Date = Date()) {
+  init(summary: ProviderSummary, now: Date = Date(), showsUsage: Bool = true) {
+    self.showsUsage = showsUsage
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("usage-detail-\(summary.provider.rawValue)")
-    let specs = Self.specs(summary: summary, now: now)
+    let specs = Self.specs(summary: summary, now: now, showsUsage: showsUsage)
     self.renderedStructure = specs.map(\.structureKey)
     var rows: [NSView] = []
     for spec in specs {
@@ -2581,7 +2678,7 @@ private final class UsageDetailGrid: NSView {
   /// existing control when the row anatomy is stable; a caller replaces this
   /// region only when a row appears, disappears, or changes kind.
   func apply(summary: ProviderSummary, now: Date) -> Bool {
-    let specs = Self.specs(summary: summary, now: now)
+    let specs = Self.specs(summary: summary, now: now, showsUsage: self.showsUsage)
     guard specs.map(\.structureKey) == self.renderedStructure,
       specs.count == self.bindings.count
     else { return false }
@@ -2602,14 +2699,15 @@ private final class UsageDetailGrid: NSView {
     return true
   }
 
-  private static func specs(summary: ProviderSummary, now: Date) -> [RowSpec] {
+  private static func specs(summary: ProviderSummary, now: Date, showsUsage: Bool = true) -> [RowSpec] {
     let provider = summary.provider.rawValue
-    let usage = summary.localUsage
+    // Beside the usage column, history is stated once, there, for every provider.
+    let usage = showsUsage ? summary.localUsage : nil
     let accountData = usage?.origin == .providerAccount
     var rows = summary.details.enumerated().map { index, detail in
       RowSpec(kind: .fact, id: "detail-\(index)", label: detail.label, value: detail.value)
     }
-    if summary.hasUnattributedClaudeHistory {
+    if showsUsage, summary.hasUnattributedClaudeHistory {
       rows.append(RowSpec(kind: .note, id: "unattributed-claude-history", label: "",
         value: "Claude token history on this Mac cannot be split by account. See Insights for available device history; plan limits above are account-specific."))
     }
@@ -2718,13 +2816,13 @@ private final class UsageDetailGrid: NSView {
         value: Self.age(checked, now: now), clock: .age(checked),
         alternateValues: ["just now", "59 min ago", "999h ago"]))
     }
-    if summary.localHistorySupported, summary.localHistoryEnabled,
+    if showsUsage, summary.localHistorySupported, summary.localHistoryEnabled,
       let failure = summary.localHistoryError
     {
       rows.append(RowSpec(
         kind: .note, id: "usage-local-history-error-\(provider)", label: "", value: failure))
     }
-    if usage == nil, summary.historyPossible, summary.localHistoryError == nil,
+    if showsUsage, usage == nil, summary.historyPossible, summary.localHistoryError == nil,
       !summary.hasUnattributedClaudeHistory
     {
       let message = !summary.localHistorySupported
@@ -2958,9 +3056,9 @@ private final class EmptyProvidersView: ReserveSurface {
 
 @MainActor
 private final class DashboardFooterView: NSView {
-  init(actions: DashboardActions) {
+  init(actions: DashboardActions, width: CGFloat = DashboardMetrics.contentWidth) {
     super.init(frame: .zero)
-    let rule = ReserveHairline(width: DashboardMetrics.contentWidth)
+    let rule = ReserveHairline(width: width)
     let insights = ReserveTextButton(
       title: "Insights", symbol: "chart.bar", size: ReserveType.body, action: actions.openInsights)
     insights.identifier = NSUserInterfaceItemIdentifier("open-insights")
@@ -2979,7 +3077,7 @@ private final class DashboardFooterView: NSView {
       row.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: 9),
       row.topAnchor.constraint(equalTo: rule.bottomAnchor, constant: 9),
       row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
+      self.widthAnchor.constraint(equalToConstant: width),
     ])
   }
 
@@ -2987,7 +3085,13 @@ private final class DashboardFooterView: NSView {
 }
 
 enum DashboardMetrics {
+  /// The single-column dashboard. The usage column adds `columnGap` and a
+  /// second `contentWidth`.
   static let width: CGFloat = 440
+  static let columnGap: CGFloat = 16
+  static func width(showsUsage: Bool) -> CGFloat {
+    showsUsage ? self.width + self.contentWidth + self.columnGap : self.width
+  }
   static let minimumHeight: CGFloat = 320
   /// The fallback ceiling, used only when no screen is known — offscreen
   /// rendering and tests. On a real screen `availableHeight` governs.

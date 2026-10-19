@@ -135,7 +135,8 @@ final class InsightTrendView: NSView {
       (text as NSString).draw(at: NSPoint(x: plot.midX - 80, y: plot.midY), withAttributes: attributes)
     }
     if let days = self.series.max(by: { $0.days.count < $1.days.count })?.days, !days.isEmpty {
-      let tickCount = min(5, days.count)
+      // Room for a short date every ~76pt, so labels never collide on a narrow chart.
+      let tickCount = min(5, days.count, max(2, Int(plot.width / 76)))
       let indices = tickCount == 1 ? [0] : Set((0..<tickCount).map {
         Int((Double($0) * Double(days.count - 1) / Double(tickCount - 1)).rounded())
       }).sorted()

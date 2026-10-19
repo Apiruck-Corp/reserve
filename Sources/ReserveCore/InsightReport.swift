@@ -18,6 +18,9 @@ public struct InsightReport: Equatable, Sendable {
   public let entries: [Entry]
   public init(entries: [Entry]) { self.entries = entries }
 
+  /// The model row for tokens no source record names a model for.
+  public static let unknownModelLabel = "Model unavailable"
+
   public var tokens: Int64 { Self.sum(self.entries.compactMap { $0.day.tokens }) }
   public var coveredDays: Int { self.entries.filter { $0.day.tokens != nil }.count }
   public var pricedDays: Int { self.entries.filter { Self.cost($0.day.costUSD) != nil }.count }
@@ -57,7 +60,7 @@ public struct InsightReport: Equatable, Sendable {
       let unknown = max(0, (entry.day.tokens ?? 0) - represented)
       if unknown > 0 {
         let key = entry.provider.rawValue + ":unknown"
-        var row = grouped[key] ?? Row(label: "Model unavailable", provider: entry.provider)
+        var row = grouped[key] ?? Row(label: Self.unknownModelLabel, provider: entry.provider)
         Self.add(tokens: unknown, cost: represented == 0 ? entry.day.costUSD : nil, to: &row)
         grouped[key] = row
       }

@@ -202,6 +202,9 @@ final class UsageStore {
   /// separate from the per-provider account fetches.
   private var localInsightsRequestedAt: Date?
   var insightsVisible = false
+  /// The popover is open. Its usage panel reads the same history as Insights,
+  /// so automatic waves keep that history current while it is on screen.
+  var dashboardVisible = false
   private var pendingInsightProviders: Set<ProviderID> = []
   #if RESERVE_DEV_AUTOMATION
   private var insightsRequestCounts: [ProviderID: Int] = [:]
@@ -264,12 +267,38 @@ final class UsageStore {
     self.requestAccountInsights(for: provider)
   }
 
-  private func requestAccountInsights(for provider: ProviderID) {
+  /// Opening the popover asks for every provider's history, because its usage
+  /// panel shows them all. Local logs are rescanned when the last pass is more
+  /// than two minutes old: the scan is incremental, and the panel must not
+  /// present a half-hour-old total as current. Account history, which costs a
+  /// provider request, keeps a longer interval.
+  func requestDashboardUsage(now: Date = Date()) {
+    guard self.automaticRefreshEnabled || self.fetchOverride != nil else { return }
+    if self.localHistoryEnabled,
+      self.lastLocalUsageScanAt.map({ now.timeIntervalSince($0) >= Self.dashboardHistoryFreshness }) ?? true,
+      self.beginLocalUsageRefresh(force: true)
+    {
+      self.changed()
+      self.startDetachedLocalUsageScan()
+    }
+    for provider in self.accounts { self.requestAccountInsights(for: provider, interval: 600) }
+  }
+
+  static let dashboardHistoryFreshness: TimeInterval = 120
+
+  /// Why the last history pass failed, while history is on. Saved totals stay.
+  var localHistoryFailure: String? { self.localHistoryEnabled ? self.localHistoryScanError : nil }
+  var localHistoryIsUpdating: Bool { self.localHistoryEnabled && self.isScanningLocalUsage }
+
+  /// When this Mac's history last finished a successful pass.
+  var localHistoryUpdatedAt: Date? { self.localHistoryEnabled ? self.lastLocalUsageScanAt : nil }
+
+  private func requestAccountInsights(for provider: ProviderID, interval: TimeInterval = 60) {
     guard self.isEnabled(provider),
       ProviderDescriptor.forProvider(provider).capabilities.contains(.accountHistory)
     else { return }
     if let requested = self.insightsRequestedAt[provider],
-      Date().timeIntervalSince(requested) < 60
+      Date().timeIntervalSince(requested) < interval
     {
       return
     }
@@ -1229,6 +1258,19 @@ final class UsageStore {
     }
   }
 
+  /// The popover's usage period: Today, 7 or 30 days. Kept apart from the
+  /// Insights range so a long Insights view does not slow the glance.
+  var dashboardUsageDays: Int {
+    get {
+      let stored = self.defaults.integer(forKey: "dashboard.usageDays")
+      return [1, 7, 30].contains(stored) ? stored : 7
+    }
+    set {
+      self.defaults.set([1, 7, 30].contains(newValue) ? newValue : 7, forKey: "dashboard.usageDays")
+      self.changed()
+    }
+  }
+
   /// Published daily aggregates. Empty until a successful scan records them.
   /// Range changes read this dictionary and do not scan.
   private(set) var publishedDailyHistory: [ProviderID: [InsightHistoryDay]] = [:]
@@ -1236,10 +1278,12 @@ final class UsageStore {
 
   var dailyHistoryLoadCountForTesting: Int { self.dailyHistoryLoads }
 
-  func insightSeries(for provider: ProviderID, now: Date = Date(), origin: UsageInsightOrigin? = nil) -> InsightHistorySeries {
+  func insightSeries(
+    for provider: ProviderID, now: Date = Date(), origin: UsageInsightOrigin? = nil, days: Int? = nil
+  ) -> InsightHistorySeries {
     return InsightHistoryRange.series(
       provider: provider,
-      days: self.insightHistoryDays,
+      days: days ?? self.insightHistoryDays,
       now: now,
       published: origin == .providerAccount ? [:] : self.publishedDailyHistory,
       accountDays: origin == .localDevice ? [] : self.states[provider]?.snapshot?.accountTokenActivity?.dailyUsageBuckets
@@ -1499,7 +1543,7 @@ final class UsageStore {
     let now = self.now()
     if trigger != .manual, self.discretionaryRefreshIsSuppressed(now: now) { return }
     let manual = trigger == .manual
-    if (manual || self.insightsVisible || self.localScanNeedsContinuation)
+    if (manual || self.insightsVisible || self.dashboardVisible || self.localScanNeedsContinuation)
       && self.beginLocalUsageRefresh(force: manual || self.localScanNeedsContinuation) {
       self.startDetachedLocalUsageScan()
     }
