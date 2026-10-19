@@ -7,6 +7,7 @@ Last updated: 2026-10-19
 ## Next
 
 ## Later
+- 2026-10-19: "What would it take to manage an account that helps consolidate all the data from all the machines" (MBA and MBP), unless each provider's cloud already has it.
 
 ## Done
 - 2026-10-19: Make Insights charts adapt to the selected period and fill their available area. Implemented and installed locally as 1.9.0 (1060): Today uses timestamped hourly Claude/Codex usage, with matching token types and model breakdown published before historical backfill; period/provider/metric axes and heatmaps adapt to the visible range. Verified the installed app with real data: Today has about 1.00B tokens, all five current models and 2/2 detailed provider-days; seven days has 7/7 days for both providers and 14/14 detailed provider-days. Today used a 300M/hour axis versus 2.5B/day for seven days. 408 tests, 43 self-tests and native UI/connection/reliability checks pass. Merge authorized via PR #71 for continuation on another computer; public release pending. Handoff: docs/handoffs/PREVIEW_HISTORY_2026-10-19.md. Evidence: .workspace/sessions/2026-10-19-installed-history-preview/VERIFICATION.md. **Merged to main 2026-10-19 via PR #71 (squash 56018bc); public release still pending.**
