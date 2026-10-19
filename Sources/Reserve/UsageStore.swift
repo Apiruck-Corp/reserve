@@ -521,6 +521,34 @@ final class UsageStore {
     provider.isAnthropic && self.defaults.bool(forKey: "anthropic.historyIncludesMultipleAccounts")
   }
 
+  /// Two Claude cards signed in to one organization would show the same
+  /// quota twice under different names. An added account signed in inside its
+  /// own folder on purpose, so it keeps the reading; the first card only
+  /// follows whatever Claude Code last signed in to. Returns the card that
+  /// keeps the reading when `provider` duplicates it.
+  func claudeAccountSharingOrganization(with provider: ProviderID) -> ProviderID? {
+    guard provider.isAnthropic else { return nil }
+    func organization(_ account: ProviderID) -> String? {
+      let directory = self.claudeConfigDirectory(for: account)
+      // An added card without a folder has no profile of its own yet.
+      if account.isAdded, directory == nil { return nil }
+      return AnthropicProvider.organizationIdentifier(configDirectory: directory)
+    }
+    return Self.claudeOrganizationOwner(
+      of: provider, among: self.accounts.filter { $0.isAnthropic && self.isEnabled($0) },
+      organization: organization)
+  }
+
+  static func claudeOrganizationOwner(
+    of provider: ProviderID, among accounts: [ProviderID], organization: (ProviderID) -> String?
+  ) -> ProviderID? {
+    guard let mine = organization(provider) else { return nil }
+    let sharing = accounts.filter { $0 == provider || organization($0) == mine }
+    guard sharing.count > 1 else { return nil }
+    let owner = sharing.first(where: \.isAdded) ?? sharing[0]
+    return owner == provider ? nil : owner
+  }
+
   func insightHistoryName(for provider: ProviderID) -> String {
     provider == .anthropic && self.hasUnattributedClaudeHistory(for: provider)
       ? "Claude on this Mac" : provider.displayName
@@ -3158,6 +3186,19 @@ final class UsageStore {
     let claudeOrganization = provider.isAnthropic && self.fetchOverride == nil
       && self.hasUnattributedClaudeHistory(for: provider)
       ? AnthropicProvider.organizationIdentifier(configDirectory: self.claudeConfigDirectory(for: provider)) : nil
+    if self.fetchOverride == nil, let owner = self.claudeAccountSharingOrganization(with: provider) {
+      // The last reading is the other card's quota under this card's name.
+      self.states[provider]?.snapshot = nil
+      if var state = self.states[provider] {
+        Self.applyFailure(UsageProviderError.credentialsNotFound(
+          "Signed in to the same Claude account as \(owner.displayName). Sign in with your other account."),
+          to: &state)
+        self.states[provider] = state
+      }
+      self.changed()
+      if persist { await self.persistSnapshots() }
+      return
+    }
     let fetcher: any UsageProvider =
       switch provider.kind {
       case .openAI:

@@ -1384,6 +1384,22 @@ enum ConnectionFlowSelfTest {
         "switching the retained card to Team failed")
       expect(Self.text(in: dashboard).contains(team.displayName + " · Team"),
         "the Team detail card retained personal content")
+      // Both cards signed in to one organization: the added folder keeps the
+      // reading, the first card asks for the other sign-in.
+      let second = ProviderID(rawValue: "anthropic@selftest2")!
+      let sameOrganization: (ProviderID) -> String? = { _ in "org-team" }
+      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
+        organization: sameOrganization) == team, "the first card kept a duplicate of the added Team reading")
+      expect(UsageStore.claudeOrganizationOwner(of: team, among: [.anthropic, team],
+        organization: sameOrganization) == nil, "the added Team card lost its own reading")
+      expect(UsageStore.claudeOrganizationOwner(of: second, among: [.anthropic, team, second],
+        organization: sameOrganization) == team, "the later added card kept a duplicate reading")
+      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
+        organization: { $0 == team ? "org-team" : "org-personal" }) == nil,
+        "two organizations were treated as one account")
+      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
+        organization: { $0 == team ? nil : "org-personal" }) == nil,
+        "an unidentified card was treated as a duplicate")
       try? store.removeAccount(team)
       expect(store.hasUnattributedClaudeHistory(for: .anthropic),
         "removing Team reassigned old device history to the personal account")
