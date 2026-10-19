@@ -1000,6 +1000,21 @@ enum ConnectionFlowSelfTest {
     expect(series.coveredDays >= 1, "published cache days did not reach Insights")
     expect(series.days.contains { $0.day == today && $0.tokens == 40 && $0.costUSD == 1.5 },
       "today's published cost was dropped")
+    // Provider account days share the heatmap path; never add them to local totals.
+    let account = InsightHistoryRange.series(provider: .cursor, days: 7, now: now,
+      published: [:], accountDays: [DailyUsage(day: today, tokens: 99)])
+    expect(account.available && account.origin == .providerAccount && account.coveredDays == 1,
+      "Cursor account history did not produce heatmap days")
+    let local = InsightHistoryRange.series(provider: .openAI, days: 7, now: now,
+      published: [.openAI: [InsightHistoryDay(day: today, tokens: 40, costUSD: 1.5)]],
+      accountDays: [DailyUsage(day: today, tokens: 999), DailyUsage(day: yesterday, tokens: 888)])
+    expect(local.origin == .localDevice && local.coveredDays == 1 && local.days.last?.tokens == 40,
+      "account days were mixed into the local range")
+    store.setEnabled(.openAI, enabled: false, refreshImmediately: false)
+    store.publishCachedHistory([.openAI: history])
+    expect(store.insightSeries(for: .openAI, now: now).coveredDays == 2,
+      "disabling live monitoring hid a provider's recorded history")
+    store.setEnabled(.openAI, enabled: true, refreshImmediately: false)
     let loadsAfterScan = loadCounter.count
     store.insightHistoryDays = 90
     expect(loadCounter.count == loadsAfterScan, "range change after publication reloaded the cache")

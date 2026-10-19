@@ -383,10 +383,21 @@ They do not represent savings on a subscription bill.
 Subscription prices remain user-editable. Details distinguish reported, typical,
 and manually entered prices. Empty detail rows are omitted.
 
-Insights can compare 7, 30, or 90 days from the existing local history cache
-without rescanning session files. Daily heatmaps distinguish a known quiet day
-from a day Reserve has not observed and report how much of the selected period
-is covered.
+Insights has provider and source filters, Cost / Tokens / Limits views, and
+Today, 7-, 30-, and 90-day ranges. Daily trends, provider shares, token-type
+totals, cache savings, and searchable model / day / provider breakdowns use
+published history without rescanning session files when filters change.
+Smooth trend lines connect available days across gaps; missing days remain
+unavailable in the heatmap, tooltips, and totals.
+The daily heatmap includes local history and provider-reported daily history
+(such as Cursor), with each row's source and coverage labeled. Recorded history
+remains visible when live monitoring for a provider is disabled. Missing days
+stay distinct from known zeroes. Monthly plans and provider account totals keep
+their own labeled periods; API estimates show pricing coverage. Older cache
+records may lack token-type or model details; these appear as unavailable until
+new records supply them. Cumulative Codex records with several models or an
+incomplete context stay unattributed. Limits show the latest quota readings and
+reset times.
 
 Cursor's account insights come from provider-reported aggregate usage. Reserve
 labels their dollar total **Provider-reported usage value** rather than estimated
