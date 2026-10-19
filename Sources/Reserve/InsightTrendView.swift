@@ -137,9 +137,17 @@ final class InsightTrendView: NSView {
     if let days = self.series.max(by: { $0.days.count < $1.days.count })?.days, !days.isEmpty {
       // Room for a short date every ~76pt, so labels never collide on a narrow chart.
       let tickCount = min(5, days.count, max(2, Int(plot.width / 76)))
-      let indices = tickCount == 1 ? [0] : Set((0..<tickCount).map {
-        Int((Double($0) * Double(days.count - 1) / Double(tickCount - 1)).rounded())
-      }).sorted()
+      // Evenly spaced dates ending today; a last step shorter than half the
+      // others drops the tick before it, so labels never crowd the end.
+      var indices: [Int] = [0]
+      if days.count > 1 {
+        let step = max(1, Int(ceil(Double(days.count - 1) / Double(max(1, tickCount - 1)))))
+        indices = Array(stride(from: 0, to: days.count - 1, by: step))
+        if let last = indices.last, indices.count > 1, days.count - 1 - last < (step + 1) / 2 {
+          indices.removeLast()
+        }
+        indices.append(days.count - 1)
+      }
       for index in indices {
         let title = Self.dateLabel(days[index].day) as NSString
         let width = title.size(withAttributes: attributes).width

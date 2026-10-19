@@ -2863,12 +2863,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard send(popup), self.store.insightHistoryDays == 1 else { return false }
     // Rebuild synchronously: production's observer coalesces this update.
     self.applyPane(animated: false)
-    guard control("insights-daily-trend", as: InsightTrendView.self)?.title == "Today's hourly estimated API value",
-      control("insights-hourly-coverage", as: NSTextField.self)?.stringValue.contains("daily totals only") == true
+    // OpenAI has no provider-account history: the selection is empty and says
+    // so once, or, where it has some, hours are explained as unavailable.
+    guard control("insights-empty", as: NSView.self) != nil
+      || control("insights-hourly-coverage", as: NSTextField.self)?.stringValue.contains("daily totals only") == true
     else { return false }
+    self.insightFilters.source = 0
     self.store.insightHistoryDays = 7
     self.applyPane(animated: false)
-    guard control("insights-daily-trend", as: InsightTrendView.self)?.title == "Daily estimated API value"
+    // Cost is offered only when a selected provider is fully priced.
+    guard let costMetric = control("insights-metric", as: NSSegmentedControl.self),
+      let trend = control("insights-daily-trend", as: InsightTrendView.self),
+      trend.title == (costMetric.isEnabled(forSegment: 0) ? "Daily estimated API value" : "Daily processed tokens")
     else { return false }
     self.store.insightHistoryDays = 1
     self.applyPane(animated: false)
@@ -3133,10 +3139,24 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // Insights carries the activity numbers the popover no longer shows.
     self.pane = .insights
     self.applyPane(animated: false)
+    // Only Cursor's account has history here: a provider or source without
+    // data is not offered, charted or given an empty heatmap row.
+    let accountOnlyIDs = identifiers()
+    let accountOnlyProviders = (descendants().first {
+      $0.identifier?.rawValue == "insights-provider-filter"
+    } as? NSPopUpButton)?.itemTitles ?? []
+    let emptyProvidersHidden = !accountOnlyIDs.contains("insights-heatmap-openAI")
+      && !accountOnlyIDs.contains("insights-source-filter")
+      && !accountOnlyProviders.contains(ProviderID.openAI.displayName)
+    let today = InsightHistoryRange.dayKeys(count: 1, now: Date())[0]
+    self.store.publishDailyHistoryForTesting(
+      [InsightHistoryDay(day: today, tokens: 1_200_000, costUSD: 2.5)], provider: .openAI)
+    self.applyPane(animated: false)
     let insightIDs = identifiers()
     let insightLabels = descendants().compactMap { ($0 as? NSTextField)?.stringValue }
     let insightsSuccess =
-      insightIDs.contains("insights-dashboard")
+      emptyProvidersHidden
+      && insightIDs.contains("insights-dashboard")
       && insightIDs.contains("insights-total")
       && Self.insightsTotalFits(window: window)
       && insightIDs.contains("insights-history-range")
@@ -3146,9 +3166,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && insightIDs.contains("insights-source-filter")
       && insightIDs.contains("insights-metric")
       && insightIDs.contains("insights-breakdown-group")
-      && insightLabels.contains { $0.contains("missing day, not zero") }
-      && insightLabels.contains { $0.contains("Account history can include other devices") }
-      && insightLabels.contains { $0.contains("separate reference") }
+      && insightLabels.contains { $0.contains("not a day with zero") }
+      && insightLabels.contains { $0.contains("across every device on the account") }
+      && insightLabels.contains { $0.contains("Your plans cost") }
+      // Values Reserve cannot back are left out, not shown as a dash or zero.
+      && !insightLabels.contains("—")
+      && !insightLabels.contains { $0.contains("provider-days") }
       && self.exerciseInsightControlsForSelfTest()
       && self.exerciseHotKeyStatusForSelfTest()
 

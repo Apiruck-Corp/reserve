@@ -779,15 +779,24 @@ enum LifecycleSelfTest {
     let beforeCaption = heatmap?.dayCaptionForTesting(at: store.insightHistoryDays - 1)
     let total = view("insights-total") as? NSTextField
     let totalID = total.map(ObjectIdentifier.init)
-    let beforeTotal = total?.stringValue
+    // The footer is fixed copy now; OpenAI's own row carries its figures.
+    func openAIRow() -> String {
+      guard let row = view("insight-openAI") else { return "" }
+      func texts(_ v: NSView) -> [String] {
+        ((v as? NSTextField).map { [$0.stringValue] } ?? []) + v.subviews.flatMap(texts)
+      }
+      return texts(row).joined(separator: "|")
+    }
+    let beforeHeadline = openAIRow()
     store.publishDailyHistoryForTesting([InsightHistoryDay(day: day, tokens: 9_000, costUSD: 99)], provider: .openAI)
     self.settle()
     result.expect(view("insights-heatmap-openAI").map(ObjectIdentifier.init) == heatmapID
       && heatmap?.dayCaptionForTesting(at: store.insightHistoryDays - 1) != beforeCaption,
       "Insights heatmap failed to update the retained chart")
-    result.expect(view("insights-total").map(ObjectIdentifier.init) == totalID
-      && total?.stringValue != beforeTotal,
+    result.expect(totalID != nil && view("insights-total").map(ObjectIdentifier.init) == totalID
+      && !beforeHeadline.isEmpty && openAIRow() != beforeHeadline,
       "Insights total failed to update the retained label")
+    let updatedHeadline = openAIRow()
     if let last = view("insights-total"), let window = settings.window {
       result.expect(self.unreachableReason(last, in: window) == nil,
         "updated Insights total fell outside the scrollable document")
@@ -806,7 +815,7 @@ enum LifecycleSelfTest {
       window.makeFirstResponder(nil)
       self.settle()
       result.expect((view("insights-breakdown-search") as? NSSearchField)?.stringValue == "unsaved search"
-        && (view("insights-total") as? NSTextField)?.stringValue != beforeTotal,
+        && openAIRow() != updatedHeadline,
         "Insights did not apply its deferred update after search editing ended")
     } else { result.failures.append("Insights search controls unavailable") }
 

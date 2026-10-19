@@ -215,7 +215,8 @@ in that account's folder and feeds a cache file of its own.
 
 Local history is available by default and can be turned off with **Include
 activity from this Mac** in General. Only enabled providers are scanned, and
-history work begins when Insights is requested. Normal quota checks skip
+history work begins when Insights or the dashboard is opened. Opening the
+dashboard rescans changed logs when the last pass is more than two minutes old. Normal quota checks skip
 detailed Cursor history, reuse plan metadata, and check at most two providers
 concurrently in a sweep.
 
@@ -284,9 +285,15 @@ their SuperGrok, X Premium and Cursor plan names.
 The dashboard shows every enabled provider in a compact overview, including
 the reset time for the allowance shown by its percentage and meter. Select a tile
 to show that provider's details below it: every allowance window and its reset,
-activity from this Mac when that is turned on, provider-reported account
-activity where it exists, the plan's cost and renewal, where the numbers came
-from, and when they were last checked. Reserve restores the last selected
+the plan's cost and renewal, and when the numbers were last checked.
+
+When history is available, a second column shows usage for Today, 7 or 30
+days: an API-price estimate, a trend chart, each provider's share, the token
+mix with cache savings, the top models, and API consumption. A provider with
+any unpriced active day shows its tokens and is named as having no API price;
+it is never counted at zero. Usage that no record names a model for is listed
+separately rather than ranked as a model. Without history the dashboard keeps a
+single column. Reserve restores the last selected
 provider when the dashboard reopens, and the detail panel can pin that provider
 to the menu bar.
 
@@ -380,7 +387,9 @@ Subscription prices remain user-editable. Details distinguish reported, typical,
 and manually entered prices. Empty detail rows are omitted.
 
 Insights has provider and source filters, Cost / Tokens / Limits views, and
-Today, 7-, 30-, and 90-day ranges. Daily trends, provider shares, token-type
+Today, 7-, 30-, and 90-day ranges. Filters offer only providers and sources
+with data in the range, Cost only when a selected provider is fully priced, and
+an empty selection shows one explanation instead of empty charts. Daily trends, provider shares, token-type
 totals, cache savings, and searchable model / day / provider breakdowns use
 published history without rescanning session files when filters change.
 Smooth trend lines connect available days across gaps; missing days remain

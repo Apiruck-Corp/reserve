@@ -190,9 +190,8 @@ final class DashboardUsagePanel: NSView, ReserveClockUpdating {
     var headlineViews: [NSView] = [headline, caption]
     if !glance.unpricedProviders.isEmpty {
       let names = glance.unpricedProviders.map { model.names[$0] ?? $0.displayName }
-      let note = ReserveLabel(
-        "No API price for " + Self.list(names) + (costLeads ? ", not included above" : ""),
-        font: ReserveFont.sans(ReserveType.support), color: ReserveColor.subtle)
+      let note = Self.note(
+        "No API price for " + Self.list(names) + (costLeads ? ", not included above" : ""), width: width)
       note.identifier = NSUserInterfaceItemIdentifier("usage-unpriced")
       headlineViews.append(note)
     }
@@ -307,22 +306,10 @@ final class DashboardUsagePanel: NSView, ReserveClockUpdating {
       index += 2
     }
     var rows: [NSView] = [heading, bar, NSStackView.column(legendRows, spacing: 6)]
-    if model.glance.tokenMixIsPartial {
-      // Name who is missing rather than counting provider-days.
-      let missing = model.series.filter { series in
-        series.days.contains { ($0.tokens ?? 0) > 0 && $0.detail == nil }
-      }
-      let complete = missing.filter { series in
-        !series.days.contains { ($0.tokens ?? 0) > 0 && $0.detail != nil }
-      }.map { model.names[$0.provider] ?? $0.provider.displayName }
-      let someDays = missing.map { model.names[$0.provider] ?? $0.provider.displayName }
-        .filter { !complete.contains($0) }
-      var parts: [String] = []
-      if !complete.isEmpty { parts.append(Self.list(complete) + " reports no token types") }
-      if !someDays.isEmpty { parts.append("older days of " + Self.list(someDays) + " have none") }
-      let note = ReserveLabel(
-        parts.joined(separator: "; ") + " · not included",
-        font: ReserveFont.sans(ReserveType.support), color: ReserveColor.subtle)
+    if model.glance.tokenMixIsPartial,
+      let text = Self.tokenCoverageNote(model.series, name: { model.names[$0] ?? $0.displayName })
+    {
+      let note = Self.note(text, width: width)
       note.identifier = NSUserInterfaceItemIdentifier("usage-token-mix-coverage")
       rows.append(note)
     }
@@ -380,9 +367,8 @@ final class DashboardUsagePanel: NSView, ReserveClockUpdating {
     if !model.glance.unattributed.isEmpty {
       let tokens = InsightReport.sum(model.glance.unattributed.map(\.tokens))
       let owners = model.glance.unattributed.compactMap(\.provider).map { model.names[$0] ?? $0.displayName }
-      let note = ReserveLabel(
-        "Plus \(DashboardFormat.tokens(tokens)) tokens with no model name (\(Self.list(owners)))",
-        font: ReserveFont.sans(ReserveType.support), color: ReserveColor.subtle)
+      let note = Self.note(
+        "Plus \(DashboardFormat.tokens(tokens)) tokens with no model name (\(Self.list(owners)))", width: width)
       note.identifier = NSUserInterfaceItemIdentifier("usage-unattributed")
       note.toolTip = "These sources record usage without naming the model, so it is not assigned to one."
       rows.append(note)
@@ -416,6 +402,36 @@ final class DashboardUsagePanel: NSView, ReserveClockUpdating {
       return model.accountOnly ? "\(source) · daily totals" : "\(source) · not read yet"
     }
     return "\(source) · " + DashboardFormat.updated(updated, now: now).lowercased()
+  }
+
+  /// A small explanatory line that wraps instead of truncating.
+  static func note(_ text: String, width: CGFloat) -> ReserveLabel {
+    let label = ReserveLabel(text, font: ReserveFont.sans(ReserveType.support), color: ReserveColor.subtle)
+    label.usesSingleLineMode = false
+    label.cell?.wraps = true
+    label.cell?.isScrollable = false
+    label.lineBreakMode = .byWordWrapping
+    label.maximumNumberOfLines = 3
+    label.preferredMaxLayoutWidth = width
+    label.widthAnchor.constraint(equalToConstant: width).isActive = true
+    return label
+  }
+
+  /// Names the providers whose active days carry no token types, rather than
+  /// counting provider-days. Nil when every active day has them.
+  static func tokenCoverageNote(
+    _ series: [InsightHistorySeries], name: (ProviderID) -> String
+  ) -> String? {
+    let missing = series.filter { $0.days.contains { ($0.tokens ?? 0) > 0 && $0.detail == nil } }
+    guard !missing.isEmpty else { return nil }
+    let never = missing.filter { !$0.days.contains { ($0.tokens ?? 0) > 0 && $0.detail != nil } }
+      .map { name($0.provider) }
+    let older = missing.map { name($0.provider) }.filter { !never.contains($0) }
+    var parts: [String] = []
+    if !never.isEmpty { parts.append(Self.list(never) + (never.count == 1 ? " reports" : " report") + " no token types") }
+    if !older.isEmpty { parts.append("some days of " + Self.list(older) + " have none") }
+    let text = parts.joined(separator: "; ")
+    return text.prefix(1).uppercased() + text.dropFirst() + ". Those tokens are not split here."
   }
 
   static func list(_ names: [String]) -> String {

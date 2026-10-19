@@ -2,7 +2,7 @@
 Last updated: 2026-10-19
 
 ## Now
-- 2026-10-19: "TypeSafe AI API doesn't bring any information, so we should remove it from the providers we support and from the main window. Also, the main window should offer many more information at a glance like we have in Insight … every information you put in there has to be reliable and up to date." In progress on branch t3/richer-main-window-insights, on top of main after PR #71. TypeSafe removal committed.
+- 2026-10-19: "TypeSafe AI API doesn't bring any information, so we should remove it from the providers we support and from the main window. Also, the main window should offer many more information at a glance like we have in Insight … every information you put in there has to be reliable and up to date." Implemented on branch t3/richer-main-window-insights (on top of main after PR #71), not yet pushed or installed: TypeSafe removed (saved keys deleted at launch); popover gains a usage column (Today/7/30 days, API-price estimate only for fully priced providers, trend, provider shares, token mix, cache savings, top models, API consumption); Insights shows only providers/sources with data, one empty state, no dashes or provider-day jargon. 415 unit tests, 43 core self-tests, UI, lifecycle, connections, reliability and stress self-tests pass locally.
 
 ## Next
 

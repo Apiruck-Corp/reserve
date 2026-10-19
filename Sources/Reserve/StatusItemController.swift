@@ -749,6 +749,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       $0.identifier?.rawValue == "provider-card-anthropic"
     }
     let expandedAnthropicDescendants = expandedAnthropic.map { Self.descendants(of: $0) } ?? []
+    let showsUsageColumn = (dashboardController.view as? UsageDashboardView)?.showsUsage == true
+    let singleColumnCardKeepsActivity: Bool = {
+      let narrow = UsageDashboardView(
+        states: self.store.orderedStates.filter { self.store.isEnabled($0.provider) },
+        selectedMenuBarProvider: nil, expandedProvider: .anthropic,
+        isRefreshing: false, now: Date(),
+        actions: DashboardActions(
+          refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
+          openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
+          quit: {}, apiConsumptionReadings: { [] }))
+      narrow.layoutSubtreeIfNeeded()
+      let views = Self.descendants(of: narrow)
+      let ids = Set(views.compactMap { $0.identifier?.rawValue })
+      return !narrow.showsUsage && !ids.contains("usage-panel")
+        && narrow.frame.width == DashboardMetrics.width
+        && views.compactMap { ($0 as? NSTextField)?.stringValue }.contains("Estimated API value")
+        && ids.contains("usage-chart-anthropic")
+    }()
     let detailLayersPresent =
       // Secondary windows stay compact even when details are open.
       expandedAnthropicDescendants.filter {
@@ -758,12 +776,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         ($0.identifier?.rawValue ?? "").hasPrefix("allowance-detail-")
       }.isEmpty
       && expandedLabels.contains { $0.hasSuffix("% left") }
-      // Activity and estimated value.
       && expandedIDs.contains("usage-detail-anthropic")
-      && expandedLabels.contains("Estimated API value")
-      // The history chart lives with the activity numbers.
-      && expandedIDs.contains("usage-chart-anthropic")
-      && expandedLabels.contains { $0.contains("compressed scale") }
+      // Activity is stated once: in the usage column when it is shown, and
+      // otherwise in the card with its chart.
+      && (showsUsageColumn
+        ? expandedIDs.contains("usage-panel")
+          && !expandedLabels.contains("Estimated API value")
+          && !expandedIDs.contains("usage-chart-anthropic")
+        : expandedLabels.contains("Estimated API value")
+          && expandedIDs.contains("usage-chart-anthropic")
+          && expandedLabels.contains { $0.contains("compressed scale") })
+      && singleColumnCardKeepsActivity
       // When the numbers were last checked; the transport name stays out of
       // the card because it means nothing to most people.
       && expandedIDs.contains("usage-checked-anthropic")
