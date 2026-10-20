@@ -152,7 +152,7 @@ import Testing
         arguments: [fixture.script.path, fixture.calls.path, "silent"], environment: ["PATH": "/usr/bin:/bin"])
       defer { process.shutdown() }
       let start = ContinuousClock.now
-      let task = Task { try await process.readQuota(timeout: cancel ? .seconds(10) : .milliseconds(300)) }
+      let task = Task { try await process.readQuota(timeout: cancel ? .seconds(60) : .milliseconds(300)) }
       if cancel {
         try await Task.sleep(for: .milliseconds(100))
         task.cancel()
@@ -163,9 +163,10 @@ import Testing
       } catch {
         #expect(cancel && error is CancellationError)
       }
-      // Well under the 10 s the cancelled case would otherwise wait, with
-      // enough room that a loaded CI runner's scheduling does not fail it.
-      #expect(start.duration(to: .now) < .seconds(8))
+      // Half the 60 s the cancelled case would otherwise wait. A loaded
+      // release runner has taken almost 9 s here, so a tighter bound fails
+      // on scheduling alone.
+      #expect(start.duration(to: .now) < .seconds(30))
     }
   }
 

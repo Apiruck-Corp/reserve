@@ -54,7 +54,7 @@ struct DescriptorBoundReadTests {
     let fifo = root.appendingPathComponent("pipe.jsonl")
     #expect(mkfifo(fifo.path, 0o600) == 0)
 
-    // Run the open off-thread and give it ten seconds. A blocking FIFO open
+    // Run the open off-thread and give it a minute. A blocking FIFO open
     // never returns at all, so a generous bound still catches it while a busy
     // CI runner that is slow to schedule the thread does not fail the test. If
     // it ever blocks, fail and unblock it by opening the write end.
@@ -67,13 +67,13 @@ struct DescriptorBoundReadTests {
       finished.signal()
     }
     let started = Date()
-    if finished.wait(timeout: .now() + 10) == .timedOut {
+    if finished.wait(timeout: .now() + 60) == .timedOut {
       Issue.record("Opening a FIFO blocked")
       let writer = open(fifo.path, O_WRONLY | O_NONBLOCK)
       if writer >= 0 { close(writer) }
       finished.wait()
     }
-    #expect(Date().timeIntervalSince(started) < 10)
+    #expect(Date().timeIntervalSince(started) < 60)
     #expect(outcome.helperRejected)
     #expect(outcome.readerRejected)
   }
@@ -192,7 +192,7 @@ struct DescriptorBoundReadTests {
     let usage = try await scanner.scan(now: now)
     let repeated = try await scanner.scan(now: now)
 
-    #expect(Date().timeIntervalSince(started) < 10)
+    #expect(Date().timeIntervalSince(started) < 60)
     #expect(usage[.anthropic]?.totalTokens == 35)
     #expect(usage[.openAI]?.totalTokens == 0)
     #expect(repeated == usage)
