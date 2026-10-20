@@ -391,9 +391,11 @@ import Testing
     ProviderAccountLabels.set(nil, for: .anthropic)
     // A share card leaves the Mac, so it carries the neutral name only.
     let card = UsageShareCardBuilder.model(
-      provider: Self.team, planName: "Team", windows: [], tokensUsed: nil, tokenPeriodDays: nil,
-      tokensCheckedAt: nil, estimatedAPIEquivalentUSD: nil, generatedAt: Date(), hidingPersonal: false)
-    #expect(card.providerName == "Claude · Account 2")
+      accounts: [UsageShareAccount(
+        provider: Self.team, planName: "Team",
+        windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 10)], checkedAt: nil)],
+      history: nil, usageCheckedAt: nil, options: UsageShareOptions())
+    #expect(card.plans.first?.name == "Claude · Account 2")
     // No local history is scanned for an added account, so it does not
     // promise any.
     #expect(!descriptor.capabilities.contains(.localHistory))

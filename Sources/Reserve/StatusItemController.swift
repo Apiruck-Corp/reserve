@@ -1469,26 +1469,69 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   private var sharePreview: UsageSharePreviewController?
 
-  /// Opens the sanitized card for the selected provider. The model never
-  /// includes account, organization, email, path, or raw error text.
+  /// Opens the sanitized card for every account, starting from the
+  /// dashboard's period. The model never includes account, organization,
+  /// email, path, or raw error text.
   private func shareSelectedUsage() {
-    let provider = self.store.expandedProvider ?? self.store.accounts.first { self.store.isEnabled($0) }
-    guard let provider, let state = self.store.orderedStates.first(where: { $0.provider == provider }) else { return }
-    let usage = state.snapshot?.accountUsage ?? state.localUsage
-    let model = UsageShareCardBuilder.model(
-      provider: provider,
-      planName: state.snapshot?.planName,
-      windows: state.snapshot?.windows ?? [],
-      tokensUsed: usage?.totalTokens,
-      tokenPeriodDays: usage?.periodDays,
-      tokensCheckedAt: usage?.fetchedAt,
-      estimatedAPIEquivalentUSD: usage?.apiEquivalentCostUSD,
-      generatedAt: Date(),
-      hidingPersonal: true,
-      quotaCheckedAt: state.snapshot?.fetchedAt)
-    let preview = UsageSharePreviewController(model: model)
+    let store = self.store
+    let states = store.orderedStates.filter { store.isEnabled($0.provider) }
+    let accounts = states.compactMap { state -> UsageShareAccount? in
+      guard let snapshot = state.snapshot else { return nil }
+      return UsageShareAccount(
+        provider: state.provider, planName: snapshot.planName, windows: snapshot.windows,
+        checkedAt: snapshot.fetchedAt)
+    }
+    var choices: [UsageSharePreviewController.Choice] = []
+    let usageProviders: Set<ProviderID> = Set(UsageShareOptions.periods.flatMap { days -> [ProviderID] in
+      store.accounts.filter { store.isEnabled($0) }
+        .map { store.insightSeries(for: $0, days: days) }
+        .filter { series in series.available && series.days.contains { ($0.tokens ?? 0) > 0 } }.map(\.provider)
+    })
+    // Only accounts with a shareable limit or some usage are offered.
+    for provider in store.accounts where store.isEnabled(provider) {
+      let hasLimits = !UsageShareCardBuilder.model(
+        accounts: accounts, history: nil, usageCheckedAt: nil,
+        options: UsageShareOptions(provider: provider)).plans.isEmpty
+      guard hasLimits || usageProviders.contains(provider) else { continue }
+      choices.append(.init(provider: provider, name: provider.neutralDisplayName))
+    }
+    let preview = UsageSharePreviewController(
+      options: UsageShareOptions(periodDays: store.dashboardUsageDays),
+      choices: choices,
+      build: { [weak store] options in
+        guard let store else {
+          return UsageShareCardBuilder.model(
+            accounts: [], history: nil, usageCheckedAt: nil, options: options)
+        }
+        return Self.shareModel(store: store, accounts: accounts, options: options, now: Date())
+      })
     self.sharePreview = preview
     preview.show()
+  }
+
+  /// The card's history is the dashboard's: published days only, never a scan.
+  static func shareModel(
+    store: UsageStore, accounts: [UsageShareAccount], options: UsageShareOptions, now: Date
+  ) -> UsageShareModel {
+    let days = options.periodDays
+    let sampled = store.accounts.filter { store.isEnabled($0) }
+      .map { store.insightSeries(for: $0, now: now, days: days) }
+      .filter { $0.available && $0.coveredDays > 0 }
+    let history: [InsightReport.Entry]? = store.localHistoryEnabled || !sampled.isEmpty
+      ? sampled.flatMap { series in
+        series.days.map { day in
+          InsightReport.Entry(provider: series.provider, day: CachedUsageDay(
+            day: day.day, tokens: day.tokens, costUSD: day.costUSD,
+            fetchedAt: .distantPast, detail: day.detail))
+        }
+      }
+      : nil
+    let hourlyHistory = days == 1 ? store.insightHourlyHistory(now: now) : [:]
+    let hourly = sampled.filter { $0.origin == .localDevice }.compactMap { hourlyHistory[$0.provider] }
+    let checked = sampled.contains { $0.origin == .localDevice } ? store.localHistoryUpdatedAt : nil
+    return UsageShareCardBuilder.model(
+      accounts: accounts, history: history, hourly: hourly, usageCheckedAt: checked,
+      options: options, now: now)
   }
 
   private func connectProvider(_ provider: ProviderID) {
@@ -1651,31 +1694,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     return self.statusItem.button?.window != nil
   }
 
-  /// The share model drops freeform plan and window text. Rendering the card
-  /// does not touch the system pasteboard or a save panel.
+  /// The share model drops freeform plan, window and model text. Rendering
+  /// the card does not touch the system pasteboard or a save panel.
   private static func shareCardOmitsPersonalText() -> Bool {
     let poison = "ada@example.com Acme /Users/ada/secret.jsonl"
+    let now = Date()
+    let day = InsightHistoryRange.dayKeys(count: 1, now: now)[0]
     let model = UsageShareCardBuilder.model(
-      provider: .anthropic,
-      planName: poison,
-      windows: [UsageWindow(id: poison, label: poison, usedPercent: 10, resetsAt: nil)],
-      tokensUsed: 10,
-      tokenPeriodDays: 30,
-      tokensCheckedAt: nil,
-      estimatedAPIEquivalentUSD: 1,
-      generatedAt: Date(),
-      hidingPersonal: false)
+      accounts: [UsageShareAccount(
+        provider: .anthropic, planName: poison,
+        windows: [UsageWindow(id: poison, label: poison, usedPercent: 10, resetsAt: nil)],
+        checkedAt: nil)],
+      history: [InsightReport.Entry(provider: .anthropic, day: CachedUsageDay(
+        day: day, tokens: 10, costUSD: 1, fetchedAt: now,
+        detail: UsageDayDetail(input: 5, cached: 0, cacheWrite: 0, output: 5, cacheSavingsUSD: nil,
+          unpricedCacheReads: 0, models: [poison: InsightModelUsage(tokens: 10, costUSD: 1)])))],
+      usageCheckedAt: nil,
+      options: UsageShareOptions(periodDays: 1),
+      now: now)
     let text = model.plainText()
     guard !text.contains("ada@"), !text.contains("/Users"), !text.contains("Acme") else { return false }
     let card = UsageShareCardView(model: model)
-    card.layoutSubtreeIfNeeded()
     let height = card.bounds.height
     let worst = Self.worstCaseShareModel()
     let worstHeight = UsageShareCardView.measuredHeight(for: worst)
     let worstCard = UsageShareCardView(model: worst)
     let disclaimerFits = worstCard.bounds.height + 1 >= worstHeight
-      && worst.plainText().contains("Not an actual charge")
-      && worst.plainText().contains("Quota as of")
+      && worst.plainText().contains("not an actual charge")
+      && worst.plainText().contains("Plan limits (as of")
     let board = NSPasteboard(name: NSPasteboard.Name("Reserve.ShareCard.SelfTest"))
     board.clearContents()
     let preview = UsageSharePreviewController(model: worst, pasteboard: board)
@@ -1690,38 +1736,100 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       decoded = false
     }
     let windowFits = (preview.window?.contentRect(forFrameRect: preview.window?.frame ?? .zero).height ?? 0)
-      >= worstHeight + 40
+      >= min(worstHeight, 320) + 40
     return card.accessibilityLabel()?.contains("Estimated API equivalent") == true
       && !((card.accessibilityLabel() ?? "").contains("ada@"))
       && height > 40
       && disclaimerFits
       && copied
-      && copiedText.contains("Not an actual charge")
+      && copiedText.contains("not an actual charge")
       && !copiedText.contains("ada@")
       && decoded
       && windowFits
   }
 
-  /// Six windows, the largest token count, and long reset dates. Used to prove
-  /// the PNG height follows the text instead of a fixed 220pt crop.
-  static func worstCaseShareModel() -> UsageShareModel {
-    let resets = Date(timeIntervalSince1970: 1_900_000_000)
-    let windows = (0..<6).map { index in
-      UsageWindow(
-        id: "weekly-\(index)", label: index == 0 ? "Weekly" : "5 hours",
-        usedPercent: Double(index * 10), windowMinutes: 10_080, resetsAt: resets)
+  /// Two plans and a week of ordinary use: what most cards look like.
+  static func typicalShareModel(now: Date = Date(), days: Int = 7) -> UsageShareModel {
+    let week = 10_080
+    func window(_ id: String, _ label: String, _ used: Double, minutes: Int, resetIn: TimeInterval) -> UsageWindow {
+      UsageWindow(id: id, label: label, usedPercent: used, windowMinutes: minutes,
+        resetsAt: now.addingTimeInterval(resetIn))
+    }
+    let accounts = [
+      UsageShareAccount(provider: .anthropic, planName: "Max 20x", windows: [
+        window("five-hour", "5 hours", 38, minutes: 300, resetIn: 2 * 3_600),
+        window("weekly", "Weekly", 41, minutes: week, resetIn: 3 * 86_400),
+        window("fable", "Fable weekly", 64, minutes: week, resetIn: 3 * 86_400),
+      ], checkedAt: now.addingTimeInterval(-120)),
+      UsageShareAccount(provider: .openAI, planName: "Pro", windows: [
+        window("five-hour", "5 hours", 12, minutes: 300, resetIn: 4 * 3_600),
+        window("weekly", "Weekly", 27, minutes: week, resetIn: 5 * 86_400),
+      ], checkedAt: now.addingTimeInterval(-300)),
+    ]
+    let claudeDaily: [Int64] = [180, 420, 0, 610, 380, 920, 540, 300, 260, 700, 480, 150, 0, 330,
+      510, 640, 220, 410, 880, 360, 290, 470, 530, 0, 610, 720, 340, 450, 590, 400]
+    let codexDaily: [Int64] = [60, 120, 40, 0, 210, 150, 90, 70, 0, 130, 160, 50, 20, 80,
+      140, 100, 0, 190, 120, 60, 90, 110, 70, 40, 150, 130, 80, 60, 100, 120]
+    var history: [InsightReport.Entry] = []
+    for (index, day) in InsightHistoryRange.dayKeys(count: days, now: now).enumerated() {
+      let offset = 30 - days + index
+      let claude = claudeDaily[offset] * 1_000_000
+      let codex = codexDaily[offset] * 1_000_000
+      history.append(InsightReport.Entry(provider: .anthropic, day: CachedUsageDay(
+        day: day, tokens: claude, costUSD: Double(claude) / 1_000_000 * 0.62, fetchedAt: now,
+        detail: UsageDayDetail(input: claude / 50, cached: claude * 86 / 100, cacheWrite: claude / 10,
+          output: claude / 50, cacheSavingsUSD: Double(claude) / 1_000_000 * 3.9, unpricedCacheReads: 0,
+          models: [
+            "claude-opus-5": InsightModelUsage(tokens: claude * 7 / 10, costUSD: Double(claude) / 1_000_000 * 0.5),
+            "claude-sonnet-5": InsightModelUsage(tokens: claude * 2 / 10, costUSD: Double(claude) / 1_000_000 * 0.1),
+            "claude-haiku-5": InsightModelUsage(tokens: claude / 10, costUSD: Double(claude) / 1_000_000 * 0.02),
+          ]))))
+      history.append(InsightReport.Entry(provider: .openAI, day: CachedUsageDay(
+        day: day, tokens: codex, costUSD: Double(codex) / 1_000_000 * 0.41, fetchedAt: now,
+        detail: UsageDayDetail(input: codex / 8, cached: codex * 3 / 4, cacheWrite: 0, output: codex / 8,
+          cacheSavingsUSD: Double(codex) / 1_000_000 * 0.9, unpricedCacheReads: 0,
+          models: ["gpt-5.6-codex": InsightModelUsage(tokens: codex, costUSD: Double(codex) / 1_000_000 * 0.41)]))))
     }
     return UsageShareCardBuilder.model(
-      provider: .anthropic,
-      planName: "Max 20x",
-      windows: windows,
-      tokensUsed: Int64.max,
-      tokenPeriodDays: 90,
-      tokensCheckedAt: resets,
-      estimatedAPIEquivalentUSD: 999_999.99,
-      generatedAt: resets,
-      hidingPersonal: true,
-      quotaCheckedAt: resets)
+      accounts: accounts, history: history, usageCheckedAt: now.addingTimeInterval(-60),
+      options: UsageShareOptions(periodDays: days), now: now)
+  }
+
+  /// Eight accounts with every limit, thirty days of history with several
+  /// providers and models, and the largest numbers. Used to prove the PNG
+  /// height follows the content instead of a fixed crop.
+  static func worstCaseShareModel(now: Date = Date()) -> UsageShareModel {
+    let resets = now.addingTimeInterval(3 * 86_400)
+    let kinds: [ProviderKind] = [.anthropic, .openAI, .grok, .cursor, .copilot, .gemini, .kimi, .zai]
+    let accounts = kinds.map { kind in
+      UsageShareAccount(
+        provider: ProviderID(kind: kind),
+        planName: kind == .anthropic ? "Max 20x" : "Pro",
+        windows: (0..<6).map { index in
+          UsageWindow(
+            id: "weekly-\(index)", label: index == 0 ? "Weekly" : index == 1 ? "Fable weekly" : "5 hours",
+            usedPercent: Double(index * 15), windowMinutes: 10_080, resetsAt: resets)
+        },
+        checkedAt: now)
+    }
+    let models = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "gpt-5.6-sol", "gpt-5.6-codex",
+      "ft:gpt-4o:acme:secret", "grok-code-fast-1"]
+    let history = kinds.prefix(4).flatMap { kind in
+      InsightHistoryRange.dayKeys(count: 30, now: now).enumerated().map { index, day in
+        let tokens = Int64(index + 1) * 40_000_000_000
+        return InsightReport.Entry(provider: ProviderID(kind: kind), day: CachedUsageDay(
+          day: day, tokens: tokens, costUSD: kind == .cursor ? nil : Double(index + 1) * 33_333.33, fetchedAt: now,
+          detail: UsageDayDetail(
+            input: tokens / 10, cached: tokens / 2, cacheWrite: tokens / 5, output: tokens / 5,
+            cacheSavingsUSD: 12_345, unpricedCacheReads: 0,
+            models: Dictionary(uniqueKeysWithValues: models.map {
+              ($0, InsightModelUsage(tokens: tokens / Int64(models.count + 1), costUSD: 1_000))
+            }))))
+      }
+    }
+    return UsageShareCardBuilder.model(
+      accounts: accounts, history: history, usageCheckedAt: now,
+      options: UsageShareOptions(periodDays: 30), now: now)
   }
 
   /// Selecting a provider tile must ask the store for that provider's detail

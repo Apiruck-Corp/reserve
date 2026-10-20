@@ -598,14 +598,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   /// Worst-case share card. Does not open a save panel or the system pasteboard.
   private func renderShareCard(path: String) {
-    let model = StatusItemController.worstCaseShareModel()
+    let typical = CommandLine.arguments.firstIndex(of: "--share-typical")
+    let days = typical.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? Int(CommandLine.arguments[$0 + 1]) : nil } ?? 7
+    let model = typical == nil
+      ? StatusItemController.worstCaseShareModel() : StatusItemController.typicalShareModel(days: days)
     let board = NSPasteboard(name: NSPasteboard.Name("Reserve.ShareCard.Render"))
-    let preview = UsageSharePreviewController(model: model, pasteboard: board)
+    // The typical card opens with its controls, as the menu command does.
+    let preview = typical == nil
+      ? UsageSharePreviewController(model: model, pasteboard: board)
+      : UsageSharePreviewController(
+        options: UsageShareOptions(periodDays: days),
+        choices: [.init(provider: .anthropic, name: "Claude"), .init(provider: .openAI, name: ProviderID.openAI.neutralDisplayName)],
+        build: { StatusItemController.typicalShareModel(days: $0.periodDays) },
+        pasteboard: board)
     let appearanceName = CommandLine.arguments.contains("--appearance")
       && CommandLine.arguments.contains("dark") ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
     let appearance = NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!
     do {
       try preview.renderOpaque(to: URL(fileURLWithPath: path), appearance: appearance)
+      // The exported image itself, beside the preview window, at full height.
+      let cardPath = (path as NSString).deletingPathExtension + "-card.png"
+      try UsageShareCardView.pngData(for: model, appearance: appearance)
+        .write(to: URL(fileURLWithPath: cardPath), options: .atomic)
       let data = try Data(contentsOf: URL(fileURLWithPath: path))
       guard let rep = NSBitmapImageRep(data: data), rep.pixelsHigh > 120, rep.pixelsWide > 100 else {
         Self.finishUISelfTest(success: false, details: "share card PNG did not decode")

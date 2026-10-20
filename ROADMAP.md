@@ -2,6 +2,7 @@
 Last updated: 2026-10-20
 
 ## Now
+- 2026-10-20: "The 'Share usage' feature is very poor. We have tons of data we can use. Redesign it to add any data available. Make sure to keep the output anonymous so it can be shared online." Follow-up the same day: "Make sure that only appear the information that have data. I don't want to see a card full of 0s or Unknown. install a local build once done." Implemented on branch t3/redesign-share-usage, opened as PR #75: the card covers every account's plan limits with pace and forecast, the period's API-price estimate, tokens, active days, peak day/hour, caching savings, a daily (or hourly) chart stacked by provider, provider shares, token mix and top models; the preview gains Today/7/30-day, provider, Limits/API estimate/Models controls and Copy image. Only sections with data appear: a period without usage, an account without a limit, single-provider share rows and "unknown"/"unavailable" wording are left off, and toggles with nothing to add are disabled. Anonymity: neutral account names only, catalog plan names, window and model names kept only when built from public product words. 422 unit tests, 43 core self-tests and the UI self-test pass. Installed locally as 1.10.1 (1059), ad-hoc signed and verified; 1.10.1 (1058) backed up to ~/Test Build Backups. Not yet checked against real account data. "ship it" (2026-10-20): merge PR #75 and release as 1.11.0, release notes in docs/RELEASE_NOTES_1.11.0.md.
 
 ## Next
 

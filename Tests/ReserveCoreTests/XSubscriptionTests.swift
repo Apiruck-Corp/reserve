@@ -80,15 +80,16 @@ struct XSubscriptionTests {
   @Test
   func shareCardKeepsNewTiersAndCursorShare() {
     let model = UsageShareCardBuilder.model(
-      provider: .grok, planName: "Premium",
-      windows: [
-        UsageWindow(id: "usage-pool", label: "Weekly", usedPercent: 40),
-        UsageWindow(id: "product-cursor", label: "Cursor share", usedPercent: 25),
-      ],
-      tokensUsed: nil, tokenPeriodDays: nil, tokensCheckedAt: nil,
-      estimatedAPIEquivalentUSD: nil, generatedAt: Date(), hidingPersonal: false)
-    #expect(model.planName == "Premium")
-    #expect(model.windows.map(\.label) == ["Weekly limit", "Cursor share"])
+      accounts: [UsageShareAccount(
+        provider: .grok, planName: "Premium",
+        windows: [
+          UsageWindow(id: "usage-pool", label: "Weekly", usedPercent: 40),
+          UsageWindow(id: "product-cursor", label: "Cursor share", usedPercent: 25),
+        ],
+        checkedAt: nil)],
+      history: nil, usageCheckedAt: nil, options: UsageShareOptions())
+    #expect(model.plans.first?.planName == "Premium")
+    #expect(model.plans.first?.limits.map(\.label) == ["Weekly limit", "Cursor share"])
   }
 
   @Test
