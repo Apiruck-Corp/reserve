@@ -2,7 +2,7 @@
 Last updated: 2026-10-20
 
 ## Now
-- 2026-10-20: Retry the packaging steps that failed for reasons outside the build ("yes" to the offer after the 1.11.0 release): `hdiutil detach` returning 16 while the volume is busy (release attempt 2 and PR #58's CI) and `xcrun stapler` returning 68 when the connection to Apple's ticket server drops (release attempts 1 and 3). Scripts/package_app.sh now retries detach up to 6 times and staple/validate up to 5 times, doubling the pause; a step that keeps failing still stops the build with its own status. Branch t3/release-step-retries.
+- 2026-10-20: Retry the packaging steps that failed for reasons outside the build ("yes" to the offer after the 1.11.0 release): `hdiutil detach` returning 16 while the volume is busy (release attempt 2 and PR #58's CI) and `xcrun stapler` returning 68 when the connection to Apple's ticket server drops (release attempts 1 and 3). Scripts/package_app.sh now retries detach up to 6 times and staple/validate up to 5 times, doubling the pause; a step that keeps failing still stops the build with its own status. Branch t3/release-step-retries, opened as PR #77.
 
 ## Next
 
