@@ -156,6 +156,37 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Runs a command up to `attempts` times, doubling the pause between tries.
+# Only for steps that fail for reasons outside the build: `hdiutil detach`
+# returns 16 while Finder or Spotlight still holds the volume, and `stapler`
+# returns 68 when the connection to Apple's ticket server drops. A command
+# that keeps failing still stops the build with its own status.
+retry() {
+  local attempts=$1 delay=$2 attempt=1 exit_status
+  shift 2
+  while true; do
+    "$@" && return 0
+    exit_status=$?
+    (( attempt < attempts )) || return $exit_status
+    echo "warning: $1 $2 failed with status $exit_status (attempt $attempt of $attempts); retrying in ${delay}s" >&2
+    sleep "$delay"
+    attempt=$(( attempt + 1 ))
+    delay=$(( delay * 2 ))
+  done
+}
+
+detach_dmg() {
+  retry 6 2 hdiutil detach -quiet "$1"
+}
+
+staple_dmg() {
+  retry 5 10 xcrun stapler staple "$1"
+}
+
+validate_staple() {
+  retry 5 10 xcrun stapler validate "$1"
+}
+
 copy_resource_bundle() {
   local bin_dir=$1
   local bundle="$bin_dir/Reserve_Reserve.bundle"
@@ -364,7 +395,7 @@ APPLESCRIPT
   echo "error: Finder did not save the DMG layout" >&2
   exit 65
 }
-hdiutil detach -quiet "$mount_dir"
+detach_dmg "$mount_dir"
 mounted_dmg=0
 hdiutil convert -quiet "$layout_dmg" -format UDZO -o "$staged_dmg"
 
@@ -376,8 +407,8 @@ if [[ "$mode" == release ]]; then
     --key-id "$api_key_id" \
     --issuer "$api_issuer_id" \
     --wait
-  xcrun stapler staple "$staged_dmg"
-  xcrun stapler validate "$staged_dmg"
+  staple_dmg "$staged_dmg"
+  validate_staple "$staged_dmg"
   spctl --assess --type open --context context:primary-signature \
     --verbose=2 "$staged_dmg"
 fi
@@ -401,7 +432,7 @@ mv "$staged_checksum" "$final_checksum"
 (cd "$output_dir" && shasum -a 256 -c Reserve.dmg.sha256)
 if [[ "$mode" == release ]]; then
   codesign --verify --strict --verbose=2 "$final_dmg"
-  xcrun stapler validate "$final_dmg"
+  validate_staple "$final_dmg"
   spctl --assess --type open --context context:primary-signature \
     --verbose=2 "$final_dmg"
 fi
@@ -432,7 +463,7 @@ if [[ "$mode" == release ]]; then
     --version "$version" --build "$build_number" "$mount_dir/Reserve.app"
   spctl --assess --type execute --verbose=2 "$mount_dir/Reserve.app"
 fi
-hdiutil detach -quiet "$mount_dir"
+detach_dmg "$mount_dir"
 mounted_dmg=0
 
 completed=1
