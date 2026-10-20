@@ -230,34 +230,6 @@ struct APIConsumptionTests {
     }
   }
 
-  @Test
-  func testTypeSafeListsAccountModelsWithoutCallingSystemOne() async throws {
-    let requests = ActorBox<[URLRequest]>([])
-    let client = APIConsumptionClient(
-      requestHandler: { request in
-        await requests.add(request)
-        #expect(request.url?.host == "api.typesafe.ai")
-        #expect(request.url?.path == "/v1/models")
-        #expect(request.httpMethod == "GET" || request.httpMethod == nil)
-        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer ts-test-key-value-16")
-        let body = #"{"models":[{"name":"jev-latest","description":"Current Jev","release_date":"2026-09-01"},{"name":"jev-preview","description":"Preview","release_date":"2026-09-01"}]}"#
-        let response = HTTPURLResponse(
-          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-        return (Data(body.utf8), response)
-      })
-    let snapshot = try await client.fetch(.typeSafe, apiKey: "ts-test-key-value-16")
-    #expect(snapshot.source == "TypeSafe Models API")
-    // A model count is not spend, so it must not occupy a spend field where a
-    // display path would format it as money.
-    #expect(snapshot.windows.isEmpty)
-    #expect(snapshot.primary == nil)
-    #expect(snapshot.note?.headline == "2 models")
-    #expect(snapshot.note?.detail?.contains("jev-latest, jev-preview") == true)
-    #expect(snapshot.note?.detail?.contains("spend unavailable") == true)
-    let paths = await requests.value.compactMap { $0.url?.path }
-    #expect(paths == ["/v1/models"])
-  }
-
   /// The row hands these to the browser, so each has to be an https provider
   /// page and each hint has to show the prefix that page issues.
   /// The cost report returns 7 buckets unless asked otherwise, so a month has to

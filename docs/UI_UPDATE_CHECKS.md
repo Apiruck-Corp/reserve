@@ -2,6 +2,8 @@
 
 Reserve keeps the open dashboard and the visible Settings pane in place when a reading changes. Percentages, status text, the refresh spinner, and the menu-bar sample update on the controls already on screen. A provider or control that appears or disappears rebuilds the affected dashboard region. Theme changes rebuild the dashboard. Settings rebuilds its pane when its controls or appearance change.
 
+The dashboard's usage column is one region. It rebuilds only when what it states changes (period, totals, providers, hours or history freshness) and otherwise leaves its controls alone; its "updated" label follows the minute clock. Showing or hiding the column changes the dashboard's width and rebuilds the dashboard. Each column scrolls on its own when the screen is too short for it.
+
 Store notifications that arrive together become one UI pass on the next turn of the main run loop. That pass reads the store then, so it shows the latest reading. A hidden Settings window or a closed dashboard does not build a new tree until it is shown again. Closing Settings still drops its content view. Closing the dashboard drops the popover's tree.
 
 Typing in a Settings field is left alone. Other rows still take new readings. If the set of controls has to change while a field is being edited, that rebuild waits until editing ends, then runs on the next main-run-loop turn. Unsaved key drafts survive that rebuild.

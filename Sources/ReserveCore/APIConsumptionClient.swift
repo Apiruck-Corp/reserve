@@ -12,7 +12,6 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   case anthropic
   case openRouter
   case xAI
-  case typeSafe
   case deepSeek
   case moonshot
 
@@ -24,7 +23,6 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .anthropic: "Anthropic"
     case .openRouter: "OpenRouter"
     case .xAI: "xAI"
-    case .typeSafe: "TypeSafe"
     case .deepSeek: "DeepSeek"
     case .moonshot: "Moonshot"
     }
@@ -32,7 +30,7 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
 
   /// What kind of key the provider issues. OpenAI and Anthropic admin keys and
   /// xAI management keys read billing and cannot call a model. Ordinary Anthropic,
-  /// OpenRouter, TypeSafe, DeepSeek and Moonshot keys can also call models,
+  /// OpenRouter, DeepSeek and Moonshot keys can also call models,
   /// so a dedicated key is the one to paste.
   public var keyKind: String {
     switch self {
@@ -40,7 +38,6 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .anthropic: "API key"
     case .openRouter: "API key"
     case .xAI: "Management key"
-    case .typeSafe: "API key"
     case .deepSeek: "API key"
     case .moonshot: "API key"
     }
@@ -52,7 +49,6 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .anthropic: "sk-ant-api03-…"
     case .openRouter: "sk-or-…"
     case .xAI: "xai-…"
-    case .typeSafe: "ts-…"
     case .deepSeek: "sk-…"
     case .moonshot: "sk-…"
     }
@@ -66,7 +62,6 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .anthropic: URL(string: "https://platform.claude.com/settings/keys")!
     case .openRouter: URL(string: "https://openrouter.ai/settings/keys")!
     case .xAI: URL(string: "https://console.x.ai/team/default/settings")!
-    case .typeSafe: URL(string: "https://console.typesafe.ai/settings/keys")!
     case .deepSeek: URL(string: "https://platform.deepseek.com/api_keys")!
     case .moonshot: URL(string: "https://platform.kimi.ai/console/api-keys")!
     }
@@ -88,7 +83,6 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .anthropic: "api.anthropic.com"
     case .openRouter: "openrouter.ai"
     case .xAI: "management-api.x.ai"
-    case .typeSafe: "api.typesafe.ai"
     case .deepSeek: "api.deepseek.com"
     // The international platform only, which reports USD. api.moonshot.cn
     // serves China-issued keys in CNY; those keys are not accepted here.
@@ -307,6 +301,10 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
 public enum APIConsumptionKeychain {
   public static let service = "com.pocarles.reserve.api-consumption"
 
+  /// Raw account values of providers Reserve no longer reads: Typeface, an
+  /// earlier mistaken name, and TypeSafe, which publishes no usage or spend.
+  public static let retiredProviderNames = ["typeface", "typeSafe"]
+
   /// The first account of a provider keeps the item name it always had.
   public static func account(for provider: APIAccountID) -> String {
     "api-consumption.\(provider.rawValue)"
@@ -363,24 +361,23 @@ public enum APIConsumptionKeychain {
       try await Self.store(for: provider).delete()
     }
 
-    /// Removes the Typeface item from an earlier mistaken provider name.
-    /// Silent: a locked Keychain must not prompt or hang this cleanup.
-    public static func deleteLegacyTypefaceAccount() {
-      KeychainAccessExecutor.sync { Self.deleteLegacyTypefaceOnExecutor() }
+    /// Removes the Keychain items of retired providers, each named by its raw
+    /// account value ("typeSafe", "typeSafe@1a2b3c4d"). Silent: a locked
+    /// Keychain must not prompt or hang this cleanup.
+    public static func deleteRetiredAccounts(_ rawValues: [String]) async {
+      _ = try? await KeychainAccessExecutor.run {
+        for rawValue in rawValues { Self.deleteRetiredOnExecutor(rawValue) }
+      }
     }
 
-    public static func deleteLegacyTypefaceAccount() async {
-      _ = try? await KeychainAccessExecutor.run { Self.deleteLegacyTypefaceOnExecutor() }
-    }
-
-    private static func deleteLegacyTypefaceOnExecutor() {
+    private static func deleteRetiredOnExecutor(_ rawValue: String) {
       let context = LAContext()
       context.interactionNotAllowed = true
       SecItemDelete(
         [
           kSecClass as String: kSecClassGenericPassword,
           kSecAttrService as String: Self.service,
-          kSecAttrAccount as String: "api-consumption.typeface",
+          kSecAttrAccount as String: "api-consumption.\(rawValue)",
           kSecUseAuthenticationContext as String: context,
         ] as CFDictionary)
     }
@@ -435,7 +432,6 @@ public struct APIConsumptionClient: Sendable {
     case .anthropic: return try await self.fetchAnthropic(key)
     case .openRouter: return try await self.fetchOpenRouter(key)
     case .xAI: return try await self.fetchXAI(key)
-    case .typeSafe: return try await self.fetchTypeSafe(key)
     case .deepSeek: return try await self.fetchDeepSeek(key)
     case .moonshot: return try await self.fetchMoonshot(key)
     }
@@ -840,59 +836,6 @@ public struct APIConsumptionClient: Sendable {
     request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
     let data = try await self.data(for: request, provider: .xAI)
     return try Self.decode(responseType, from: data, provider: .xAI)
-  }
-
-  // MARK: TypeSafe
-
-  /// TypeSafe publishes no spend endpoint. `GET /v1/models` is the documented
-  /// account call: it proves the key and lists the models that key can send.
-  /// Per-request token counts exist only on evaluation responses, which would
-  /// consume the account, so Reserve does not call System One to measure it.
-  private func fetchTypeSafe(_ key: String) async throws -> APIConsumptionSnapshot {
-    let now = self.now()
-    guard let url = URL(string: "https://api.typesafe.ai/v1/models") else {
-      throw UsageProviderError.invalidResponse("TypeSafe models URL could not be formed.")
-    }
-    var request = URLRequest(url: url)
-    request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    let data = try await self.data(for: request, provider: .typeSafe)
-    let page = try Self.decode(TypeSafeModelsPage.self, from: data, provider: .typeSafe)
-    let named = page.models.filter {
-      !($0.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
-    }
-    let names = named.compactMap { $0.name?.trimmingCharacters(in: .whitespacesAndNewlines) }
-    guard !names.isEmpty else {
-      throw UsageProviderError.unavailable("TypeSafe did not return any models for this key.")
-    }
-    // No windows: a model count is not spend, and putting it in a spend field is
-    // how a count ends up rendered as a dollar amount.
-    return APIConsumptionSnapshot(
-      provider: .typeSafe,
-      windows: [],
-      note: APIConsumptionNote(
-        headline: names.count == 1 ? "1 model" : "\(names.count) models",
-        detail: names.prefix(4).joined(separator: ", ") + " · spend unavailable"),
-      fetchedAt: now,
-      source: "TypeSafe Models API",
-      // Published facts are explicitly separate from this key's live metadata.
-      // Source: https://docs.typesafe.ai/models (checked 2026-10-18).
-      details: [
-        UsageDetail("Spend and balance", "Not exposed by the documented API"),
-        UsageDetail("Published price", "$0.042 per million input tokens · output free (docs, 18 Oct 2026)"),
-        UsageDetail("Default context (docs)", "64k tokens per request · 32k per question"),
-        UsageDetail("Rate limits", "Organization-specific · see TypeSafe console"),
-      ] + named.prefix((UsageDetail.maximumCount - 4) / 2).flatMap { model in
-        let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let released = UsageDateParser.iso8601(model.releaseDate)
-          ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
-        var facts = [UsageDetail(
-          name, released.map { "Released \(UsageDetailFormat.date($0))" } ?? "Available")]
-        if let description = model.description?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty {
-          facts.append(UsageDetail("\(name) description", description))
-        }
-        return facts
-      })
   }
 
   // MARK: DeepSeek
@@ -1554,31 +1497,6 @@ private struct AnthropicModelsPage: Decodable {
   let data: [Model]
 }
 
-private struct TypeSafeModelsPage: Decodable {
-  let models: [TypeSafeModel]
-
-  init(from decoder: Decoder) throws {
-    if let array = try? decoder.singleValueContainer().decode([TypeSafeModel].self) {
-      self.models = array
-      return
-    }
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    self.models = try container.decodeIfPresent([TypeSafeModel].self, forKey: .models) ?? []
-  }
-
-  enum CodingKeys: String, CodingKey { case models }
-}
-
-private struct TypeSafeModel: Decodable {
-  let name: String?
-  let description: String?
-  let releaseDate: String?
-
-  enum CodingKeys: String, CodingKey {
-    case name, description
-    case releaseDate = "release_date"
-  }
-}
 
 private struct DeepSeekBalance: Decodable {
   struct Info: Decodable {

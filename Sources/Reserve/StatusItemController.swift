@@ -493,7 +493,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       !hasScrollView
       || abs(size.height - DashboardMetrics.availableHeight(on: NSScreen.main)) <= 1
     let dashboardFits =
-      size.width == DashboardMetrics.width
+      size.width == DashboardMetrics.width(
+        showsUsage: (dashboardController.view as? UsageDashboardView)?.showsUsage ?? false)
       && size.height >= DashboardMetrics.minimumHeight
       && size.height <= DashboardMetrics.availableHeight(on: NSScreen.main)
     // Four rows of tiles plus the selected detail exceed a small display's
@@ -748,6 +749,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       $0.identifier?.rawValue == "provider-card-anthropic"
     }
     let expandedAnthropicDescendants = expandedAnthropic.map { Self.descendants(of: $0) } ?? []
+    let showsUsageColumn = (dashboardController.view as? UsageDashboardView)?.showsUsage == true
+    let singleColumnCardKeepsActivity: Bool = {
+      let narrow = UsageDashboardView(
+        states: self.store.orderedStates.filter { self.store.isEnabled($0.provider) },
+        selectedMenuBarProvider: nil, expandedProvider: .anthropic,
+        isRefreshing: false, now: Date(),
+        actions: DashboardActions(
+          refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
+          openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
+          quit: {}, apiConsumptionReadings: { [] }))
+      narrow.layoutSubtreeIfNeeded()
+      let views = Self.descendants(of: narrow)
+      let ids = Set(views.compactMap { $0.identifier?.rawValue })
+      return !narrow.showsUsage && !ids.contains("usage-panel")
+        && narrow.frame.width == DashboardMetrics.width
+        && views.compactMap { ($0 as? NSTextField)?.stringValue }.contains("Estimated API value")
+        && ids.contains("usage-chart-anthropic")
+    }()
     let detailLayersPresent =
       // Secondary windows stay compact even when details are open.
       expandedAnthropicDescendants.filter {
@@ -757,12 +776,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         ($0.identifier?.rawValue ?? "").hasPrefix("allowance-detail-")
       }.isEmpty
       && expandedLabels.contains { $0.hasSuffix("% left") }
-      // Activity and estimated value.
       && expandedIDs.contains("usage-detail-anthropic")
-      && expandedLabels.contains("Estimated API value")
-      // The history chart lives with the activity numbers.
-      && expandedIDs.contains("usage-chart-anthropic")
-      && expandedLabels.contains { $0.contains("compressed scale") }
+      // Activity is stated once: in the usage column when it is shown, and
+      // otherwise in the card with its chart.
+      && (showsUsageColumn
+        ? expandedIDs.contains("usage-panel")
+          && !expandedLabels.contains("Estimated API value")
+          && !expandedIDs.contains("usage-chart-anthropic")
+        : expandedLabels.contains("Estimated API value")
+          && expandedIDs.contains("usage-chart-anthropic")
+          && expandedLabels.contains { $0.contains("compressed scale") })
+      && singleColumnCardKeepsActivity
       // When the numbers were last checked; the transport name stays out of
       // the card because it means nothing to most people.
       && expandedIDs.contains("usage-checked-anthropic")
@@ -1067,6 +1091,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     if let selected = self.store.expandedProvider {
       self.store.requestInsights(for: selected)
     }
+    self.store.dashboardVisible = true
+    self.store.requestDashboardUsage()
     // A reopened surface has to come back in the current appearance, so this is
     // applied before the content is built rather than after it is on screen.
     self.applyAppearance()
@@ -1093,6 +1119,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   func popoverDidClose(_ notification: Notification) {
+    self.store.dashboardVisible = false
     // Levels only order Settings against the open popover. Afterwards it is an
     // ordinary window again, free to go behind the next app that is clicked.
     self.settingsWindow?.level = .normal
@@ -1509,7 +1536,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           self.store.hidesPersonalInfo.toggle()
           self.expandDashboard()
         },
-        hidesPersonalInfo: { [weak self] in self?.store.hidesPersonalInfo ?? false }))
+        hidesPersonalInfo: { [weak self] in self?.store.hidesPersonalInfo ?? false },
+        usage: { [weak self] in self?.store.dashboardUsage() },
+        selectUsagePeriod: { [weak self] days in self?.store.dashboardUsageDays = days }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
@@ -1746,11 +1775,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         UsageDetail("Key", "laptop"), UsageDetail("All time", "$40.50"),
         UsageDetail("Credit limit", "$20.00 · resets monthly"),
       ])
-    let typeSafe = APIConsumptionSnapshot(
-      provider: .typeSafe, windows: [],
-      note: APIConsumptionNote(headline: "2 models", detail: "jev-latest, jev-preview"),
-      fetchedAt: now, source: "self-test",
-      details: [UsageDetail("jev-latest", "Flagship System One model")])
     // Balance providers report what is left, so they arrive as a note.
     let deepSeek = APIConsumptionSnapshot(
       provider: .deepSeek, windows: [],
@@ -1774,8 +1798,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         error: "xAI refused this management key. Check that it has billing read access.",
         isRefreshing: false, isExpanded: true),
       APIConsumptionReading(
-        provider: .typeSafe, snapshot: typeSafe, error: nil, isRefreshing: false),
-      APIConsumptionReading(
         provider: .deepSeek, snapshot: deepSeek, error: nil, isRefreshing: false,
         isExpanded: true),
       APIConsumptionReading(
@@ -1791,10 +1813,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let identifiers = Self.descendants(of: view).compactMap { $0.identifier?.rawValue }
     return identifiers.filter { $0 == "api-detail-openRouter" }.count == 3
       && identifiers.filter { $0 == "api-detail-xAI" }.count == 1
-      && !identifiers.contains("api-detail-typeSafe")
       && identifiers.filter { $0 == "api-detail-deepSeek" }.count == 3
       && !identifiers.contains("api-detail-moonshot")
-      && ["openRouter", "xAI", "typeSafe", "deepSeek", "moonshot"].allSatisfy {
+      && ["openRouter", "xAI", "deepSeek", "moonshot"].allSatisfy {
         identifiers.contains("disclose-api-\($0)")
       }
   }

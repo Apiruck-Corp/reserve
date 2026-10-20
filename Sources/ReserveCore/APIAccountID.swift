@@ -50,7 +50,6 @@ public struct APIAccountID: Hashable, Codable, Sendable, Identifiable, RawRepres
   public static let anthropic = APIAccountID(provider: .anthropic)
   public static let openRouter = APIAccountID(provider: .openRouter)
   public static let xAI = APIAccountID(provider: .xAI)
-  public static let typeSafe = APIAccountID(provider: .typeSafe)
   public static let deepSeek = APIAccountID(provider: .deepSeek)
   public static let moonshot = APIAccountID(provider: .moonshot)
 

@@ -360,6 +360,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       Self.finishUISelfTest(success: false, details: "dashboard controller was not created")
       return
     }
+    if CommandLine.arguments.contains("--usage-preview"), let store = self.store {
+      Self.publishPreviewHistory(store: store)
+      if let index = CommandLine.arguments.firstIndex(of: "--usage-days"),
+        CommandLine.arguments.indices.contains(index + 1), let days = Int(CommandLine.arguments[index + 1])
+      {
+        store.dashboardUsageDays = days
+      }
+    }
     do {
       try statusController.renderDashboard(to: URL(fileURLWithPath: path))
       Self.finishUISelfTest(success: true, details: "dashboard rendered to \(path)")
@@ -617,6 +625,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       Self.finishUISelfTest(success: false, details: "settings controller was not created")
       return
     }
+    Self.publishPreviewHistory(store: store)
+    let rangeIndex = CommandLine.arguments.firstIndex(of: "--insights-days")
+    let requested = rangeIndex.flatMap { index in
+      CommandLine.arguments.indices.contains(index + 1)
+        ? Int(CommandLine.arguments[index + 1]) : nil
+    }
+    store.insightHistoryDays = requested.flatMap { [1, 7, 30, 90].contains($0) ? $0 : nil } ?? 30
+    let appearanceName = CommandLine.arguments.contains("dark")
+      ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
+    do {
+      try settings.renderInsightsOpaque(
+        to: URL(fileURLWithPath: path),
+        appearance: NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!,
+        metric: CommandLine.arguments.contains("--insights-cost") ? .cost
+          : CommandLine.arguments.contains("--insights-limits") ? .limits : .tokens)
+      Self.finishUISelfTest(success: true, details: "opaque insights rendered to \(path)")
+    } catch {
+      Self.finishUISelfTest(success: false, details: "opaque insights render failed: \(error)")
+    }
+  }
+
+  /// Synthetic published history for offscreen renders: 90 days for OpenAI,
+  /// Claude and Grok (Grok with gaps, older days without token types, one
+  /// unpriced day) and today's hours for OpenAI and Claude.
+  static func publishPreviewHistory(store: UsageStore) {
     let now = Date()
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
@@ -664,24 +697,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       hourly[provider] = HourlyUsageHistory(provider: provider, dayStart: starts[0], observedAt: now, hours: points)
     }
     if !CommandLine.arguments.contains("--insights-no-hourly") { store.publishHourlyHistoryForTesting(hourly) }
-    let rangeIndex = CommandLine.arguments.firstIndex(of: "--insights-days")
-    let requested = rangeIndex.flatMap { index in
-      CommandLine.arguments.indices.contains(index + 1)
-        ? Int(CommandLine.arguments[index + 1]) : nil
-    }
-    store.insightHistoryDays = requested.flatMap { [1, 7, 30, 90].contains($0) ? $0 : nil } ?? 30
-    let appearanceName = CommandLine.arguments.contains("dark")
-      ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
-    do {
-      try settings.renderInsightsOpaque(
-        to: URL(fileURLWithPath: path),
-        appearance: NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!,
-        metric: CommandLine.arguments.contains("--insights-cost") ? .cost
-          : CommandLine.arguments.contains("--insights-limits") ? .limits : .tokens)
-      Self.finishUISelfTest(success: true, details: "opaque insights rendered to \(path)")
-    } catch {
-      Self.finishUISelfTest(success: false, details: "opaque insights render failed: \(error)")
-    }
   }
 
   private func renderAlerts(path: String) {
