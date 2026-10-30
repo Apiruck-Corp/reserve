@@ -378,25 +378,33 @@ public enum BinaryLocator {
   /// An npm install of Codex, Claude Code or Copilot is a `#!/usr/bin/env node`
   /// script. Opened from the Dock, Reserve's `PATH` is only the system folders,
   /// which hold no Node, so the helper died before answering and the card could
-  /// only offer Try again. Package managers put Node beside the script (Homebrew,
-  /// `~/.local/bin`) or beside the file a link points to (nvm), so both folders
-  /// are added, then the install prefixes `find` already trusts. They go after
-  /// the inherited entries: a terminal launch keeps the user's own order.
+  /// only offer Try again. Package managers keep Node in the folder that holds
+  /// the helper's link: Homebrew and `~/.local/bin` beside the candidate, nvm
+  /// beside its own `bin/codex` link, which a link in `~/.local/bin` may point
+  /// to. So every folder along the link chain is added, one hop at a time.
+  /// `validateExecutable` already checked each of them, so this trusts nothing
+  /// new. They go after the inherited entries, which stay exactly as they were,
+  /// so a terminal launch keeps the user's own order.
   public static func environment(
     _ environment: [String: String], launching executable: String
   ) -> [String: String] {
-    var result = environment
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let executableURL = URL(fileURLWithPath: executable)
-    let additions = [
-      executableURL.deletingLastPathComponent().path,
-      executableURL.resolvingSymlinksInPath().deletingLastPathComponent().path,
-    ] + Self.preferredDirectories(home: home)
-    var entries = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-    for directory in additions where directory.hasPrefix("/") && !entries.contains(directory) {
-      entries.append(directory)
+    // Plain joins, not standardized paths: Foundation's standardizing turns
+    // `/private/var` into `/var`, which is not the folder the kernel follows.
+    var directories: [String] = []
+    var path = executable
+    for _ in 0...Self.maximumSymlinkExpansions {
+      let directory = (path as NSString).deletingLastPathComponent
+      if !directories.contains(directory) { directories.append(directory) }
+      guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: path)
+      else { break }
+      path = target.hasPrefix("/") ? target : (directory as NSString).appendingPathComponent(target)
     }
-    result["PATH"] = entries.joined(separator: ":")
+    let inherited = environment["PATH"] ?? ""
+    let present = Set(inherited.split(separator: ":").map(String.init))
+    let additions = directories.filter { $0.hasPrefix("/") && !present.contains($0) }
+    guard !additions.isEmpty else { return environment }
+    var result = environment
+    result["PATH"] = ([inherited].filter { !$0.isEmpty } + additions).joined(separator: ":")
     return result
   }
 }

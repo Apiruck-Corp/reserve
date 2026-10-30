@@ -79,13 +79,15 @@ struct OpenAIProviderFallbackTests {
     #expect(snapshot.windows.map(\.usedPercent) == [42])
   }
 
-  /// nvm and similar managers put Node beside the real script, which a link
-  /// in another folder (such as `~/.local/bin`) points to.
+  /// nvm keeps Node beside its `bin/codex` link, which points on to the real
+  /// script elsewhere; a link in another folder (such as `~/.local/bin`) may
+  /// point to that link.
   @Test func linkedNpmInstallFindsTheNodeBesideItsTarget() async throws {
     let sandbox = try BinaryLocatorTrustTests.Sandbox()
     _ = try script(Self.workingHelper, at: "nvm/bin/node", in: sandbox)
-    let target = try script(Self.nodeScriptHelper, at: "nvm/bin/codex", in: sandbox)
-    try sandbox.link("links/codex", to: target)
+    _ = try script(Self.nodeScriptHelper, at: "nvm/lib/node_modules/codex/bin/codex.js", in: sandbox)
+    try sandbox.link("nvm/bin/codex", to: "../lib/node_modules/codex/bin/codex.js")
+    try sandbox.link("links/codex", to: sandbox.path("nvm/bin/codex"))
     let link = sandbox.path("links/codex")
     let provider = OpenAIProvider(
       environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], executableLocator: { _ in [link] })
@@ -93,6 +95,18 @@ struct OpenAIProviderFallbackTests {
     let snapshot = try await provider.fetch()
 
     #expect(snapshot.windows.map(\.usedPercent) == [42])
+  }
+
+  /// A terminal launch already has the user's PATH; it must stay first, as is.
+  @Test func helperFoldersComeAfterTheInheritedPath() throws {
+    let sandbox = try BinaryLocatorTrustTests.Sandbox()
+    let codex = try script(Self.nodeScriptHelper, at: "local/bin/codex", in: sandbox)
+    let inherited = "/custom/node/bin::/usr/bin:\(sandbox.path("local/bin"))"
+
+    #expect(BinaryLocator.environment(["PATH": inherited], launching: codex)["PATH"] == inherited)
+    #expect(
+      BinaryLocator.environment(["PATH": "/custom/node/bin:/usr/bin"], launching: codex)["PATH"]
+        == "/custom/node/bin:/usr/bin:\(sandbox.path("local/bin"))")
   }
 
   @Test func noInstallIsReportedAsMissing() async {
