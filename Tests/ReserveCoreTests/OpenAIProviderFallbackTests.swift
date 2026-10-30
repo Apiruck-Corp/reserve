@@ -59,6 +59,42 @@ struct OpenAIProviderFallbackTests {
     await #expect(throws: UsageProviderError.self) { try await provider.fetch() }
   }
 
+  /// An npm install of Codex is a `#!/usr/bin/env node` script. Opened from the
+  /// Dock, Reserve's PATH is only the system folders, which hold no Node, so
+  /// the helper must still find the Node installed beside it.
+  static let nodeScriptHelper = """
+    #!/usr/bin/env node
+    require('../lib/codex.js')
+    """
+
+  @Test func npmInstallFindsTheNodeBesideIt() async throws {
+    let sandbox = try BinaryLocatorTrustTests.Sandbox()
+    _ = try script(Self.workingHelper, at: "local/bin/node", in: sandbox)
+    let codex = try script(Self.nodeScriptHelper, at: "local/bin/codex", in: sandbox)
+    let provider = OpenAIProvider(
+      environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], executableLocator: { _ in [codex] })
+
+    let snapshot = try await provider.fetch()
+
+    #expect(snapshot.windows.map(\.usedPercent) == [42])
+  }
+
+  /// nvm and similar managers put Node beside the real script, which a link
+  /// in another folder (such as `~/.local/bin`) points to.
+  @Test func linkedNpmInstallFindsTheNodeBesideItsTarget() async throws {
+    let sandbox = try BinaryLocatorTrustTests.Sandbox()
+    _ = try script(Self.workingHelper, at: "nvm/bin/node", in: sandbox)
+    let target = try script(Self.nodeScriptHelper, at: "nvm/bin/codex", in: sandbox)
+    try sandbox.link("links/codex", to: target)
+    let link = sandbox.path("links/codex")
+    let provider = OpenAIProvider(
+      environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], executableLocator: { _ in [link] })
+
+    let snapshot = try await provider.fetch()
+
+    #expect(snapshot.windows.map(\.usedPercent) == [42])
+  }
+
   @Test func noInstallIsReportedAsMissing() async {
     let provider = OpenAIProvider(environment: [:], executableLocator: { _ in [] })
     do {
