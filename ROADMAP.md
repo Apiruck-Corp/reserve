@@ -2,7 +2,7 @@
 Last updated: 2026-10-30
 
 ## Now
-- 2026-10-30: "I've installed Reserve on this MBA, and the experience was not great nor easy to connect Codex. How can we improve it?" Cause (proven 2026-10-29): the npm Codex is a `#!/usr/bin/env node` script, and Reserve opened from the Dock has no Node on its PATH, so both the usage read and Connect's `codex login` died with `env: node: No such file or directory`. Fix: launch helpers with the folders beside the helper (and its link target) added to PATH. Branch t3/codex-node-helper.
+- 2026-10-30: "I've installed Reserve on this MBA, and the experience was not great nor easy to connect Codex. How can we improve it?" Cause (proven 2026-10-29): the npm Codex is a `#!/usr/bin/env node` script, and Reserve opened from the Dock has no Node on its PATH, so both the usage read and Connect's `codex login` died with `env: node: No such file or directory`. Fix: launch Codex, Claude Code and Copilot helpers with every folder along the helper's link chain appended to PATH (the folders Reserve already checks), so Node is found; the user's own PATH stays first. Used for the usage read, Connect's sign-in, helper updates and Claude renewal. 425 unit tests and 43 self-tests pass; the fixed probe read the real Pro plan from the npm Codex under the Dock PATH. Codex audit: 2 rounds, all findings fixed or declined. Branch t3/codex-node-helper, PR open, not merged or installed.
 
 ## Next
 
