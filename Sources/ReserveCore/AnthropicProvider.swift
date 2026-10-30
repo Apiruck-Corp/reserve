@@ -1006,8 +1006,9 @@ actor ClaudeSessionRenewer {
     // rather than a command the user typed. The allowlisted environment leaves
     // out unrelated API keys along with any browser handoff or Reserve login
     // pipe, no stdin is inherited, and the output is never read.
-    var childEnvironment = BinaryLocator.minimalChildEnvironment(
-      from: environment, keeping: ["CLAUDE_CONFIG_DIR"])
+    var childEnvironment = BinaryLocator.environment(
+      BinaryLocator.minimalChildEnvironment(from: environment, keeping: ["CLAUDE_CONFIG_DIR"]),
+      launching: executable)
     childEnvironment["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"] = refreshToken
     childEnvironment["CLAUDE_CODE_OAUTH_SCOPES"] =
       (scopes?.isEmpty == false ? scopes! : Self.defaultScopes).joined(separator: " ")

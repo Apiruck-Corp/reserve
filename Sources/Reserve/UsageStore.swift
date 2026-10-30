@@ -1733,7 +1733,8 @@ final class UsageStore {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = commandOverride?.arguments ?? configuration.arguments
-    process.environment = BinaryLocator.childEnvironment()
+    process.environment = BinaryLocator.environment(
+      BinaryLocator.childEnvironment(), launching: executable)
     if provider == .cursor {
       // Cursor documents this switch so the host app owns the browser handoff.
       process.environment?["NO_OPEN_BROWSER"] = "1"

@@ -20,7 +20,8 @@ public struct CopilotProvider: UsageProvider {
       }
       let rpc = try CopilotQuotaProcess(
         executable: executable, arguments: Self.runtimeArguments,
-        environment: Self.childEnvironment(environment))
+        environment: BinaryLocator.environment(
+          Self.childEnvironment(environment), launching: executable))
       defer { rpc.shutdown() }
       return try await rpc.readQuota()
     }

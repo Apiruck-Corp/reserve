@@ -372,4 +372,39 @@ public enum BinaryLocator {
       !key.hasPrefix("DYLD_") && !key.hasPrefix("LD_") && key != "LD_PRELOAD"
     }
   }
+
+  /// `environment` with `PATH` extended so a script helper finds its interpreter.
+  ///
+  /// An npm install of Codex, Claude Code or Copilot is a `#!/usr/bin/env node`
+  /// script. Opened from the Dock, Reserve's `PATH` is only the system folders,
+  /// which hold no Node, so the helper died before answering and the card could
+  /// only offer Try again. Package managers keep Node in the folder that holds
+  /// the helper's link: Homebrew and `~/.local/bin` beside the candidate, nvm
+  /// beside its own `bin/codex` link, which a link in `~/.local/bin` may point
+  /// to. So every folder along the link chain is added, one hop at a time.
+  /// `validateExecutable` already checked each of them, so this trusts nothing
+  /// new. They go after the inherited entries, which stay exactly as they were,
+  /// so a terminal launch keeps the user's own order.
+  public static func environment(
+    _ environment: [String: String], launching executable: String
+  ) -> [String: String] {
+    // Plain joins, not standardized paths: Foundation's standardizing turns
+    // `/private/var` into `/var`, which is not the folder the kernel follows.
+    var directories: [String] = []
+    var path = executable
+    for _ in 0...Self.maximumSymlinkExpansions {
+      let directory = (path as NSString).deletingLastPathComponent
+      if !directories.contains(directory) { directories.append(directory) }
+      guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: path)
+      else { break }
+      path = target.hasPrefix("/") ? target : (directory as NSString).appendingPathComponent(target)
+    }
+    let inherited = environment["PATH"] ?? ""
+    let present = Set(inherited.split(separator: ":").map(String.init))
+    let additions = directories.filter { $0.hasPrefix("/") && !present.contains($0) }
+    guard !additions.isEmpty else { return environment }
+    var result = environment
+    result["PATH"] = ([inherited].filter { !$0.isEmpty } + additions).joined(separator: ":")
+    return result
+  }
 }
