@@ -105,8 +105,8 @@ struct OpenAIProviderFallbackTests {
 
     #expect(BinaryLocator.environment(["PATH": inherited], launching: codex)["PATH"] == inherited)
     #expect(
-      BinaryLocator.environment(["PATH": "/custom/node/bin:/usr/bin"], launching: codex)["PATH"]
-        == "/custom/node/bin:/usr/bin:\(sandbox.path("local/bin"))")
+      BinaryLocator.environment(["PATH": "/custom/node/bin::/usr/bin"], launching: codex)["PATH"]
+        == "/custom/node/bin::/usr/bin:\(sandbox.path("local/bin"))")
   }
 
   @Test func noInstallIsReportedAsMissing() async {
