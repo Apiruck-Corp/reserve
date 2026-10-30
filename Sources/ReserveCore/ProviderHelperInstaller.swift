@@ -127,7 +127,7 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
       _ = try await ProcessRunner.output(
         executable: executable,
         arguments: definition.updateArguments,
-        environment: Self.installerEnvironment(),
+        environment: BinaryLocator.environment(Self.installerEnvironment(), launching: executable),
         timeout: .seconds(180))
     } catch {
       throw ProviderHelperInstallerError.installFailed(

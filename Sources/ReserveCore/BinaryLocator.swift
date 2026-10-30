@@ -372,4 +372,31 @@ public enum BinaryLocator {
       !key.hasPrefix("DYLD_") && !key.hasPrefix("LD_") && key != "LD_PRELOAD"
     }
   }
+
+  /// `environment` with `PATH` extended so a script helper finds its interpreter.
+  ///
+  /// An npm install of Codex, Claude Code or Copilot is a `#!/usr/bin/env node`
+  /// script. Opened from the Dock, Reserve's `PATH` is only the system folders,
+  /// which hold no Node, so the helper died before answering and the card could
+  /// only offer Try again. Package managers put Node beside the script (Homebrew,
+  /// `~/.local/bin`) or beside the file a link points to (nvm), so both folders
+  /// are added, then the install prefixes `find` already trusts. They go after
+  /// the inherited entries: a terminal launch keeps the user's own order.
+  public static func environment(
+    _ environment: [String: String], launching executable: String
+  ) -> [String: String] {
+    var result = environment
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let executableURL = URL(fileURLWithPath: executable)
+    let additions = [
+      executableURL.deletingLastPathComponent().path,
+      executableURL.resolvingSymlinksInPath().deletingLastPathComponent().path,
+    ] + Self.preferredDirectories(home: home)
+    var entries = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+    for directory in additions where directory.hasPrefix("/") && !entries.contains(directory) {
+      entries.append(directory)
+    }
+    result["PATH"] = entries.joined(separator: ":")
+    return result
+  }
 }

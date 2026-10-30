@@ -1,7 +1,8 @@
 # Roadmap
-Last updated: 2026-10-20
+Last updated: 2026-10-30
 
 ## Now
+- 2026-10-30: "I've installed Reserve on this MBA, and the experience was not great nor easy to connect Codex. How can we improve it?" Cause (proven 2026-10-29): the npm Codex is a `#!/usr/bin/env node` script, and Reserve opened from the Dock has no Node on its PATH, so both the usage read and Connect's `codex login` died with `env: node: No such file or directory`. Fix: launch helpers with the folders beside the helper (and its link target) added to PATH. Branch t3/codex-node-helper.
 
 ## Next
 

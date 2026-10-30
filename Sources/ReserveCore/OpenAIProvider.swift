@@ -79,7 +79,8 @@ public struct OpenAIProvider: UsageProvider {
         let rpc = try JSONRPCProcess(
           executable: executable,
           arguments: Self.appServerArguments,
-          environment: BinaryLocator.childEnvironment(self.environment))
+          environment: BinaryLocator.environment(
+            BinaryLocator.childEnvironment(self.environment), launching: executable))
         started = rpc
         _ = try await rpc.request(
           method: "initialize",
