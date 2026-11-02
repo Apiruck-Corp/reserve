@@ -1,7 +1,8 @@
 # Roadmap
-Last updated: 2026-10-30
+Last updated: 2026-11-02
 
 ## Now
+- 2026-11-02: "I want Reserve to give me accurate data", including Claude usage done inside T3 Code. Limits were already right (read from Anthropic). Fix: token history is now split per Claude account by folder: `~/.claude` counts toward the first card once its sign-in matches the organization that card verified, each added account counts its own folder, and other Claude folders on this Mac (such as T3 Code's `~/.claude_nimbus_team`) count toward the account signed in as the same person in the same organization. Each folder is counted once; history already recorded is kept. The status-line receiver writes each reading to the cache of the account the running session belongs to, never to another account's. Branch agent/claude-history-per-account; full stop at a ready PR (no merge, release or install).
 - 2026-10-30: "I've installed Reserve on this MBA, and the experience was not great nor easy to connect Codex. How can we improve it?" Cause (proven 2026-10-29): the npm Codex is a `#!/usr/bin/env node` script, and Reserve opened from the Dock has no Node on its PATH, so both the usage read and Connect's `codex login` died with `env: node: No such file or directory`. Fix: launch Codex, Claude Code and Copilot helpers with every folder along the helper's link chain appended to PATH (the folders Reserve already checks), so Node is found; the user's own PATH stays first. Used for the usage read, Connect's sign-in, helper updates and Claude renewal. 425 unit tests and 43 self-tests pass; the fixed probe read the real Pro plan from the npm Codex under the Dock PATH. Codex audit: 2 rounds, all findings fixed or declined. Branch t3/codex-node-helper, PR #78. "ship it" (2026-10-30): merge PR #78 and release as 1.11.1, release notes in docs/RELEASE_NOTES_1.11.1.md.
 
 ## Next

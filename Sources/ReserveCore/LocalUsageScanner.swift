@@ -115,8 +115,8 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     let normalizedCacheWrite = max(0, cacheWriteInputTokens)
     let normalizedOutput = max(0, outputTokens)
     let fallbackTokens = saturatingNonnegativeSum(
-      normalizedInput, provider == .anthropic || provider == .cursor ? normalizedCached : 0,
-      provider == .openAI ? 0 : normalizedCacheWrite, normalizedOutput)
+      normalizedInput, provider.kind == .anthropic || provider.kind == .cursor ? normalizedCached : 0,
+      provider.kind == .openAI ? 0 : normalizedCacheWrite, normalizedOutput)
     self.provider = provider
     self.periodDays = periodDays
     self.inputTokens = normalizedInput
@@ -150,7 +150,7 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     let input = max(0, self.inputTokens)
     let cached = max(0, self.cachedInputTokens)
     let writes = max(0, self.cacheWriteInputTokens)
-    if self.provider == .openAI {
+    if self.provider.kind == .openAI {
       let cachedSubset = min(cached, input)
       let remaining = saturatingNonnegativeSubtract(input, cachedSubset)
       let writeSubset = min(writes, remaining)
@@ -184,8 +184,8 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     // again counts those tokens twice. Anthropic and Cursor report them apart.
     saturatingNonnegativeSum(
       self.inputTokens,
-      self.provider == .anthropic || self.provider == .cursor ? self.cachedInputTokens : 0,
-      self.provider == .openAI ? 0 : self.cacheWriteInputTokens, self.outputTokens)
+      self.provider.kind == .anthropic || self.provider.kind == .cursor ? self.cachedInputTokens : 0,
+      self.provider.kind == .openAI ? 0 : self.cacheWriteInputTokens, self.outputTokens)
   }
 }
 
@@ -353,6 +353,13 @@ public actor LocalUsageScanner {
   }
 
   private let roots: Roots
+  /// Each Claude `projects` folder is scanned, watched, pruned and archived
+  /// as its own unit; results are added up per account on the way out. The
+  /// default folder keeps the unit `anthropic`, so records and day archives
+  /// written before accounts had folders carry on unchanged.
+  private var claudeUnits: [ClaudeHistoryUnit]
+  /// Accounts the store last asked to watch, so a new folder list can follow.
+  private var watchedAccounts: Set<ProviderID> = []
   private let cacheURL: URL
   private let fileManager: FileManager
   private let timeZoneOverride: TimeZone?
@@ -412,6 +419,7 @@ public actor LocalUsageScanner {
     timeZone: TimeZone? = nil
   ) {
     self.roots = roots
+    self.claudeUnits = ClaudeHistoryUnit.defaults(root: roots.claude)
     self.fileManager = fileManager
     self.watchChanges = watchChanges
     self.timeZoneOverride = timeZone
@@ -425,6 +433,39 @@ public actor LocalUsageScanner {
       .appendingPathComponent("local-usage-index.json")
   }
 
+  /// Which Claude `projects` folders count, and toward which account. Until
+  /// this is called only the default folder counts, toward the first card.
+  /// History already recorded for a folder is kept while it is not listed.
+  public func setClaudeSources(_ sources: [ClaudeHistorySource]) {
+    let units = ClaudeHistoryUnit.make(sources, defaultRoot: self.roots.claude)
+    guard units != self.claudeUnits else { return }
+    self.claudeUnits = units
+    if self.watchChanges, !self.watchedAccounts.isEmpty {
+      self.changeTracker.synchronize(roots: self.watchRoots(self.units(for: self.watchedAccounts)))
+    }
+  }
+
+  /// Scanner units for the accounts a caller named: Codex and Grok are their
+  /// own unit, a Claude account is every folder that counts toward it.
+  private func units(for providers: Set<ProviderID>) -> Set<ProviderID> {
+    Set(self.groups(for: providers).values.joined())
+  }
+
+  /// Account to units, for the named accounts that have any.
+  private func groups(for providers: Set<ProviderID>) -> [ProviderID: Set<ProviderID>] {
+    var result: [ProviderID: Set<ProviderID>] = [:]
+    for provider in providers.intersection([.openAI, .grok]) { result[provider] = [provider] }
+    for unit in self.claudeUnits where providers.contains(unit.account) {
+      result[unit.account, default: []].insert(unit.id)
+    }
+    return result
+  }
+
+  /// Every unit in visiting order: Codex, the Claude folders, then Grok.
+  private var orderedUnits: [ProviderID] {
+    [.openAI] + self.claudeUnits.map(\.id) + [.grok]
+  }
+
   public func scan(
     periodDays: Int = 30,
     cycleStarts: [ProviderID: Date] = [:],
@@ -432,8 +473,10 @@ public actor LocalUsageScanner {
     providers: Set<ProviderID> = [.openAI, .anthropic, .grok],
     dirtyProviders: Set<ProviderID>? = nil
   ) throws -> [ProviderID: LocalUsageSummary] {
-    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    let groups = self.groups(for: providers)
+    let selected = Set(groups.values.joined())
     if self.watchChanges {
+      self.watchedAccounts = providers
       self.changeTracker.synchronize(roots: self.watchRoots(selected))
     }
     guard !selected.isEmpty else {
@@ -453,7 +496,8 @@ public actor LocalUsageScanner {
     do {
       return try self.performScan(
         box: box, ledger: ledger, anchor: published.anchor, budget: budget,
-        selected: selected, dirtyProviders: dirtyProviders, periodDays: periodDays,
+        selected: selected, groups: groups,
+        dirtyProviders: dirtyProviders.map { self.units(for: $0) }, periodDays: periodDays,
         cycleStarts: cycleStarts, now: now)
     } catch is CancellationError {
       throw CancellationError()
@@ -473,13 +517,15 @@ public actor LocalUsageScanner {
   /// local history or a provider is disabled so unused roots stop immediately.
   public func updateWatchedProviders(_ providers: Set<ProviderID>) {
     guard self.watchChanges else { return }
-    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    self.watchedAccounts = providers
+    let selected = self.units(for: providers)
     self.changeTracker.synchronize(roots: self.watchRoots(selected))
     if selected.isEmpty { self.releaseResidentIndex() }
   }
 
   public func stopWatching() {
     guard self.watchChanges else { return }
+    self.watchedAccounts = []
     self.changeTracker.synchronize(roots: [:])
     self.releaseResidentIndex()
   }
@@ -511,7 +557,8 @@ public actor LocalUsageScanner {
     now: Date = Date(),
     providers: Set<ProviderID> = [.openAI, .anthropic, .grok]
   ) -> [ProviderID: CachedUsageHistory] {
-    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    let groups = self.groups(for: providers)
+    let selected = Set(groups.values.joined())
     guard !selected.isEmpty else { return [:] }
     var index = self.loadIndex()
     if selected.contains(.openAI) { Self.repairOpenAIArchivedTotals(&index) }
@@ -535,13 +582,19 @@ public actor LocalUsageScanner {
     let calendar = CachedUsageHistory.civilCalendar(self.calendar)
     let today = CachedUsageHistory.dayKey(for: now, calendar: calendar)
     let oldest = CachedUsageHistory.dayKey(daysBefore: count - 1, from: now, calendar: calendar)
-    return selected.reduce(into: [:]) { result, provider in
-      let rows = (merged[provider] ?? [:]).compactMap { key, day -> CachedUsageDay? in
+    return groups.reduce(into: [:]) { result, group in
+      // An account with several folders adds their days together.
+      var byDay: [String: [ArchivedUsageDay]] = [:]
+      for unit in group.value.sorted(by: { $0.rawValue < $1.rawValue }) {
+        for (key, day) in merged[unit] ?? [:] { byDay[key, default: []].append(day) }
+      }
+      let rows = byDay.compactMap { key, days -> CachedUsageDay? in
         guard let oldest, key >= oldest, key <= today else { return nil }
+        let day = ArchivedUsageDay.combined(days)
         return CachedUsageDay(
           day: key, tokens: day.tokens, costUSD: day.costUSD, fetchedAt: day.fetchedAt, detail: day.detail)
       }
-      result[provider] = CachedUsageHistory(provider: provider, days: rows)
+      result[group.key] = CachedUsageHistory(provider: group.key, days: rows)
     }
   }
 
@@ -552,7 +605,8 @@ public actor LocalUsageScanner {
     now: Date = Date(),
     providers: Set<ProviderID> = [.openAI, .anthropic, .grok]
   ) throws -> [ProviderID: LocalUsageSummary] {
-    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    let groups = self.groups(for: providers)
+    let selected = Set(groups.values.joined())
     guard !selected.isEmpty else { return [:] }
     var index = self.loadIndex()
     defer { self.releaseResidentPublishedIndexIfLarge() }
@@ -561,15 +615,16 @@ public actor LocalUsageScanner {
     let days = min(90, max(1, periodDays))
     let cutoff = self.calendar.date(byAdding: .day, value: -days + 1, to: now) ?? now
     let series = try Self.dailySeries(
-      index: index, days: days, now: now, calendar: self.calendar, deadline: .distantFuture)
+      index: index, groups: groups, days: days, now: now, calendar: self.calendar,
+      deadline: .distantFuture)
     var summaries: [ProviderID: LocalUsageSummary] = [:]
-    for provider in selected where index.records.values.contains(where: { $0.provider == provider })
-    {
+    for (provider, units) in groups
+    where index.records.values.contains(where: { units.contains($0.provider) }) {
       let totals = try Self.aggregate(
-        provider: provider, since: Self.dayKey(cutoff, timeZone: self.timeZone),
+        units: units, since: Self.dayKey(cutoff, timeZone: self.timeZone),
         index: index, deadline: .distantFuture)
       let today = try Self.aggregate(
-        provider: provider, since: Self.dayKey(now, timeZone: self.timeZone),
+        units: units, since: Self.dayKey(now, timeZone: self.timeZone),
         index: index, deadline: .distantFuture)
       summaries[provider] = totals.summary(
         provider: provider, periodDays: days, today: today, cycle: totals,
@@ -582,6 +637,7 @@ public actor LocalUsageScanner {
   /// has an even axis. One pass over the index, bounded to the period.
   private static func dailySeries(
     index: UsageIndex,
+    groups: [ProviderID: Set<ProviderID>],
     days: Int,
     now: Date,
     calendar: Calendar,
@@ -594,16 +650,21 @@ public actor LocalUsageScanner {
       }
     }
     guard let cutoffKey = keys.first else { return [:] }
+    var owner: [ProviderID: ProviderID] = [:]
+    for (account, units) in groups {
+      for unit in units { owner[unit] = account }
+    }
 
     var totals: [ProviderID: [String: UsageTotals]] = [:]
     for (recordIndex, record) in index.records.values.enumerated() {
       if recordIndex.isMultiple(of: 128) { try Self.checkDeadline(deadline, budget: budget) }
+      guard let account = owner[record.provider] else { continue }
       for (day, value) in record.days where day >= cutoffKey {
-        totals[record.provider, default: [:]][day, default: UsageTotals()].add(value)
+        totals[account, default: [:]][day, default: UsageTotals()].add(value)
       }
     }
     try Self.checkDeadline(deadline, budget: budget)
-    return ProviderID.defaults.reduce(into: [:]) { result, provider in
+    return groups.keys.reduce(into: [:]) { result, provider in
       let byDay = totals[provider] ?? [:]
       result[provider] = keys.map {
         DailyUsage(day: $0, tokens: byDay[$0]?.totalTokens(provider: provider) ?? 0)
@@ -612,7 +673,7 @@ public actor LocalUsageScanner {
   }
 
   private static func aggregate(
-    provider: ProviderID,
+    units: Set<ProviderID>,
     since cutoffKey: String,
     index: UsageIndex,
     deadline: Date,
@@ -621,7 +682,7 @@ public actor LocalUsageScanner {
     var result = UsageTotals()
     for (recordIndex, record) in index.records.values.enumerated() {
       if recordIndex.isMultiple(of: 128) { try Self.checkDeadline(deadline, budget: budget) }
-      guard record.provider == provider else { continue }
+      guard units.contains(record.provider) else { continue }
       result.add(record.totals(since: cutoffKey))
     }
     return result
@@ -721,6 +782,7 @@ public actor LocalUsageScanner {
   }
 
   private func scanClaude(
+    unit: ProviderID,
     cutoff: Date,
     cutoffKey: String,
     box: IndexBox,
@@ -732,12 +794,13 @@ public actor LocalUsageScanner {
     var total = UsageTotals()
     var remainingBytes = budget.providerBytes(defaultCap: self.maximumBytesPerScan)
     let files = try self.sessionFiles(
-      explicitFiles: explicitFiles, root: self.roots.claude, named: nil, extension: "jsonl",
+      explicitFiles: explicitFiles, root: self.root(for: unit), named: nil, extension: "jsonl",
       cutoff: cutoff, budget: budget)
     for file in files {
       try budget.ensureTime()
       let fileTotals = try self.scanClaudeFile(
         file,
+        unit: unit,
         cutoffKey: cutoffKey,
         box: box,
         ledger: ledger,
@@ -752,6 +815,7 @@ public actor LocalUsageScanner {
 
   private func scanClaudeFile(
     _ file: URL,
+    unit: ProviderID,
     cutoffKey: String,
     box: IndexBox,
     ledger: ScanLedger,
@@ -760,7 +824,7 @@ public actor LocalUsageScanner {
     remainingBytes: inout Int
   ) throws -> UsageTotals {
     let metadata = try self.metadata(file)
-    let key = self.fileKey(provider: .anthropic, url: file)
+    let key = self.fileKey(provider: unit, url: file)
     if retains { ledger.pendingRetained.insert(key) }
     guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
     else { return UsageTotals() }
@@ -773,13 +837,13 @@ public actor LocalUsageScanner {
     let staleDays = record != nil && record?.dayTimeZone != self.timeZone.identifier
     let continueSavingsMigration = record?.savingsPriced == false && !staleDays
     let staleSavings = record?.needsSavingsRefresh == true && !continueSavingsMigration
-    if record?.provider != .anthropic || !metadata.sameFile(as: record)
+    if record?.provider != unit || !metadata.sameFile(as: record)
       || metadata.size < (record?.offset ?? 0)
       || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
       || staleSavings || staleDays
     {
       record = CachedFile(
-        provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
+        provider: unit, size: 0, modifiedAt: 0, offset: 0,
         days: [:], recentRows: [:], recentOrder: [],
         dayTimeZone: self.timeZone.identifier,
         rebucketedFromDays: staleDays ? [:] : nil,
@@ -804,7 +868,7 @@ public actor LocalUsageScanner {
         || staleSavings || staleDays
       {
         record = CachedFile(
-          provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
+          provider: unit, size: 0, modifiedAt: 0, offset: 0,
           days: [:], recentRows: [:], recentOrder: [],
           dayTimeZone: self.timeZone.identifier,
           rebucketedFromDays: staleDays ? [:] : nil,
@@ -1470,7 +1534,7 @@ public actor LocalUsageScanner {
     for record in index.records.values where providers.contains(record.provider) {
       for (key, value) in record.days where isArchiveDayKey(key) {
         guard value.estimated, value.totalTokens(provider: record.provider) > 0 else { continue }
-        if value.costUSD == 0 || record.provider == .anthropic {
+        if value.costUSD == 0 || record.provider.isAnthropic {
           unpriced[record.provider, default: []].insert(key)
         }
       }
@@ -1537,56 +1601,62 @@ public actor LocalUsageScanner {
     index: inout UsageIndex, published: [String: CachedFile],
     legacy: [ProviderID: [String: ArchivedUsageDay]],
     fresh: [ProviderID: [String: ArchivedUsageDay]],
-    observed: inout [ProviderID: [String: ArchivedUsageDay]]
+    observed: inout [ProviderID: [String: ArchivedUsageDay]],
+    held: Set<ProviderID>
   ) {
     var prior = index
     prior.records = published
     var migrated: Set<String> = []
-    var affected: Set<String> = []
-    for (key, record) in index.records where record.savingsPriced == true {
+    // Each Claude folder keeps its own archive, so each moves on its own.
+    var affected: [ProviderID: Set<String>] = [:]
+    for (key, record) in index.records
+    where record.savingsPriced == true && record.provider.isAnthropic && !held.contains(record.provider) {
       guard let oldDays = record.rebucketedFromDays else { continue }
       var previous = record
       previous.days = oldDays
       prior.records[key] = previous
       migrated.insert(key)
-      affected.formUnion(oldDays.keys)
-      affected.formUnion(record.days.keys)
+      affected[record.provider, default: []].formUnion(oldDays.keys)
+      affected[record.provider, default: []].formUnion(record.days.keys)
     }
     guard !migrated.isEmpty else { return }
-    let reconstructed = Self.observedDays(
-      index: prior, providers: [.anthropic], now: index.updatedAt)[.anthropic] ?? [:]
-    for day in affected {
-      let previous = legacy[.anthropic]?[day] ?? reconstructed[day]
-      let corrected = fresh[.anthropic]?[day]
-      if let archived = index.dailyHistory[.anthropic]?[day] {
-        let previousTokens = previous?.tokens ?? 0
-        guard archived.tokens >= previousTokens else {
-          observed[.anthropic]?.removeValue(forKey: day)
-          continue
-        }
-        let remainder = archived.tokens - previousTokens
-        let tokens = saturatingNonnegativeSum(remainder, corrected?.tokens ?? 0)
-        if tokens == 0, corrected == nil {
-          observed[.anthropic]?.removeValue(forKey: day)
-          index.dailyHistory[.anthropic]?.removeValue(forKey: day)
-          continue
-        }
-        let cost: Double?
-        if let archivedCost = archived.costUSD,
-          let previousCost = previous?.costUSD ?? (previous == nil ? 0 : nil),
-          let correctedCost = corrected?.costUSD ?? (corrected == nil ? 0 : nil),
-          archivedCost >= previousCost {
-          cost = Self.recordedCost(archivedCost - previousCost + correctedCost)
+    let reconstructedByUnit = Self.observedDays(
+      index: prior, providers: Set(affected.keys), now: index.updatedAt)
+    for (unit, days) in affected {
+      let reconstructed = reconstructedByUnit[unit] ?? [:]
+      for day in days {
+        let previous = legacy[unit]?[day] ?? reconstructed[day]
+        let corrected = fresh[unit]?[day]
+        if let archived = index.dailyHistory[unit]?[day] {
+          let previousTokens = previous?.tokens ?? 0
+          guard archived.tokens >= previousTokens else {
+            observed[unit]?.removeValue(forKey: day)
+            continue
+          }
+          let remainder = archived.tokens - previousTokens
+          let tokens = saturatingNonnegativeSum(remainder, corrected?.tokens ?? 0)
+          if tokens == 0, corrected == nil {
+            observed[unit]?.removeValue(forKey: day)
+            index.dailyHistory[unit]?.removeValue(forKey: day)
+            continue
+          }
+          let cost: Double?
+          if let archivedCost = archived.costUSD,
+            let previousCost = previous?.costUSD ?? (previous == nil ? 0 : nil),
+            let correctedCost = corrected?.costUSD ?? (corrected == nil ? 0 : nil),
+            archivedCost >= previousCost {
+            cost = Self.recordedCost(archivedCost - previousCost + correctedCost)
+          } else {
+            cost = nil
+          }
+          observed[unit, default: [:]][day] = ArchivedUsageDay(
+            tokens: tokens, costUSD: cost,
+            fetchedAt: remainder == 0 ? (corrected?.fetchedAt ?? archived.fetchedAt) : archived.fetchedAt)
+        } else if let corrected {
+          observed[unit, default: [:]][day] = corrected
         } else {
-          cost = nil
+          observed[unit]?.removeValue(forKey: day)
         }
-        observed[.anthropic, default: [:]][day] = ArchivedUsageDay(
-          tokens: tokens, costUSD: cost,
-          fetchedAt: remainder == 0 ? (corrected?.fetchedAt ?? archived.fetchedAt) : archived.fetchedAt)
-      } else if let corrected {
-        observed[.anthropic, default: [:]][day] = corrected
-      } else {
-        observed[.anthropic]?.removeValue(forKey: day)
       }
     }
     for key in migrated {
@@ -1645,6 +1715,7 @@ public actor LocalUsageScanner {
     anchor: LocalHistoryFileAnchor?,
     budget: ScanBudget,
     selected: Set<ProviderID>,
+    groups: [ProviderID: Set<ProviderID>],
     dirtyProviders: Set<ProviderID>?,
     periodDays: Int,
     cycleStarts: [ProviderID: Date],
@@ -1695,7 +1766,7 @@ public actor LocalUsageScanner {
     }
     return try self.finalize(
       box: box, ledger: ledger, expectedAnchor: anchor, legacy: legacy,
-      selected: selected, days: days,
+      selected: selected, groups: groups, days: days,
       cutoff: cutoff, cycleStarts: cycleStarts, now: now, budget: budget)
   }
 
@@ -1705,6 +1776,7 @@ public actor LocalUsageScanner {
     expectedAnchor: LocalHistoryFileAnchor?,
     legacy: [ProviderID: [String: ArchivedUsageDay]],
     selected: Set<ProviderID>,
+    groups: [ProviderID: Set<ProviderID>],
     days: Int,
     cutoff: Date,
     cycleStarts: [ProviderID: Date],
@@ -1730,11 +1802,9 @@ public actor LocalUsageScanner {
       for (key, day) in days { stored[key] = day }
       observed[provider] = stored
     }
-    if !ledger.heldProviders.contains(.anthropic) {
-      Self.reconcileClaudeDayKeys(
-        index: &box.index, published: ledger.publishedRecords, legacy: legacy,
-        fresh: fresh, observed: &observed)
-    }
+    Self.reconcileClaudeDayKeys(
+      index: &box.index, published: ledger.publishedRecords, legacy: legacy,
+      fresh: fresh, observed: &observed, held: ledger.heldProviders)
     // An unchanged file set does not establish why an archive differs from
     // its retained records. The exact legacy cache-write case was repaired
     // above; preserve other saved totals until new source data is read.
@@ -1766,26 +1836,28 @@ public actor LocalUsageScanner {
     var selectedIndex = box.index
     selectedIndex.records = box.index.records.filter { selected.contains($0.value.provider) }
     let series = try Self.dailySeries(
-      index: selectedIndex, days: days, now: now, calendar: self.calendar,
+      index: selectedIndex, groups: groups, days: days, now: now, calendar: self.calendar,
       deadline: .distantFuture, budget: budget)
     var summaries: [ProviderID: LocalUsageSummary] = [:]
-    for provider in selected {
+    for (provider, units) in groups {
       try budget.ensureTime()
       let totals = try Self.aggregate(
-        provider: provider, since: cutoffKey, index: selectedIndex,
+        units: units, since: cutoffKey, index: selectedIndex,
         deadline: .distantFuture, budget: budget)
       let cycleStart = cycleStarts[provider] ?? cutoff
       let today = try Self.aggregate(
-        provider: provider, since: todayKey, index: box.index,
+        units: units, since: todayKey, index: box.index,
         deadline: .distantFuture, budget: budget)
       let cycle = try Self.aggregate(
-        provider: provider, since: Self.dayKey(cycleStart, timeZone: self.timeZone), index: box.index,
+        units: units, since: Self.dayKey(cycleStart, timeZone: self.timeZone), index: box.index,
         deadline: .distantFuture, budget: budget)
       // A provider is current only after its planned files were fully
       // revalidated. Missing roots are removed from dirtyProviders in visit(),
       // while a warm skip intentionally retains the last verified timestamp.
-      let fetchedAt = ledger.dirtyProviders.contains(provider)
-        ? now : (self.lastScanDates[provider] ?? box.index.updatedAt)
+      // An account with several folders is as current as its oldest one.
+      let fetchedAt = units.map {
+        ledger.dirtyProviders.contains($0) ? now : (self.lastScanDates[$0] ?? box.index.updatedAt)
+      }.min() ?? now
       summaries[provider] = totals.summary(
         provider: provider, periodDays: days, today: today, cycle: cycle,
         cycleStartedAt: cycleStart, now: fetchedAt, dailyTokens: series[provider] ?? [])
@@ -1921,8 +1993,11 @@ public actor LocalUsageScanner {
         cutoff: cutoff, cutoffKey: cutoffKey, box: box, ledger: ledger, budget: budget,
         retains: retains, explicitFiles: explicitFiles)
     case .anthropic:
+      // Only a configured folder is visited; anything else would be walked
+      // under the wrong unit and pruned as if its files were gone.
+      guard self.claudeUnits.contains(where: { $0.id == provider }) else { return }
       _ = try self.scanClaude(
-        cutoff: cutoff, cutoffKey: cutoffKey, box: box, ledger: ledger, budget: budget,
+        unit: provider, cutoff: cutoff, cutoffKey: cutoffKey, box: box, ledger: ledger, budget: budget,
         retains: retains, explicitFiles: explicitFiles)
     case .grok:
       _ = try self.scanGrok(
@@ -2006,7 +2081,7 @@ public actor LocalUsageScanner {
 
   private func acknowledge(selected: Set<ProviderID>, ledger: ScanLedger) {
     guard self.watchChanges else { return }
-    let ordered = Self.historyProviders.filter { selected.contains($0) }
+    let ordered = self.orderedUnits.filter { selected.contains($0) }
     let current = self.changeTracker.plan(
       providers: ordered, now: .now, fullDiscoveryInterval: self.fullDiscoveryInterval)
     for plan in current where ledger.dirtyProviders.contains(plan.provider) {
@@ -2140,14 +2215,14 @@ public actor LocalUsageScanner {
   private func providerNeedsHistoryRefresh(_ index: UsageIndex, provider: ProviderID) -> Bool {
     index.records.values.contains {
       $0.provider == provider && ($0.needsSavingsRefresh
-        || (provider == .anthropic && $0.dayTimeZone != self.timeZone.identifier))
+        || (provider.isAnthropic && $0.dayTimeZone != self.timeZone.identifier))
     }
   }
 
   private func visitPlans(
     selected: Set<ProviderID>, dirtyProviders: Set<ProviderID>?
   ) -> [LocalHistoryVisitPlan] {
-    let ordered = Self.historyProviders.filter { selected.contains($0) }
+    let ordered = self.orderedUnits.filter { selected.contains($0) }
     if let dirtyProviders {
       let dirty = selected.intersection(dirtyProviders)
       let watched = self.watchChanges
@@ -2172,7 +2247,7 @@ public actor LocalUsageScanner {
   private func watchRoots(_ providers: Set<ProviderID>) -> [ProviderID: URL] {
     var roots: [ProviderID: URL] = [:]
     if providers.contains(.openAI) { roots[.openAI] = self.roots.codex }
-    if providers.contains(.anthropic) { roots[.anthropic] = self.roots.claude }
+    for unit in self.claudeUnits where providers.contains(unit.id) { roots[unit.id] = unit.root }
     if providers.contains(.grok) { roots[.grok] = self.roots.grok }
     return roots
   }
@@ -2180,7 +2255,7 @@ public actor LocalUsageScanner {
   private func root(for provider: ProviderID) -> URL {
     switch provider.kind {
     case .openAI: self.roots.codex
-    case .anthropic: self.roots.claude
+    case .anthropic: self.claudeUnits.first { $0.id == provider }?.root ?? self.roots.claude
     case .grok: self.roots.grok
     default: self.roots.codex
     }
@@ -2191,8 +2266,6 @@ public actor LocalUsageScanner {
     return self.fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
       && isDirectory.boolValue
   }
-
-  private static let historyProviders: [ProviderID] = [.openAI, .anthropic, .grok]
 
   private static func providerSet(_ raw: [String]) -> Set<ProviderID> {
     Set(raw.compactMap(ProviderID.init(rawValue:)))
@@ -2310,6 +2383,38 @@ private struct ArchivedUsageDay: Codable, Equatable {
   var fetchedAt: Date
   var detail: UsageDayDetail? = nil
 
+  /// One account's day across its folders. A cost or detail is known only
+  /// when every folder knows it; one folder's day comes back unchanged.
+  static func combined(_ days: [ArchivedUsageDay]) -> ArchivedUsageDay {
+    guard var result = days.first else {
+      return ArchivedUsageDay(tokens: 0, costUSD: 0, fetchedAt: .distantPast)
+    }
+    for day in days.dropFirst() {
+      result.tokens = saturatingNonnegativeSum(result.tokens, day.tokens)
+      if let a = result.costUSD, let b = day.costUSD, (a + b).isFinite {
+        result.costUSD = a + b
+      } else {
+        result.costUSD = nil
+      }
+      result.fetchedAt = min(result.fetchedAt, day.fetchedAt)
+      if let a = result.detail, let b = day.detail {
+        var models = a.models
+        for (name, usage) in b.models { models[name, default: InsightModelUsage(tokens: 0, costUSD: 0)].add(usage) }
+        result.detail = UsageDayDetail(
+          input: saturatingNonnegativeSum(a.input, b.input),
+          cached: saturatingNonnegativeSum(a.cached, b.cached),
+          cacheWrite: saturatingNonnegativeSum(a.cacheWrite, b.cacheWrite),
+          output: saturatingNonnegativeSum(a.output, b.output),
+          cacheSavingsUSD: a.cacheSavingsUSD.flatMap { x in b.cacheSavingsUSD.map { x + $0 } },
+          unpricedCacheReads: saturatingNonnegativeSum(a.unpricedCacheReads, b.unpricedCacheReads),
+          models: models)
+      } else {
+        result.detail = nil
+      }
+    }
+    return result
+  }
+
   init(tokens: Int64, costUSD: Double?, fetchedAt: Date, detail: UsageDayDetail? = nil) {
     self.tokens = tokens < 0 ? 0 : tokens
     self.costUSD = costUSD.flatMap { $0.isFinite ? max(0, $0) : nil }
@@ -2397,7 +2502,7 @@ private struct CachedFile: Codable {
   /// Legacy rows with cache reads, and an unfinished reparse, need another pass.
   /// A finished pass stays put even when the model has no rate.
   var needsSavingsRefresh: Bool {
-    if (self.provider == .openAI || self.provider == .anthropic), self.insightDetailsVersion != 1 { return true }
+    if (self.provider == .openAI || self.provider.isAnthropic), self.insightDetailsVersion != 1 { return true }
     if self.provider == .openAI, self.codexPricingVersion != 1 { return true }
     if self.savingsPriced == true { return false }
     if self.savingsPriced == false { return true }
@@ -2588,7 +2693,7 @@ struct UsageTotals: Codable, Equatable {
 
   func totalTokens(provider: ProviderID) -> Int64 {
     saturatingNonnegativeSum(
-      self.input, provider == .anthropic ? self.cached : 0,
+      self.input, provider.isAnthropic ? self.cached : 0,
       provider == .openAI ? 0 : self.cacheWrite, self.output)
   }
 
@@ -2766,5 +2871,42 @@ enum Pricing {
       // from local transcripts.
       return nil
     }
+  }
+}
+
+/// One Claude `projects` folder as the scanner tracks it: its own unit id for
+/// records, watches and day archives, and the account its totals count toward.
+struct ClaudeHistoryUnit: Sendable, Equatable {
+  let id: ProviderID
+  let account: ProviderID
+  let root: URL
+
+  static func defaults(root: URL) -> [ClaudeHistoryUnit] {
+    [ClaudeHistoryUnit(id: .anthropic, account: .anthropic, root: root)]
+  }
+
+  /// Folders that resolve to, into or around an earlier one are dropped: the
+  /// first listed keeps those transcripts, so nothing is counted twice. The
+  /// default folder keeps the unit `anthropic` whichever account it counts
+  /// toward; any other folder gets a unit named after its resolved path.
+  static func make(_ sources: [ClaudeHistorySource], defaultRoot: URL) -> [ClaudeHistoryUnit] {
+    let defaultPath = ClaudeAccountAttribution.resolved(defaultRoot)
+    var units: [ClaudeHistoryUnit] = []
+    var paths: [String] = []
+    for source in sources where source.account.isAnthropic {
+      let path = ClaudeAccountAttribution.resolved(source.projects)
+      guard !paths.contains(where: { ClaudeAccountAttribution.overlaps(path, $0) }) else { continue }
+      let id = path == defaultPath ? ProviderID.anthropic : Self.id(forResolvedPath: path)
+      paths.append(path)
+      units.append(ClaudeHistoryUnit(id: id, account: source.account, root: source.projects))
+    }
+    return units
+  }
+
+  /// `anthropic@dir-` and 12 hex characters: never an account's instance
+  /// (those are 8 characters without a dash) and never a path in the index.
+  static func id(forResolvedPath path: String) -> ProviderID {
+    let digest = SHA256.hash(data: Data(path.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+    return ProviderID(kind: .anthropic, instance: "dir-" + digest) ?? .anthropic
   }
 }

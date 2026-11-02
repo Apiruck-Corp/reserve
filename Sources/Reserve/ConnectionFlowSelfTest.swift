@@ -1453,8 +1453,11 @@ enum ConnectionFlowSelfTest {
         "personal exhaustion was replaced by the Team allowance")
       expect(summaries.first { $0.provider == team }?.primary?.remainingPercent == 84,
         "the Team allowance was replaced by personal exhaustion")
-      expect(summaries.allSatisfy { $0.localUsage == nil && $0.hasUnattributedClaudeHistory },
-        "device token history was credited to a Claude subscription")
+      expect(summaries.first { $0.provider == .anthropic }
+        .map { $0.localUsage == nil && $0.hasUnattributedClaudeHistory } == true,
+        "unproven device token history was credited to a Claude subscription")
+      expect(summaries.first { $0.provider == team }?.hasUnattributedClaudeHistory == false,
+        "the Team card was denied the history of its own folders")
       expect(store.states[.anthropic]?.localUsage == deviceUsage && store.states[team]?.localUsage == nil,
         "device history was discarded or duplicated across Claude accounts")
       expect(store.insightHistoryName(for: .anthropic) == "Claude on this Mac",
@@ -1491,12 +1494,83 @@ enum ConnectionFlowSelfTest {
       expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
         organization: { $0 == team ? nil : "org-personal" }) == nil,
         "an unidentified card was treated as a duplicate")
+      failures += await Self.checkClaudeFolderAttribution(
+        store: store, defaults: defaults, home: home, team: team)
       try? store.removeAccount(team)
       expect(store.hasUnattributedClaudeHistory(for: .anthropic),
         "removing Team reassigned old device history to the personal account")
     } else { failures.append("added accounts: a second Claude account could not be created") }
     try? FileManager.default.removeItem(at: home)
     failures += await self.checkAddedAPIAccounts()
+    return failures
+  }
+
+  /// Each Claude folder counts toward the account it is signed in as: the
+  /// first card's home only once its verified organization matches, a T3 Code
+  /// folder of the Team seat toward Team, another member's seat toward no one,
+  /// and a link to a folder already counted not a second time. Leaves the
+  /// first card's verified organization mismatched, so its history is again
+  /// a device total.
+  private static func checkClaudeFolderAttribution(
+    store: UsageStore, defaults: UserDefaults, home: URL, team: ProviderID
+  ) async -> [String] {
+    var failures: [String] = []
+    func expect(_ condition: Bool, _ message: String) {
+      if !condition { failures.append("Claude folder attribution: \(message)") }
+    }
+    let manager = FileManager.default
+    func profile(_ url: URL, organization: String, member: String) {
+      let json = #"{"oauthAccount":{"organizationUuid":"\#(organization)","accountUuid":"\#(member)"}}"#
+      try? manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try? Data(json.utf8).write(to: url)
+    }
+    func folder(_ name: String, organization: String, member: String) -> URL {
+      let url = home.appendingPathComponent(name, isDirectory: true)
+      try? manager.createDirectory(at: url.appendingPathComponent("projects"), withIntermediateDirectories: true)
+      profile(url.appendingPathComponent(".claude.json"), organization: organization, member: member)
+      return url
+    }
+    let defaultHome = home.appendingPathComponent(".claude", isDirectory: true)
+    try? manager.createDirectory(at: defaultHome.appendingPathComponent("projects"), withIntermediateDirectories: true)
+    profile(home.appendingPathComponent(".claude.json"), organization: "org-personal", member: "member-po")
+    guard let teamFolder = store.claudeConfigDirectory(for: team) else {
+      return ["Claude folder attribution: the Team account has no folder"]
+    }
+    profile(teamFolder.accountProfileURL, organization: "org-team", member: "member-po")
+    let t3 = folder(".claude_team_t3", organization: "org-team", member: "member-po")
+    let otherSeat = folder(".claude_colleague", organization: "org-team", member: "member-colleague")
+    try? manager.createSymbolicLink(
+      at: home.appendingPathComponent(".claude_team_link"), withDestinationURL: t3)
+    defaults.set(
+      StableIdentifier.notificationComponent("org-personal"), forKey: "anthropic.organizationIdentifier")
+    defaults.set(
+      StableIdentifier.notificationComponent("org-team"), forKey: "\(team.rawValue).organizationIdentifier")
+
+    var plan = await store.syncClaudeHistorySources()
+    func resolved(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+    func owners(of folder: URL) -> [ProviderID] {
+      let projects = resolved(folder.appendingPathComponent("projects"))
+      return plan.sources.filter { resolved($0.projects) == projects }.map(\.account)
+    }
+    expect(owners(of: defaultHome) == [.anthropic] && !plan.defaultHistoryUnattributed,
+      "the verified personal home did not count toward the personal card")
+    expect(owners(of: t3) == [team], "the Team seat's T3 Code folder did not count toward Team")
+    expect(owners(of: teamFolder.url) == [team], "the Team card's own folder did not count toward Team")
+    expect(owners(of: otherSeat).isEmpty, "another member's seat in the Team organization was counted")
+    expect(plan.sources.count == Set(plan.sources.map { resolved($0.projects) }).count,
+      "a linked folder was counted twice")
+    expect(!store.hasUnattributedClaudeHistory(for: .anthropic)
+      && store.insightHistoryName(for: .anthropic) != "Claude on this Mac",
+      "proven personal history was still shown as a device total")
+
+    defaults.set(
+      StableIdentifier.notificationComponent("org-other"), forKey: "anthropic.organizationIdentifier")
+    plan = await store.syncClaudeHistorySources()
+    expect(plan.defaultHistoryUnattributed && owners(of: defaultHome) == [.anthropic]
+      && store.hasUnattributedClaudeHistory(for: .anthropic),
+      "a home signed in to another organization was credited to the personal card")
+    expect(plan.sources.filter { $0.account == .anthropic }.count == 1,
+      "the unproven home was dropped or counted twice")
     return failures
   }
 
