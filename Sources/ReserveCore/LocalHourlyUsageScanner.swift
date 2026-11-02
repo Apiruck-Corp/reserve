@@ -32,6 +32,8 @@ public actor LocalHourlyUsageScanner {
   }
 
   private let roots: LocalUsageScanner.Roots
+  /// Same folders and units as the daily scanner; see `setClaudeSources`.
+  private var claudeUnits: [ClaudeHistoryUnit]
   private let cacheURL: URL
   private let timeZoneOverride: TimeZone?
   private var timeZone: TimeZone { self.timeZoneOverride ?? .current }
@@ -45,12 +47,18 @@ public actor LocalHourlyUsageScanner {
   public init(roots: LocalUsageScanner.Roots = .defaults(), cacheURL: URL? = nil,
               timeZone: TimeZone? = nil) {
     self.roots = roots
+    self.claudeUnits = ClaudeHistoryUnit.defaults(root: roots.claude)
     self.cacheURL = cacheURL ?? FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Application Support/Reserve/hourly-usage-index.json")
     self.timeZoneOverride = timeZone
   }
 
   func setTestingBudget(bytes: Int) { self.maximumBytesPerScan = bytes }
+
+  /// Which Claude `projects` folders count, and toward which account.
+  public func setClaudeSources(_ sources: [ClaudeHistorySource]) {
+    self.claudeUnits = ClaudeHistoryUnit.make(sources, defaultRoot: self.roots.claude)
+  }
 
   private func load(now: Date) -> Index {
     let start = HourlyUsageHistory.hourStarts(now: now, timeZone: self.timeZone)[0]
@@ -87,9 +95,20 @@ public actor LocalHourlyUsageScanner {
     var progressed = false
     var seen: Set<String> = []
     var available: Set<ProviderID> = []
-    let supported = providers.intersection([.openAI, .anthropic])
+    // Account to units: Codex is its own; a Claude account is its folders.
+    var groups: [ProviderID: Set<ProviderID>] = [:]
+    var roots: [ProviderID: URL] = [:]
+    if providers.contains(.openAI) {
+      groups[.openAI] = [.openAI]
+      roots[.openAI] = self.roots.codex
+    }
+    for unit in self.claudeUnits where providers.contains(unit.account) {
+      groups[unit.account, default: []].insert(unit.id)
+      roots[unit.id] = unit.root
+    }
+    let supported = Set(roots.keys)
     for provider in supported.sorted(by: { $0.rawValue < $1.rawValue }) {
-      let root = provider == .openAI ? self.roots.codex : self.roots.claude
+      guard let root = roots[provider] else { continue }
       guard FileManager.default.fileExists(atPath: root.path) else { continue }
       var enumerationFailed = false
       guard let walker = FileManager.default.enumerator(at: root,
@@ -165,11 +184,16 @@ public actor LocalHourlyUsageScanner {
     }
     if !incomplete {
       next.records = next.records.filter { !supported.contains($0.value.provider) || seen.contains($0.key) }
-      for provider in supported {
+      // A Claude account asked for that no longer has a folder publishes
+      // nothing, rather than keeping hours its folder now credits elsewhere.
+      for provider in providers where provider.isAnthropic && groups[provider] == nil {
         next.published[provider] = nil
-        guard available.contains(provider) else { continue }
+      }
+      for (provider, units) in groups {
+        next.published[provider] = nil
+        guard !available.isDisjoint(with: units) else { continue }
         var hours: [String: UsageTotals] = [:]
-        for record in next.records.values where record.provider == provider {
+        for record in next.records.values where units.contains(record.provider) {
           for (hour, totals) in record.hours { hours[hour, default: UsageTotals()].add(totals) }
         }
         let points = HourlyUsageHistory.hourStarts(now: now, timeZone: self.timeZone).map { hour in
@@ -210,11 +234,11 @@ public actor LocalHourlyUsageScanner {
   }
 
   private static func consume(_ line: Data, record: inout Record, dayStart: Date, dayEnd: Date) {
-    let marker = record.provider == .anthropic ? "assistant" : "token_count"
+    let marker = record.provider.isAnthropic ? "assistant" : "token_count"
     guard line.range(of: Data(marker.utf8)) != nil
       || (record.provider == .openAI && line.range(of: Data("turn_context".utf8)) != nil) else { return }
     guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
-    if record.provider == .anthropic {
+    if record.provider.isAnthropic {
       guard let row = LocalUsageScanner.parseClaudeObject(object),
         let stamp = object["timestamp"] as? String,
         let timestamp = LocalUsageScanner.parseDate(stamp), timestamp >= dayStart, timestamp < dayEnd else { return }

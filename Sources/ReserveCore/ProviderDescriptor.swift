@@ -109,12 +109,13 @@ public struct ProviderDescriptor: Sendable {
     return key
   }
 
-  /// Every account of a kind shares the kind's descriptor. An added account's
-  /// session transcripts are not scanned yet, so it reports no local history
-  /// rather than waiting for activity that never arrives.
+  /// Every account of a kind shares the kind's descriptor. An added Claude
+  /// account's history comes from its own folders; other added accounts'
+  /// transcripts are not scanned yet, so they report no local history rather
+  /// than waiting for activity that never arrives.
   public static func forProvider(_ id: ProviderID) -> Self {
     var descriptor = self.forKind(id.kind)
-    if id.isAdded { descriptor.capabilities.remove(.localHistory) }
+    if id.isAdded, !id.isAnthropic { descriptor.capabilities.remove(.localHistory) }
     return descriptor
   }
 

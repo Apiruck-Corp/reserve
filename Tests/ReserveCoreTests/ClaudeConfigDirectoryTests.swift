@@ -396,9 +396,8 @@ import Testing
         windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 10)], checkedAt: nil)],
       history: nil, usageCheckedAt: nil, options: UsageShareOptions())
     #expect(card.plans.first?.name == "Claude · Account 2")
-    // No local history is scanned for an added account, so it does not
-    // promise any.
-    #expect(!descriptor.capabilities.contains(.localHistory))
+    // An added Claude account's history comes from its own folders.
+    #expect(descriptor.capabilities.contains(.localHistory))
     #expect(ProviderDescriptor.forProvider(.anthropic).capabilities.contains(.localHistory))
   }
 }

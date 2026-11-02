@@ -17,6 +17,10 @@ struct ReserveProbe {
       await self.printLocalUsage()
       return
     }
+    if argument?.lowercased() == "claude-history" {
+      await self.printClaudeHistory()
+      return
+    }
     let selected: [ProviderID]
     switch argument?.lowercased() {
     case "openai": selected = [.openAI]
@@ -92,6 +96,74 @@ struct ReserveProbe {
     } catch {
       FileHandle.standardError.write(Data("Local usage scan failed: \(error)\n".utf8))
       exit(1)
+    }
+  }
+}
+
+extension ReserveProbe {
+  /// Which Claude folders count toward which account on this Mac, and each
+  /// account's local tokens for the last 30 days. Scans into a throwaway index
+  /// so the app's own history is never touched. Prints home-relative folders
+  /// and account labels only: no emails, organization ids or credentials.
+  fileprivate static func printClaudeHistory() async {
+    let appDefaults = UserDefaults(suiteName: "com.pocarles.reserve") ?? .standard
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let accounts = ClaudeAccountAttribution.bindings(defaults: appDefaults)
+    let plan = ClaudeAccountAttribution.historyPlan(
+      accounts: accounts, homeDirectory: home,
+      discovered: ClaudeAccountAttribution.discoverFolders(homeDirectory: home),
+      requiresVerifiedOrganization: ClaudeAccountAttribution.requiresVerifiedOrganization(defaults: appDefaults),
+      identity: { ClaudeAccountAttribution.liveIdentity(profileURL: $0) })
+    func name(_ account: ProviderID) -> String {
+      "\(appDefaults.string(forKey: "\(account.rawValue).label") ?? "unnamed") (\(account.rawValue))"
+    }
+    func short(_ url: URL) -> String {
+      url.path.hasPrefix(home.path + "/") ? "~/" + url.path.dropFirst(home.path.count + 1) : url.lastPathComponent
+    }
+    let scratch = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reserve-claude-history-probe-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let now = Date()
+    func scan(_ sources: [ClaudeHistorySource]) async throws -> [ProviderID: LocalUsageSummary] {
+      let scanner = LocalUsageScanner(cacheURL: scratch.appendingPathComponent("\(UUID().uuidString).json"))
+      await scanner.setClaudeSources(sources)
+      for _ in 0..<200 {
+        do {
+          return try await scanner.scan(periodDays: 30, now: now, providers: Set(accounts.map(\.account)))
+        } catch UsageProviderError.timedOut {
+          guard await scanner.scanIncomplete else { throw UsageProviderError.timedOut("probe scan") }
+        }
+      }
+      throw UsageProviderError.timedOut("probe scan did not finish")
+    }
+    print("Claude folders that count (first card's home unattributed: \(plan.defaultHistoryUnattributed))")
+    do {
+      for source in plan.sources {
+        let alone = try await scan([source])[source.account]
+        print("  \(short(source.projects)) -> \(name(source.account)): \(alone?.totalTokens ?? 0) tokens, input \(alone?.inputTokens ?? 0), output \(alone?.outputTokens ?? 0) (30 days, this folder alone)")
+      }
+      let split = try await scan(plan.sources)
+      print("Per account, all its folders together (30 days)")
+      for account in accounts.map(\.account) {
+        let usage = split[account]
+        print("  \(name(account)): \(usage?.totalTokens ?? 0) tokens, today \(usage?.todayTokens ?? 0), input \(usage?.inputTokens ?? 0), output \(usage?.outputTokens ?? 0)")
+      }
+    } catch {
+      FileHandle.standardError.write(Data("Claude history probe failed: \(error)\n".utf8))
+      exit(1)
+    }
+    print("Status line routing (no reading is written)")
+    let requested = ClaudeStatuslineBridge.cacheURL(provider: .anthropic)
+    var sessions: [(String, [String: String])] = [("plain `claude`", [:])]
+    for source in plan.sources where source.account.isAdded || !short(source.projects).hasPrefix("~/.claude/") {
+      let folder = source.projects.deletingLastPathComponent()
+      sessions.append(("CLAUDE_CONFIG_DIR=\(short(folder))", ["CLAUDE_CONFIG_DIR": folder.path]))
+    }
+    for (label, environment) in sessions {
+      let routed = ClaudeStatuslineBridge.routedCacheURL(
+        requested: requested, environment: environment, accounts: accounts,
+        requiresVerifiedOrganization: ClaudeAccountAttribution.requiresVerifiedOrganization(defaults: appDefaults))
+      print("  \(label) -> \(routed?.lastPathComponent ?? "dropped")")
     }
   }
 }

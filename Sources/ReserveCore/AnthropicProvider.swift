@@ -1169,10 +1169,21 @@ struct ClaudeAccountProfile: Decodable, Sendable {
   let organizationRole: String?
   let subscriptionCreatedAt: String?
   let claudeCodeTrialEndsAt: String?
+  /// Only compared, hashed, inside this process; never stored or shown.
+  let accountUuid: String?
 
   var organizationIdentifier: String? {
     guard let organizationUuid, !organizationUuid.isEmpty else { return nil }
     return StableIdentifier.notificationComponent(organizationUuid)
+  }
+
+  /// The person within the organization. A Team organization has one seat
+  /// per member, so the organization alone does not say whose sessions these
+  /// are. Nil unless both identifiers are present.
+  var memberIdentifier: String? {
+    guard let organizationUuid, !organizationUuid.isEmpty, let accountUuid, !accountUuid.isEmpty
+    else { return nil }
+    return StableIdentifier.notificationComponent(organizationUuid + "/" + accountUuid)
   }
 
   private struct Settings: Decodable { let oauthAccount: ClaudeAccountProfile? }

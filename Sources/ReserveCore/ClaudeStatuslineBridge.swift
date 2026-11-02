@@ -14,11 +14,38 @@ public enum ClaudeStatuslineBridge {
   /// One cache per Claude account. The default account keeps its original
   /// file name, so an existing passive connection carries on after an update.
   public static func cacheURL(provider: ProviderID = .anthropic) -> URL {
-    let name = provider.isDefault
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support/Reserve/\(cacheFileName(provider: provider))")
+  }
+
+  static func cacheFileName(provider: ProviderID) -> String {
+    provider.isDefault
       ? "claude-statusline.json"
       : "claude-statusline-\(provider.kind.rawValue)-\(provider.instance ?? "").json"
-    return FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent("Library/Application Support/Reserve/\(name)")
+  }
+
+  /// Where a reading from the Claude Code session running with `environment`
+  /// may be written: the cache of the account that session is signed in to,
+  /// beside the cache the installed command names. Several Claude folders can
+  /// share one settings file, and so one command; the command's cache only
+  /// says where caches live, never whose reading this is. Nil when the
+  /// session belongs to no tracked account: the reading is dropped.
+  public static func routedCacheURL(
+    requested: URL,
+    environment: [String: String],
+    accounts: [ClaudeAccountBinding],
+    requiresVerifiedOrganization: Bool? = nil,
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+    identity: (URL) -> ClaudeFolderIdentity? = { ClaudeAccountAttribution.liveIdentity(profileURL: $0) }
+  ) -> URL? {
+    let folder = environment[ClaudeConfigDirectory.environmentKey]
+      .flatMap { $0.isEmpty ? nil : ClaudeConfigDirectory(path: $0)?.url }
+      ?? homeDirectory.appendingPathComponent(".claude", isDirectory: true)
+    guard let owner = ClaudeAccountAttribution.owner(
+      ofFolder: folder, accounts: accounts, homeDirectory: homeDirectory,
+      requiresVerifiedOrganization: requiresVerifiedOrganization, identity: identity)
+    else { return nil }
+    return requested.deletingLastPathComponent().appendingPathComponent(cacheFileName(provider: owner))
   }
 
   public static func settingsURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
@@ -136,7 +163,13 @@ public enum ClaudeStatuslineBridge {
       readGroup.leave()
     }
     guard readGroup.wait(timeout: .now() + 2) == .success, let data = input.data else { return }
-    _ = try? ingest(data, cacheURL: cacheURL)
+    if let routed = routedCacheURL(
+      requested: cacheURL, environment: ProcessInfo.processInfo.environment,
+      accounts: ClaudeAccountAttribution.bindings(defaults: .standard),
+      requiresVerifiedOrganization: ClaudeAccountAttribution.requiresVerifiedOrganization(defaults: .standard))
+    {
+      _ = try? ingest(data, cacheURL: routed)
+    }
     guard let settingsData = BoundedFileReader.read(settingsURL, maximumBytes: 1_048_576),
       let settings = try? dictionary(settingsData),
       let saved = settings[marker] as? [String: Any],

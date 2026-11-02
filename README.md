@@ -88,7 +88,7 @@ that folder, spelled the same way; changing the folder starts the card over.
 its sign-in on disk; for a key plan it also deletes the key Reserve saved. To
 use an added account in your own terminal, run the helper with its variable
 (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`) pointing at its folder.
-Activity from this Mac is not yet counted for added accounts. Claude's first
+Claude's first
 card always reads its ordinary home, even when Reserve is launched from a
 terminal using another `CLAUDE_CONFIG_DIR`. Before accepting limits, Reserve
 checks that the sign-in's organization matches that folder's account profile;
@@ -98,12 +98,19 @@ Reserve asks for a new sign-in instead of silently replacing the card's limits.
 Passive status-line readings cannot replace verified limits while tracking
 multiple Claude accounts.
 
-After tracking several Claude accounts, Reserve keeps local Claude token totals
-in Insights as **Claude on this Mac**, separate from subscription cards. Existing
-transcripts do not identify the organization responsible for each message, so
-Reserve cannot reliably split that history between personal and Team plans.
-This history is counted once and covers the default Claude folder; added-account
-folders are not scanned. Provider-reported limits remain separate for each account.
+Claude token history from this Mac is split by account, one Claude Code folder
+at a time, because each folder is one sign-in: an added account counts its own
+folder; another Claude folder in your home (for example one an app such as
+T3 Code runs with `CLAUDE_CONFIG_DIR=~/.claude_team`) counts toward the account
+signed in there as the same person in the same organization; and, once you track
+several Claude accounts, the default `~/.claude` counts toward the first card
+only while its sign-in matches the organization that card's limits verified.
+Until then it stays in Insights as **Claude on this Mac**, separate from
+subscription cards. Reserve reads only each folder's profile for this, never its
+credentials. A folder linked to one already counted is counted once, and history
+recorded earlier is kept. Provider-reported limits remain separate for each account.
+The status line follows the same rule: a reading from a Claude Code session goes
+to the card of the account that session is signed in to, or nowhere.
 
 For API spend, choosing a provider whose first key is already saved adds a
 second account in **Settings > API** with its own key field, for example a

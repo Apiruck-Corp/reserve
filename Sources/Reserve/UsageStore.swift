@@ -145,6 +145,13 @@ final class UsageStore {
   private(set) var hourlyHistoryStatus = "Hourly detail has not been loaded yet."
 
   private let localUsageScanner: LocalUsageScanner?
+  /// True only for the app's own store: its scanners read this Mac's real
+  /// Claude folders. Test stores never have their sources replaced.
+  private let ownsHistoryScanners: Bool
+  /// Set once a history plan proved the first card's folder is signed in to
+  /// the organization that card verified. Until then, while several Claude
+  /// accounts are tracked, that folder's history stays a device total.
+  private var claudeDefaultHistoryAttributed = false
   private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
   private let cachedLocalUsageLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary]
   /// Progress gates retries so a stalled checkpoint cannot create a busy loop.
@@ -426,6 +433,7 @@ final class UsageStore {
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.localUsageScanner = productionStore ? Self.makeProductionLocalUsageScanner() : nil
+    self.ownsHistoryScanners = productionStore
     self.hourlyUsageScanner = hourlyUsageScanner ?? (productionStore ? LocalHourlyUsageScanner() : nil)
     if let localUsageScan {
       self.localUsageScan = localUsageScan
@@ -554,10 +562,55 @@ final class UsageStore {
   }
 
   /// Claude transcripts do not identify the organization that paid for each
-  /// message. Keep their single device total in Insights, never credit it to
-  /// a personal or Team subscription merely because it occupies the first slot.
+  /// message; each Claude Code folder is one sign-in instead. An added
+  /// account's history comes from its own folders. The first card's folder
+  /// counts as its history only once a history plan proved it is signed in to
+  /// the organization that card verified; until then, while several Claude
+  /// accounts are tracked, it stays a device total in Insights, never credited
+  /// to a subscription merely because it occupies the first slot.
   func hasUnattributedClaudeHistory(for provider: ProviderID) -> Bool {
-    provider.isAnthropic && self.defaults.bool(forKey: "anthropic.historyIncludesMultipleAccounts")
+    provider == .anthropic && self.tracksMultipleClaudeAccounts && !self.claudeDefaultHistoryAttributed
+  }
+
+  /// Sticky once a second Claude account was added: from then on every Claude
+  /// limits read must prove its organization.
+  var tracksMultipleClaudeAccounts: Bool {
+    self.defaults.bool(forKey: "anthropic.historyIncludesMultipleAccounts")
+  }
+
+  /// Every Claude account configured here, enabled or not, so a folder can
+  /// never be credited to the only enabled account by elimination.
+  func claudeAccountBindings() -> [ClaudeAccountBinding] {
+    self.claudeProviders.map { account in
+      ClaudeAccountBinding(
+        account: account,
+        folder: account.isAdded ? self.claudeConfigDirectory(for: account) : nil,
+        verifiedOrganization: self.defaults.string(forKey: "\(account.rawValue).organizationIdentifier"))
+    }
+  }
+
+  /// Works out which Claude folders count toward which account and hands the
+  /// list to the history scanners. Reads only each folder's profile (its
+  /// organization and member ids, hashed); never a credential.
+  @discardableResult
+  func syncClaudeHistorySources() async -> ClaudeAccountAttribution.HistoryPlan {
+    let home = self.accountsHome
+    let plan = ClaudeAccountAttribution.historyPlan(
+      accounts: self.claudeAccountBindings(), homeDirectory: home,
+      discovered: ClaudeAccountAttribution.discoverFolders(homeDirectory: home),
+      requiresVerifiedOrganization: self.tracksMultipleClaudeAccounts,
+      identity: { ClaudeAccountAttribution.liveIdentity(profileURL: $0) })
+    let attributed = !plan.defaultHistoryUnattributed
+      && plan.sources.contains { $0.account == .anthropic }
+    if attributed != self.claudeDefaultHistoryAttributed {
+      self.claudeDefaultHistoryAttributed = attributed
+      self.changed()
+    }
+    if self.ownsHistoryScanners {
+      await self.localUsageScanner?.setClaudeSources(plan.sources)
+      await self.hourlyUsageScanner?.setClaudeSources(plan.sources)
+    }
+    return plan
   }
 
   /// Two Claude cards signed in to one organization would show the same
@@ -2918,6 +2971,7 @@ final class UsageStore {
   }
 
   private func loadCacheAndStart() async {
+    if self.ownsHistoryScanners { await self.syncClaudeHistorySources() }
     let cached = await self.cache.load()
     for (provider, snapshot) in cached where self.isEnabled(provider) {
       self.states[provider]?.snapshot = snapshot
@@ -3100,6 +3154,7 @@ final class UsageStore {
         if notify { self.changed() }
       }
     }
+    if self.ownsHistoryScanners { await self.syncClaudeHistorySources() }
     await self.loadCachedLocalUsage(now: self.now())
     let enabledForHours = Set(self.accounts.filter { self.isEnabled($0) })
     await self.performHourlyUsageScan(providers: enabledForHours, generation: generation, notify: notify)
@@ -3337,7 +3392,7 @@ final class UsageStore {
 
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
     let claudeOrganization = provider.isAnthropic && self.fetchOverride == nil
-      && self.hasUnattributedClaudeHistory(for: provider)
+      && self.tracksMultipleClaudeAccounts
       ? AnthropicProvider.organizationIdentifier(configDirectory: self.claudeConfigDirectory(for: provider)) : nil
     if self.fetchOverride == nil, let owner = self.claudeAccountSharingOrganization(with: provider) {
       // The last reading is the other card's quota under this card's name.
@@ -3363,7 +3418,7 @@ final class UsageStore {
           allowKeychainRead: self.keychainReadAllowed(for: provider),
           allowKeychainInteraction: allowKeychainInteraction,
           passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider),
-          requireAccountIdentity: self.hasUnattributedClaudeHistory(for: provider),
+          requireAccountIdentity: self.tracksMultipleClaudeAccounts,
           expectedOrganizationIdentifier: self.defaults.string(forKey: "\(provider.rawValue).organizationIdentifier")
             ?? claudeOrganization)
       case .grok: GrokProvider(environment: self.helperEnvironment(for: provider))
