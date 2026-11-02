@@ -1855,9 +1855,15 @@ public actor LocalUsageScanner {
       // revalidated. Missing roots are removed from dirtyProviders in visit(),
       // while a warm skip intentionally retains the last verified timestamp.
       // An account with several folders is as current as its oldest one.
-      let fetchedAt = units.map {
-        ledger.dirtyProviders.contains($0) ? now : (self.lastScanDates[$0] ?? box.index.updatedAt)
-      }.min() ?? now
+      // A plain loop, not a closure: capturing `ledger` and `box` in a
+      // closure fails strict concurrency checking on CI's compiler.
+      var oldestFetchedAt: Date?
+      for unit in units {
+        let unitFetchedAt = ledger.dirtyProviders.contains(unit)
+          ? now : (self.lastScanDates[unit] ?? box.index.updatedAt)
+        oldestFetchedAt = min(oldestFetchedAt ?? unitFetchedAt, unitFetchedAt)
+      }
+      let fetchedAt = oldestFetchedAt ?? now
       summaries[provider] = totals.summary(
         provider: provider, periodDays: days, today: today, cycle: cycle,
         cycleStartedAt: cycleStart, now: fetchedAt, dailyTokens: series[provider] ?? [])
