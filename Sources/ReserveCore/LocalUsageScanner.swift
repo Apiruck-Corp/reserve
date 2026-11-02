@@ -2447,7 +2447,8 @@ private struct UsageIndex: Codable {
     self.dailyHistory = Self.bounded(history)
   }
 
-  private static let maximumProviders = 8
+  /// Codex, Grok and every Claude folder unit (discovery is bounded to 32).
+  private static let maximumProviders = 64
   private static let maximumDaysPerProvider = CachedUsageHistory.retentionDays
 
   private static func bounded(

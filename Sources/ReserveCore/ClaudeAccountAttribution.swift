@@ -159,6 +159,11 @@ public enum ClaudeAccountAttribution {
       var account = Self.owner(
         ofFolder: folder, accounts: claude, homeDirectory: homeDirectory,
         requiresVerifiedOrganization: requiresVerifiedOrganization, identity: identity)
+      // The default home follows whatever plain Claude Code last signed in
+      // to, and its profile proves only today's sign-in, not who wrote the
+      // transcripts already there. Its history is the first card's or a
+      // device total, never moved wholesale to another card.
+      if folder == defaultHome, account != nil, account?.isDefault != true { account = nil }
       if account == nil, folder == defaultHome, let first = claude.first(where: \.account.isDefault) {
         // Unproven: keep counting it once, as the device total it was before.
         account = first.account

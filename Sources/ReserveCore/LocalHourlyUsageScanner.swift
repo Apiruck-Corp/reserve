@@ -184,6 +184,11 @@ public actor LocalHourlyUsageScanner {
     }
     if !incomplete {
       next.records = next.records.filter { !supported.contains($0.value.provider) || seen.contains($0.key) }
+      // A Claude account asked for that no longer has a folder publishes
+      // nothing, rather than keeping hours its folder now credits elsewhere.
+      for provider in providers where provider.isAnthropic && groups[provider] == nil {
+        next.published[provider] = nil
+      }
       for (provider, units) in groups {
         next.published[provider] = nil
         guard !available.isDisjoint(with: units) else { continue }

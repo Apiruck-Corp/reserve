@@ -1562,6 +1562,16 @@ enum ConnectionFlowSelfTest {
     expect(!store.hasUnattributedClaudeHistory(for: .anthropic)
       && store.insightHistoryName(for: .anthropic) != "Claude on this Mac",
       "proven personal history was still shown as a device total")
+    // The Team card's folders reach Insights, not only the scanner.
+    let wasEnabled = store.localHistoryEnabled
+    store.localHistoryEnabled = true
+    store.publishCachedHistory([team: CachedUsageHistory(provider: team, days: [
+      CachedUsageDay(day: "2026-10-19", tokens: 12,
+        costUSD: nil, fetchedAt: Date()),
+    ])])
+    expect(store.publishedDailyHistory[team]?.map(\.tokens) == [12],
+      "the Team card's own history was dropped before Insights")
+    store.localHistoryEnabled = wasEnabled
 
     defaults.set(
       StableIdentifier.notificationComponent("org-other"), forKey: "anthropic.organizationIdentifier")

@@ -96,9 +96,16 @@ import Testing
   @Test func firstCardNeedsItsVerifiedOrganizationWhileSeveralAccountsAreTracked() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
-    // ~/.claude signed in to the Team seat: its sessions are Team's.
+    // ~/.claude signed in to the Team seat today proves nothing about the
+    // transcripts already there: never moved to Team, kept as a device total.
     try Fixture.profile(fixture.home.appendingPathComponent(".claude.json"), "org-team", "po")
-    #expect(self.accounts(fixture.plan(), fixture.defaultHome) == [Self.team])
+    let switched = fixture.plan()
+    #expect(self.accounts(switched, fixture.defaultHome) == [.anthropic] && switched.defaultHistoryUnattributed)
+    // Its status line does belong to Team: that reading is Team's quota.
+    #expect(ClaudeStatuslineBridge.routedCacheURL(
+      requested: fixture.root.appendingPathComponent("claude-statusline.json"), environment: [:],
+      accounts: fixture.bindings, homeDirectory: fixture.home)?.lastPathComponent
+      == "claude-statusline-anthropic-56148cb5.json")
 
     // Signed in somewhere no card verified: kept once, as a device total.
     try Fixture.profile(fixture.home.appendingPathComponent(".claude.json"), "org-elsewhere", "po")
@@ -179,6 +186,36 @@ import Testing
     await scanner.setClaudeSources(fixture.plan().sources)
     let back = try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])
     #expect(back[.anthropic]?.inputTokens == 100 && back[Self.team]?.inputTokens == 12)
+
+    // The recorded day outlives its transcript, also after a reload.
+    try FileManager.default.removeItem(at: fixture.t3.appendingPathComponent("projects/p/s.jsonl"))
+    _ = try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])
+    let reloaded = fixture.scanner()
+    await reloaded.setClaudeSources(fixture.plan().sources)
+    let kept = await reloaded.cachedHistory(now: fixture.now, providers: [.anthropic, Self.team])
+    #expect(kept[Self.team]?.days.map(\.tokens) == [12])
+    #expect(kept[.anthropic]?.days.map(\.tokens) == [100])
+  }
+
+  @Test func addedClaudeAccountsReachInsights() {
+    #expect(ProviderDescriptor.forProvider(Self.team).capabilities.contains(.localHistory))
+    let codex = ProviderID(kind: .openAI, instance: "aaaa1111")!
+    #expect(!ProviderDescriptor.forProvider(codex).capabilities.contains(.localHistory))
+  }
+
+  @Test func hourlyHistoryDropsAnAccountThatLostItsFolders() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try fixture.session(fixture.t3, input: 7, id: "t3")
+    let scanner = LocalHourlyUsageScanner(
+      roots: .init(codex: fixture.codex, claude: fixture.projects(fixture.defaultHome), grok: fixture.root),
+      cacheURL: fixture.root.appendingPathComponent("hourly.json"), timeZone: .gmt)
+    await scanner.setClaudeSources(fixture.plan().sources)
+    #expect(try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])[Self.team] != nil)
+    await scanner.setClaudeSources([ClaudeHistorySource(account: .anthropic, projects: fixture.projects(fixture.defaultHome))])
+    let after = try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])
+    #expect(after[Self.team] == nil)
+    #expect(after[.anthropic]?.dailyUsage(timeZone: .gmt).tokens == 0)
   }
 
   @Test func hourlyHistoryIsSplitPerAccount() async throws {
