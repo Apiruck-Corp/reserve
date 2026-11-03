@@ -174,8 +174,9 @@ final class UsageStore {
   private var loginOutputs: [ProviderID: Pipe] = [:]
   /// One browser handoff per Claude slot: both can sign in on the same Mac.
   private var claudeBrowserPipes: [ProviderID: ClaudeLoginBrowserPipe] = [:]
-  /// Claude sign-ins whose Claude Code versions are being read before launch.
-  private var loginHelperChecks: Set<ProviderID> = []
+  /// Claude sign-ins whose Claude Code versions are being read before launch,
+  /// by login generation: a cancelled check never holds back the next one.
+  private var loginHelperChecks: [ProviderID: Int] = [:]
   /// The helper's own last words when it exited with an error, shown with
   /// "sign-in was not completed" so the person (and support) can see why.
   private var loginFailureReasons: [ProviderID: String] = [:]
@@ -1767,7 +1768,9 @@ final class UsageStore {
       onFinished?()
       return
     }
-    if self.loginProcesses[provider]?.isRunning == true || self.loginHelperChecks.contains(provider) {
+    if self.loginProcesses[provider]?.isRunning == true
+      || (self.loginHelperChecks[provider].map { $0 == self.loginGenerations[provider] } ?? false)
+    {
       // One sign-in at a time. The caller hears back when the running one
       // ends, alongside whoever started it.
       let running = self.loginCompletions[provider]
@@ -1785,13 +1788,15 @@ final class UsageStore {
     if provider.isAnthropic, commandOverride == nil {
       // Old Claude Code builds stop before opening a browser, and an old copy
       // can sit ahead of a current one in the search order. Pick by version.
-      self.loginHelperChecks.insert(provider)
+      self.loginHelperChecks[provider] = generation
       self.states[provider]?.isConnecting = true
       self.changed()
       Task { [weak self] in
         let selection = await ClaudeCodeHelper.select()
         guard let self else { return }
-        self.loginHelperChecks.remove(provider)
+        if self.loginHelperChecks[provider] == generation {
+          self.loginHelperChecks.removeValue(forKey: provider)
+        }
         // Cancelled while the versions were read: its completion is gone.
         guard self.loginGenerations[provider] == generation else { return }
         switch selection {
