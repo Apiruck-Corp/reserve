@@ -32,6 +32,10 @@ struct InstallerDownloadTests {
       _ = try await ProviderHelperInstaller(session: RedirectingInstallerProtocol.session())
         .downloadInstaller(definition)
     }
+    // Refused before it is requested, not fetched and thrown away afterwards.
+    let destination = try #require(
+      URLComponents(string: address)?.queryItems?.first { $0.name == "to" }?.value)
+    #expect(!RedirectingInstallerProtocol.requested.contains(destination))
   }
 
   @Test func onlyTheProvidersOwnDomainsCount() throws {
@@ -53,6 +57,10 @@ struct InstallerDownloadTests {
 /// really send, `?to=` with a redirect to that address, and anything else
 /// with the script.
 private final class RedirectingInstallerProtocol: URLProtocol, @unchecked Sendable {
+  private static let lock = NSLock()
+  nonisolated(unsafe) private static var requestedAddresses: Set<String> = []
+  static var requested: Set<String> { Self.lock.withLock { Self.requestedAddresses } }
+
   static func session() -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [RedirectingInstallerProtocol.self]
@@ -64,6 +72,7 @@ private final class RedirectingInstallerProtocol: URLProtocol, @unchecked Sendab
 
   override func startLoading() {
     guard let url = self.request.url else { return }
+    _ = Self.lock.withLock { Self.requestedAddresses.insert(url.absoluteString) }
     let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
     let target: String? = switch (url.host, url.path) {
     case _ where query?.first(where: { $0.name == "to" }) != nil:

@@ -295,6 +295,11 @@ public struct AnthropicProvider: UsageProvider {
   static let signInExpiredCredentials = UsageProviderError.credentialsNotFound(
     "Claude sign-in expired. Use Sign in to reconnect.")
 
+  /// Nothing is stored anywhere Claude Code keeps a sign-in (no Keychain
+  /// item, no credentials file), so signing in replaces nothing.
+  public static let noStoredSignIn = UsageProviderError.credentialsNotFound(
+    "Claude OAuth credentials were not found. Use Sign in to authenticate.")
+
   private func loadCredentials() async throws -> ClaudeCredentials {
     try await ClaudeCredentialLoader.load(
       environment: self.environment, allowKeychainRead: self.allowKeychainRead,
@@ -658,8 +663,7 @@ enum ClaudeCredentialLoader {
       if consentIsPending { throw UsageProviderError.keychainConsentRequired(provider) }
     #endif
     guard collected.all.isEmpty else { throw AnthropicProvider.signInExpiredCredentials }
-    throw UsageProviderError.credentialsNotFound(
-      "Claude OAuth credentials were not found. Use Sign in to authenticate.")
+    throw AnthropicProvider.noStoredSignIn
   }
 
   /// What one pass over the stores found, including whether the protected store

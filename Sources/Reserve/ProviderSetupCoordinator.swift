@@ -36,9 +36,11 @@ final class ProviderSetupCoordinator {
   private var generation = 0
   private var loginCompleted = false
   private var loginAttempted = false
-  /// Reserve installed the helper in this window. A Claude Code that was not
-  /// on the Mac a moment ago has no sign-in to replace, so the sign-in
-  /// confirmation is skipped and the browser opens straight away.
+  /// Reserve installed the helper in this window. When the check that
+  /// follows also finds no stored sign-in at all, there is nothing to
+  /// replace, so the sign-in confirmation is skipped and the browser opens
+  /// straight away. A sign-in that exists but cannot be used (expired,
+  /// another organization, a Claude Code Reserve could not see) still asks.
   private var installedHelperInFlow = false
   private var wasEnabled = false
   /// Set when the person asked for this window (Connect pressed again, or
@@ -149,7 +151,9 @@ final class ProviderSetupCoordinator {
     // browser when needed, but never automatically repeat a failed login, and
     // never start one that replaces a sign-in without saying so first.
     if self.phase == .needsSignIn && !self.loginAttempted
-      && (!Self.asksBeforeSignIn(provider) || self.installedHelperInFlow)
+      && (!Self.asksBeforeSignIn(provider)
+        || (self.installedHelperInFlow
+          && state.error == AnthropicProvider.noStoredSignIn.localizedDescription))
     {
       self.continueConnection()
     }

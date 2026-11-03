@@ -1356,38 +1356,51 @@ enum ConnectionFlowSelfTest {
     coordinator.close()
     for provider in store.accounts { store.cancelConnection(provider) }
 
-    // Once Reserve has installed Claude Code there is no sign-in to replace,
-    // so the browser opens without the "replaces the sign-in" stop. Without
-    // an install in this window, the stop stays (checked just above).
+    // Once Reserve has installed Claude Code on a Mac with no stored sign-in,
+    // there is nothing to replace, so the browser opens without the
+    // "replaces the sign-in" stop. A sign-in that exists but is rejected
+    // (another organization, expired) keeps the stop even after an install.
     let script = directory.appendingPathComponent("claude-code-login.sh")
     do { try "#!/bin/sh\nsleep 5\n".write(to: script, atomically: true, encoding: .utf8) }
     catch { return failures + ["claude code: login fixture could not be saved"] }
-    await selection.set(.missing)
-    let installStore = UsageStore(
-      defaults: defaults, startAutomatically: false, notificationsActive: false,
-      cache: SnapshotCache(fileURL: directory.appendingPathComponent("claude-code-install.json")),
-      fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
-      loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
-      openLoginURL: { _ in false },
-      planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
-      claudeCodeSelection: { await selection.current })
-    for provider in installStore.accounts {
-      installStore.setEnabled(provider, enabled: false, refreshImmediately: false)
+    for (mode, expected) in [
+      (ConnectionTestResponses.Mode.noStoredSignIn, ProviderSetupCoordinator.Phase.signingIn),
+      (.signedOut, .needsSignIn),
+    ] {
+      await selection.set(.missing)
+      await responses.set(mode)
+      let installStore = UsageStore(
+        defaults: defaults, startAutomatically: false, notificationsActive: false,
+        cache: SnapshotCache(fileURL: directory.appendingPathComponent("claude-code-install-\(mode).json")),
+        fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+        loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
+        openLoginURL: { _ in false },
+        planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
+        claudeCodeSelection: { await selection.current })
+      for provider in installStore.accounts {
+        installStore.setEnabled(provider, enabled: false, refreshImmediately: false)
+      }
+      let installer = InstallingFixture(selection: selection)
+      let installing = ProviderSetupCoordinator(store: installStore, installer: installer)
+      installing.start(.anthropic)
+      await settle { installing.phase == .needsInstall }
+      click("connection-primary", in: installing.panel)
+      await settle { installing.phase == expected && (expected != .signingIn
+        || installStore.loginLaunchCount(for: .anthropic) == 1) }
+      if await installer.installs != 1 {
+        failures.append("claude code (\(mode)): Install and continue did not run the installer once")
+      }
+      if installing.phase != expected {
+        failures.append("claude code (\(mode)): after installing, sign-in reached \(installing.phase) instead of \(expected)")
+      }
+      let launches = installStore.loginLaunchCount(for: .anthropic)
+      if launches != (expected == .signingIn ? 1 : 0) {
+        failures.append("claude code (\(mode)): after installing, sign-in launched \(launches) times")
+      }
+      installing.close()
+      for provider in installStore.accounts { installStore.cancelConnection(provider) }
     }
-    let installer = InstallingFixture(selection: selection)
-    let installing = ProviderSetupCoordinator(store: installStore, installer: installer)
-    installing.start(.anthropic)
-    await settle { installing.phase == .needsInstall }
-    click("connection-primary", in: installing.panel)
-    await settle { installing.phase == .signingIn }
-    if await installer.installs != 1 {
-      failures.append("claude code: Install and continue did not run the installer once")
-    }
-    if installing.phase != .signingIn {
-      failures.append("claude code: after installing, sign-in stopped at \(installing.phase) instead of opening")
-    }
-    installing.close()
-    for provider in installStore.accounts { installStore.cancelConnection(provider) }
+    await responses.set(.signedOut)
     return failures
   }
 
@@ -1966,6 +1979,8 @@ private actor ClaudeCodeSelectionFixture {
 private actor ConnectionTestResponses {
   enum Mode {
     case success, missingHelper, permission, deniedPermission, offline, signedOut, slowSuccess
+    /// No Claude sign-in is stored anywhere (a Mac that never had Claude Code).
+    case noStoredSignIn
     case slowPermission, accessDenied
     /// The protected item can be read once allowed, but holds no usable sign-in.
     case unusableSavedSignIn
@@ -1998,6 +2013,7 @@ private actor ConnectionTestResponses {
     case .offline: throw UsageProviderError.unavailable("offline fixture")
     case .accessDenied: throw UsageProviderError.accessDenied("denied fixture")
     case .signedOut: throw UsageProviderError.unauthorized("expired fixture")
+    case .noStoredSignIn: throw AnthropicProvider.noStoredSignIn
     case .slowSuccess: try? await Task.sleep(for: .milliseconds(250))
     case .success: break
     }
