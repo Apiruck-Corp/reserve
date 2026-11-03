@@ -50,10 +50,11 @@ public enum ProviderHTTPSession {
   public static func boundedData(
     for request: URLRequest,
     using session: URLSession = Self.shared,
-    maximumBytes: Int
+    maximumBytes: Int,
+    allowsRedirect: (@Sendable (URL?) -> Bool)? = nil
   ) async throws -> (Data, URLResponse) {
     precondition(maximumBytes >= 0)
-    let receiver = BoundedHTTPReceiver(maximumBytes: maximumBytes)
+    let receiver = BoundedHTTPReceiver(maximumBytes: maximumBytes, allowsRedirect: allowsRedirect)
     return try await withTaskCancellationHandler {
       try Task.checkCancellation()
       return try await withCheckedThrowingContinuation { continuation in
@@ -78,9 +79,13 @@ private final class BoundedHTTPReceiver: NSObject, URLSessionDataDelegate, @unch
   private var task: URLSessionDataTask?
   private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
   private var finished = false
+  /// Nil keeps every redirect on the original host. Only requests that carry
+  /// no credentials (installer downloads) widen it.
+  private let allowsRedirect: (@Sendable (URL?) -> Bool)?
 
-  init(maximumBytes: Int) {
+  init(maximumBytes: Int, allowsRedirect: (@Sendable (URL?) -> Bool)? = nil) {
     self.maximumBytes = maximumBytes
+    self.allowsRedirect = allowsRedirect
     self.data.reserveCapacity(min(maximumBytes, 64 * 1_024))
   }
 
@@ -172,6 +177,10 @@ private final class BoundedHTTPReceiver: NSObject, URLSessionDataDelegate, @unch
     newRequest request: URLRequest,
     completionHandler: @escaping (URLRequest?) -> Void
   ) {
+    if let allowsRedirect = self.allowsRedirect {
+      completionHandler(allowsRedirect(request.url) ? request : nil)
+      return
+    }
     let original = task.originalRequest?.url?.host?.lowercased()
     let destination = request.url?.host?.lowercased()
     completionHandler(

@@ -1355,6 +1355,39 @@ enum ConnectionFlowSelfTest {
     }
     coordinator.close()
     for provider in store.accounts { store.cancelConnection(provider) }
+
+    // Once Reserve has installed Claude Code there is no sign-in to replace,
+    // so the browser opens without the "replaces the sign-in" stop. Without
+    // an install in this window, the stop stays (checked just above).
+    let script = directory.appendingPathComponent("claude-code-login.sh")
+    do { try "#!/bin/sh\nsleep 5\n".write(to: script, atomically: true, encoding: .utf8) }
+    catch { return failures + ["claude code: login fixture could not be saved"] }
+    await selection.set(.missing)
+    let installStore = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      cache: SnapshotCache(fileURL: directory.appendingPathComponent("claude-code-install.json")),
+      fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+      loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
+      openLoginURL: { _ in false },
+      planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
+      claudeCodeSelection: { await selection.current })
+    for provider in installStore.accounts {
+      installStore.setEnabled(provider, enabled: false, refreshImmediately: false)
+    }
+    let installer = InstallingFixture(selection: selection)
+    let installing = ProviderSetupCoordinator(store: installStore, installer: installer)
+    installing.start(.anthropic)
+    await settle { installing.phase == .needsInstall }
+    click("connection-primary", in: installing.panel)
+    await settle { installing.phase == .signingIn }
+    if await installer.installs != 1 {
+      failures.append("claude code: Install and continue did not run the installer once")
+    }
+    if installing.phase != .signingIn {
+      failures.append("claude code: after installing, sign-in stopped at \(installing.phase) instead of opening")
+    }
+    installing.close()
+    for provider in installStore.accounts { installStore.cancelConnection(provider) }
     return failures
   }
 
@@ -1910,6 +1943,19 @@ enum ConnectionFlowSelfTest {
       try? await Task.sleep(for: .milliseconds(20))
     }
   }
+}
+
+/// Stands in for the real installer: "installing" makes a current Claude
+/// Code appear, as the official installer does.
+private actor InstallingFixture: HelperInstalling {
+  let selection: ClaudeCodeSelectionFixture
+  private(set) var installs = 0
+  init(selection: ClaudeCodeSelectionFixture) { self.selection = selection }
+  func install(_ provider: ProviderID) async throws {
+    self.installs += 1
+    await self.selection.set(.ready("/Users/test/.local/bin/claude"))
+  }
+  func update(_ provider: ProviderID) async throws {}
 }
 
 private actor ClaudeCodeSelectionFixture {

@@ -28,7 +28,7 @@ final class ProviderSetupCoordinator {
   }
 
   private let store: UsageStore
-  private let installer: ProviderHelperInstaller
+  private let installer: any HelperInstalling
   private(set) var activeProvider: ProviderID?
   private(set) var phase: Phase = .checking
   private(set) var panel: ProviderConnectionPanel?
@@ -36,6 +36,10 @@ final class ProviderSetupCoordinator {
   private var generation = 0
   private var loginCompleted = false
   private var loginAttempted = false
+  /// Reserve installed the helper in this window. A Claude Code that was not
+  /// on the Mac a moment ago has no sign-in to replace, so the sign-in
+  /// confirmation is skipped and the browser opens straight away.
+  private var installedHelperInFlow = false
   private var wasEnabled = false
   /// Set when the person asked for this window (Connect pressed again, or
   /// for another provider), so steps that normally pass without a window keep
@@ -53,7 +57,7 @@ final class ProviderSetupCoordinator {
   private var savedKeyInFlow = false
   private var keySaveInFlight = false
 
-  init(store: UsageStore, installer: ProviderHelperInstaller = ProviderHelperInstaller()) {
+  init(store: UsageStore, installer: any HelperInstalling = ProviderHelperInstaller()) {
     self.store = store
     self.installer = installer
   }
@@ -78,6 +82,7 @@ final class ProviderSetupCoordinator {
     self.generation += 1
     self.loginCompleted = false
     self.loginAttempted = false
+    self.installedHelperInFlow = false
     self.keepsWindowVisible = false
     self.notice = nil
     self.failureMessage = nil
@@ -143,7 +148,9 @@ final class ProviderSetupCoordinator {
     // Connect already expresses the user's intent to sign in. Open the
     // browser when needed, but never automatically repeat a failed login, and
     // never start one that replaces a sign-in without saying so first.
-    if self.phase == .needsSignIn && !self.loginAttempted && !Self.asksBeforeSignIn(provider) {
+    if self.phase == .needsSignIn && !self.loginAttempted
+      && (!Self.asksBeforeSignIn(provider) || self.installedHelperInFlow)
+    {
       self.continueConnection()
     }
   }
@@ -217,6 +224,7 @@ final class ProviderSetupCoordinator {
           // A sign-in that stopped because the helper was missing or too old
           // was never really tried, so the window asks fresh.
           self.loginAttempted = false
+          if installing { self.installedHelperInFlow = true }
           self.check()
         } catch {
           guard self.generation == generation else { return }
@@ -526,7 +534,7 @@ final class ProviderConnectionPanel: NSPanel {
       busy = true
     case .needsInstall:
       self.heading.stringValue = "Connect \(name)"
-      self.message.stringValue = "Reserve needs the official \(helperName). Install it for your Mac user, then continue here. No Terminal needed."
+      self.message.stringValue = "Reserve needs the official \(helperName). It is free and installs for your Mac user in a minute or two, with no password and no Terminal."
       self.privacy.stringValue = "Downloaded from \(helper?.installerURL.host ?? name). Installation starts only when you choose Install and continue."
       action = "Install and continue"
     case .needsUpdate:

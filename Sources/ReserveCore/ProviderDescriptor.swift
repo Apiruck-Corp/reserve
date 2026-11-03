@@ -124,13 +124,13 @@ public struct ProviderDescriptor: Sendable {
     return switch kind {
     case .openAI:
       Self(id: id, displayName: "OpenAI", executable: "codex", helperName: "Codex helper",
-        installer: "https://chatgpt.com/codex/install.sh", account: "https://chatgpt.com/codex/settings/usage",
+        installer: "https://chatgpt.com/codex/install.sh", installerDomains: ["openai.com"], account: "https://chatgpt.com/codex/settings/usage",
         status: "https://status.openai.com", capabilities: [.liveAllowance, .localHistory, .accountHistory],
         loginArguments: ["login"], loginDisplayName: "Codex",
         trustedLoginHosts: ["auth.openai.com", "chatgpt.com", "platform.openai.com"])
     case .anthropic:
       Self(id: id, displayName: "Claude", executable: "claude", helperName: "Claude helper",
-        installer: "https://claude.ai/install.sh", account: "https://claude.ai/settings/usage",
+        installer: "https://claude.ai/install.sh", installerDomains: ["claude.ai"], account: "https://claude.ai/settings/usage",
         status: "https://status.claude.com", capabilities: [.liveAllowance, .localHistory, .extraSpending, .limitMeters],
         authenticationStrategy: .protectedSession,
         loginArguments: ["auth", "login", "--claudeai"], loginDisplayName: "Claude Code",
@@ -195,7 +195,7 @@ public struct ProviderDescriptor: Sendable {
 
   private init(
     id: ProviderID, displayName: String, executable: String, helperName: String,
-    installer: String, account: String, status: String?, statusFormat: StatusFormat = .statuspage,
+    installer: String, installerDomains: [String] = [], account: String, status: String?, statusFormat: StatusFormat = .statuspage,
     capabilities: Capabilities, authenticationStrategy: AuthenticationStrategy = .cliOAuth,
     installationStrategy: InstallationStrategy = .automaticHelper, updateArguments: [String]? = nil,
     loginArguments: [String], loginDisplayName: String, trustedLoginHosts: Set<String>,
@@ -205,7 +205,7 @@ public struct ProviderDescriptor: Sendable {
     self.displayName = displayName
     self.helper = ProviderHelperDefinition(
       provider: id, executable: executable, displayName: helperName,
-      installerURL: URL(string: installer)!,
+      installerURL: URL(string: installer)!, installerDomains: installerDomains,
       updateArguments: updateArguments ?? (installationStrategy == .automaticHelper ? ["update"] : []))
     self.accountURL = URL(string: account)!
     self.statusURL = status.flatMap { URL(string: $0) }
