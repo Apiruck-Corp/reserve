@@ -214,6 +214,9 @@ final class ProviderSetupCoordinator {
             self.close()
             return
           }
+          // A sign-in that stopped because the helper was missing or too old
+          // was never really tried, so the window asks fresh.
+          self.loginAttempted = false
           self.check()
         } catch {
           guard self.generation == generation else { return }

@@ -111,9 +111,21 @@ public enum BinaryLocator {
       $0.lastPathComponent.compare(
         $1.lastPathComponent, options: [.numeric, .caseInsensitive]) == .orderedDescending
     }) {
-      let candidate = version
-        .appendingPathComponent("claude.app/Contents/MacOS/claude").path
-      if let executable = Self.executable(at: candidate) { return executable }
+      // Current desktop releases add a build folder per version
+      // (`2.1.309/5af865b9901c/claude.app`) and mark a finished download with
+      // `.verified`; earlier ones kept `claude.app` directly in the version.
+      let builds = ((try? fileManager.contentsOfDirectory(
+        at: version, includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles])) ?? [])
+        .filter {
+          fileManager.fileExists(atPath: $0.appendingPathComponent(".verified").path)
+        }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+      for folder in [version] + builds {
+        let candidate = folder
+          .appendingPathComponent("claude.app/Contents/MacOS/claude").path
+        if let executable = Self.executable(at: candidate) { return executable }
+      }
     }
     return nil
   }

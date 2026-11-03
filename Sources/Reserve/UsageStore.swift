@@ -174,6 +174,11 @@ final class UsageStore {
   private var loginOutputs: [ProviderID: Pipe] = [:]
   /// One browser handoff per Claude slot: both can sign in on the same Mac.
   private var claudeBrowserPipes: [ProviderID: ClaudeLoginBrowserPipe] = [:]
+  /// Claude sign-ins whose Claude Code versions are being read before launch.
+  private var loginHelperChecks: Set<ProviderID> = []
+  /// The helper's own last words when it exited with an error, shown with
+  /// "sign-in was not completed" so the person (and support) can see why.
+  private var loginFailureReasons: [ProviderID: String] = [:]
   private var loginStorageFailures: Set<ProviderID> = []
   private var loginTimeoutMessages: [ProviderID: String] = [:]
   private var loginOutputBuffers: [ProviderID: Data] = [:]
@@ -1762,7 +1767,7 @@ final class UsageStore {
       onFinished?()
       return
     }
-    if self.loginProcesses[provider]?.isRunning == true {
+    if self.loginProcesses[provider]?.isRunning == true || self.loginHelperChecks.contains(provider) {
       // One sign-in at a time. The caller hears back when the running one
       // ends, alongside whoever started it.
       let running = self.loginCompletions[provider]
@@ -1777,15 +1782,51 @@ final class UsageStore {
     let generation = (self.loginGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = generation
     let commandOverride = self.loginCommandOverride?(provider)
+    if provider.isAnthropic, commandOverride == nil {
+      // Old Claude Code builds stop before opening a browser, and an old copy
+      // can sit ahead of a current one in the search order. Pick by version.
+      self.loginHelperChecks.insert(provider)
+      self.states[provider]?.isConnecting = true
+      self.changed()
+      Task { [weak self] in
+        let selection = await ClaudeCodeHelper.select()
+        guard let self else { return }
+        self.loginHelperChecks.remove(provider)
+        // Cancelled while the versions were read: its completion is gone.
+        guard self.loginGenerations[provider] == generation else { return }
+        switch selection {
+        case .ready(let executable):
+          self.launchLogin(
+            provider, configuration: configuration, executable: executable,
+            arguments: configuration.arguments, generation: generation)
+        case .tooOld(_, let version):
+          self.markHelperTooOld(provider, version: version)
+          self.loginCompletions.removeValue(forKey: provider)?()
+        case .missing:
+          self.states[provider]?.isConnecting = false
+          self.markHelperMissing(provider)
+          self.loginCompletions.removeValue(forKey: provider)?()
+        }
+      }
+      return
+    }
     guard let executable = commandOverride?.executable ?? BinaryLocator.find(configuration.executable) else {
       self.markHelperMissing(provider)
       self.loginCompletions.removeValue(forKey: provider)?()
       return
     }
+    self.launchLogin(
+      provider, configuration: configuration, executable: executable,
+      arguments: commandOverride?.arguments ?? configuration.arguments, generation: generation)
+  }
 
+  private func launchLogin(
+    _ provider: ProviderID, configuration: LoginConfiguration, executable: String,
+    arguments: [String], generation: Int
+  ) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
-    process.arguments = commandOverride?.arguments ?? configuration.arguments
+    process.arguments = arguments
     process.environment = BinaryLocator.environment(
       BinaryLocator.childEnvironment(), launching: executable)
     if provider == .cursor {
@@ -1911,6 +1952,20 @@ final class UsageStore {
     self.loginLaunchCounts[provider] ?? 0
   }
   #endif
+
+  /// Claude Code is installed but too old for `auth login --claudeai`. The
+  /// Connect window offers Update and continue instead of a sign-in that
+  /// would fail before the browser opens.
+  private func markHelperTooOld(_ provider: ProviderID, version: String) {
+    self.states[provider]?.error =
+      "Claude Code \(version) is too old to sign in from Reserve. Update it to \(ClaudeCodeHelper.minimumSignInVersionText) or newer."
+    self.states[provider]?.requiresUpdate = true
+    self.states[provider]?.requiresInstallation = false
+    self.states[provider]?.requiresConnection = false
+    self.states[provider]?.signInCouldNotStart = false
+    self.states[provider]?.isConnecting = false
+    self.changed()
+  }
 
   private func markHelperMissing(_ provider: ProviderID) {
     self.states[provider]?.error =
@@ -2816,6 +2871,13 @@ final class UsageStore {
     }
     self.loginGenerations[provider] = generation + 1
     let completion = self.loginCompletions.removeValue(forKey: provider)
+    if status != 0, let buffer = self.loginOutputBuffers[provider],
+      let reason = SignInOutput.failureReason(in: String(decoding: buffer, as: UTF8.self))
+    {
+      self.loginFailureReasons[provider] = reason
+    } else {
+      self.loginFailureReasons.removeValue(forKey: provider)
+    }
     self.cleanUpLogin(provider)
     self.states[provider]?.isConnecting = false
     if self.loginStorageFailures.contains(provider) {
@@ -2862,6 +2924,7 @@ final class UsageStore {
   /// was found afterwards.
   private func markLoginNotCompleted(_ provider: ProviderID) {
     let timeoutMessage = self.loginTimeoutMessages.removeValue(forKey: provider)
+    let reason = self.loginFailureReasons.removeValue(forKey: provider)
     self.states[provider]?.requiresConnection = true
     self.states[provider]?.requiresInstallation = false
     self.states[provider]?.requiresUpdate = false
@@ -2870,10 +2933,16 @@ final class UsageStore {
     // and its Allow access action.
     if self.states[provider]?.requiresKeychainAccess != true {
       self.states[provider]?.error = timeoutMessage
+        ?? reason.map { "\(provider.displayName) sign-in was not completed. \(Self.loginDisplayName(provider)) said: \($0)" }
         ?? "\(provider.displayName) sign-in was not completed. Try again when you are ready."
     }
     self.changed()
   }
+
+  private static func loginDisplayName(_ provider: ProviderID) -> String {
+    ProviderDescriptor.forProvider(provider).loginDisplayName
+  }
+
 
   private func cleanUpLogin(_ provider: ProviderID) {
     self.claudeBrowserPipes.removeValue(forKey: provider)?.close()

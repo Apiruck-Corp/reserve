@@ -988,8 +988,13 @@ actor ClaudeSessionRenewer {
     scopes: [String]?,
     environment: [String: String],
     now: Date = Date(),
-    locator: @Sendable ([String: String]) -> String? = {
-      BinaryLocator.find("claude", environment: $0)
+    locator: @Sendable ([String: String]) async -> String? = {
+      // The renewal uses `auth login --claudeai` too, so an old copy ahead
+      // in the search order would fail it the same way.
+      if case .ready(let path) = await ClaudeCodeHelper.select(
+        candidates: BinaryLocator.candidates("claude", environment: $0))
+      { return path }
+      return nil
     },
     runner: @Sendable (String, [String], [String: String], Duration) async throws -> Void = {
       executable, arguments, environment, timeout in
@@ -1000,7 +1005,7 @@ actor ClaudeSessionRenewer {
   ) async -> Bool {
     if Self.isWithin(Self.failureBackoff, of: self.lastFailureAt, now: now) { return false }
     if Self.isWithin(Self.cooldown, of: self.lastAttemptAt, now: now) { return false }
-    guard let executable = locator(environment) else { return false }
+    guard let executable = await locator(environment) else { return false }
     self.lastAttemptAt = now
     // This login must stay non-interactive, and it is Reserve's own initiative
     // rather than a command the user typed. The allowlisted environment leaves

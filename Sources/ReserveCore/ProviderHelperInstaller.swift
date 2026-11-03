@@ -120,6 +120,10 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
     else {
       throw ProviderHelperInstallerError.installFailed("Update \(provider.displayName) using its official installation instructions, then return to Reserve.")
     }
+    if provider.isAnthropic {
+      try await self.updateClaudeCode(definition)
+      return
+    }
     guard let executable = BinaryLocator.find(definition.executable) else {
       throw ProviderHelperInstallerError.helperNotFound(definition.displayName)
     }
@@ -135,6 +139,31 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
     }
     guard BinaryLocator.find(definition.executable) != nil else {
       throw ProviderHelperInstallerError.helperNotFound(definition.displayName)
+    }
+  }
+
+  /// Claude Code updates itself with `claude update`, but an old npm copy in
+  /// a system folder often cannot (no write access), and a Homebrew copy
+  /// leaves it to `brew`. When the copy Reserve would sign in with is still
+  /// too old afterwards, the official installer puts a current native build
+  /// in `~/.local/bin`, which the version check then picks.
+  private func updateClaudeCode(_ definition: ProviderHelperDefinition) async throws {
+    let selection = await ClaudeCodeHelper.select()
+    if case .tooOld(let path, _) = selection {
+      _ = try? await ProcessRunner.output(
+        executable: path,
+        arguments: definition.updateArguments,
+        environment: BinaryLocator.environment(Self.installerEnvironment(), launching: path),
+        standardInput: FileHandle.nullDevice,
+        timeout: .seconds(180))
+    }
+    switch await ClaudeCodeHelper.select() {
+    case .ready: return
+    case .missing, .tooOld: try await self.install(definition.provider)
+    }
+    if case .tooOld(_, let version) = await ClaudeCodeHelper.select() {
+      throw ProviderHelperInstallerError.installFailed(
+        "Claude Code is still \(version) after updating. Reserve needs \(ClaudeCodeHelper.minimumSignInVersionText) or newer.")
     }
   }
 
