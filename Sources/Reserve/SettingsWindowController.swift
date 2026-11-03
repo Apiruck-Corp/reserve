@@ -2462,6 +2462,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if state?.requiresKeychainAccess == true { return ("Permission needed", ReserveColor.accent) }
     if state?.usageAccessDenied == true { return ("Usage access denied", ReserveColor.accent) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
+    // A sign-in goes through the provider's own tool, so a missing or old one
+    // is named before any sign-in is offered.
+    let tool = ProviderDescriptor.forProvider(provider).loginDisplayName
+    if state?.requiresInstallation == true { return ("\(tool) needed", ReserveColor.accent) }
+    if state?.requiresUpdate == true { return ("\(tool) update needed", ReserveColor.accent) }
     if state?.requiresConnection == true { return ("Sign-in needed", ReserveColor.accent) }
     return Self.providerStatus(
       provider: provider,

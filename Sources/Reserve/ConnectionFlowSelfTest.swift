@@ -544,6 +544,7 @@ enum ConnectionFlowSelfTest {
     failures += await self.checkHourlyHistoryBeforeBackfill(in: directory)
     failures += await self.checkLoginHandoff(in: directory)
     failures += await self.checkEarlyCompletions(in: directory)
+    failures += await self.checkClaudeCodeSetup(in: directory)
     failures += self.checkPhaseTable()
     failures += self.checkDashboardHotKeyRegistration()
     failures += self.checkAdaptiveRefresh(in: directory)
@@ -1287,6 +1288,63 @@ enum ConnectionFlowSelfTest {
 
   /// Every early return hands back to its caller exactly once, so a window
   /// waiting on it can never stay in a busy step.
+  /// Claude is signed in through Claude Code. Without it, or with a copy too
+  /// old for `auth login --claudeai`, the window asks to install or update
+  /// first and names the reason, instead of a sign-in that cannot start.
+  private static func checkClaudeCodeSetup(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    let suite = "Reserve.ClaudeCodeSetupSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["claude code: isolated preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let responses = ConnectionTestResponses()
+    await responses.set(.signedOut)
+    let selection = ClaudeCodeSelectionFixture()
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      cache: SnapshotCache(fileURL: directory.appendingPathComponent("claude-code.json")),
+      fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+      openLoginURL: { _ in failures.append("claude code: unexpectedly opened sign-in"); return false },
+      planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
+      claudeCodeSelection: { await selection.current })
+    for provider in store.accounts { store.setEnabled(provider, enabled: false, refreshImmediately: false) }
+
+    let cases: [(ClaudeCodeHelper.Selection, ProviderSetupCoordinator.Phase, String, String)] = [
+      (.missing, .needsInstall, "Claude Code is not installed", "Install Claude Code to show plan limits"),
+      (.tooOld(path: "/usr/local/bin/claude", version: "2.1.70"), .needsUpdate,
+        "Claude Code 2.1.70 is too old", "Update Claude Code to show plan limits"),
+    ]
+    for (fixture, phase, detail, cardMessage) in cases {
+      await selection.set(fixture)
+      let coordinator = ProviderSetupCoordinator(store: store)
+      coordinator.start(.anthropic)
+      await settle { coordinator.phase == phase }
+      if coordinator.phase != phase {
+        failures.append("claude code: \(fixture) opened \(coordinator.phase) instead of \(phase)")
+      }
+      if visibleText("connection-detail", in: coordinator.panel)?.contains(detail) != true {
+        failures.append("claude code: the window did not say \"\(detail)\"")
+      }
+      if let state = store.states[.anthropic] {
+        let action = AllowanceBuilder.summary(for: state).setupAction
+        if action?.message(for: .anthropic) != cardMessage {
+          failures.append("claude code: the card said \(action?.message(for: .anthropic) ?? "nothing") instead of \(cardMessage)")
+        }
+      }
+      coordinator.close()
+    }
+    // With a current Claude Code the same signed-out state asks to sign in.
+    await selection.set(.ready("/Users/test/.local/bin/claude"))
+    let coordinator = ProviderSetupCoordinator(store: store)
+    coordinator.start(.anthropic)
+    await settle { coordinator.phase == .needsSignIn }
+    if coordinator.phase != .needsSignIn {
+      failures.append("claude code: a current Claude Code opened \(coordinator.phase) instead of sign-in")
+    }
+    coordinator.close()
+    for provider in store.accounts { store.cancelConnection(provider) }
+    return failures
+  }
+
   private static func checkEarlyCompletions(in directory: URL) async -> [String] {
     var failures: [String] = []
     let suite = "Reserve.CompletionSelfTest.\(UUID().uuidString)"
@@ -1839,6 +1897,11 @@ enum ConnectionFlowSelfTest {
       try? await Task.sleep(for: .milliseconds(20))
     }
   }
+}
+
+private actor ClaudeCodeSelectionFixture {
+  private(set) var current: ClaudeCodeHelper.Selection = .missing
+  func set(_ selection: ClaudeCodeHelper.Selection) { self.current = selection }
 }
 
 private actor ConnectionTestResponses {

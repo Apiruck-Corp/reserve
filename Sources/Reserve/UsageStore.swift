@@ -161,6 +161,13 @@ final class UsageStore {
   /// Cache-only daily history; tests never open the production index.
   private let dailyHistoryLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory]
   private let loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))?
+  /// The self-tests' stand-in for reading the installed Claude Code versions.
+  private let claudeCodeSelectionOverride: (@Sendable () async -> ClaudeCodeHelper.Selection)?
+
+  private func claudeCodeSelection() async -> ClaudeCodeHelper.Selection {
+    if let override = self.claudeCodeSelectionOverride { return await override() }
+    return await ClaudeCodeHelper.select()
+  }
   private let openLoginURL: (URL) -> Bool
   private let serviceStatusClient = ServiceStatusClient()
   private let defaults: UserDefaults
@@ -423,8 +430,10 @@ final class UsageStore {
     apiKeys: APIConsumptionKeyAccess? = nil,
     apiConsumptionFetch: (@Sendable (APIConsumptionProvider, String) async throws -> APIConsumptionSnapshot)? = nil,
     serviceStatusFetch: (@Sendable (ProviderID) async -> ProviderServiceStatus?)? = nil,
+    claudeCodeSelection: (@Sendable () async -> ClaudeCodeHelper.Selection)? = nil,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
+    self.claudeCodeSelectionOverride = claudeCodeSelection
     self.injectedPlanKeys = planKeys
     self.injectedAPIKeys = apiKeys
     self.apiConsumptionFetch = apiConsumptionFetch
@@ -1792,8 +1801,8 @@ final class UsageStore {
       self.states[provider]?.isConnecting = true
       self.changed()
       Task { [weak self] in
-        let selection = await ClaudeCodeHelper.select()
         guard let self else { return }
+        let selection = await self.claudeCodeSelection()
         if self.loginHelperChecks[provider] == generation {
           self.loginHelperChecks.removeValue(forKey: provider)
         }
@@ -1962,14 +1971,33 @@ final class UsageStore {
   /// Connect window offers Update and continue instead of a sign-in that
   /// would fail before the browser opens.
   private func markHelperTooOld(_ provider: ProviderID, version: String) {
-    self.states[provider]?.error =
-      "Claude Code \(version) is too old to sign in from Reserve. Update it to \(ClaudeCodeHelper.minimumSignInVersionText) or newer."
+    self.states[provider]?.error = Self.claudeCodeTooOldMessage(version)
     self.states[provider]?.requiresUpdate = true
     self.states[provider]?.requiresInstallation = false
     self.states[provider]?.requiresConnection = false
     self.states[provider]?.signInCouldNotStart = false
     self.states[provider]?.isConnecting = false
     self.changed()
+  }
+
+  private static func claudeCodeTooOldMessage(_ version: String) -> String {
+    "Claude Code \(version) is too old to sign in from Reserve. Update it to \(ClaudeCodeHelper.minimumSignInVersionText) or newer."
+  }
+
+  static let claudeCodeMissingMessage =
+    "Claude Code is not installed on this Mac. Reserve signs in to Claude through it."
+
+  /// Install or update first, while the sign-in itself stays needed.
+  private func noteClaudeCodeNeedsSetup(_ provider: ProviderID, _ selection: ClaudeCodeHelper.Selection) {
+    switch selection {
+    case .ready: return
+    case .missing:
+      self.states[provider]?.requiresInstallation = true
+      self.states[provider]?.error = Self.claudeCodeMissingMessage
+    case .tooOld(_, let version):
+      self.states[provider]?.requiresUpdate = true
+      self.states[provider]?.error = Self.claudeCodeTooOldMessage(version)
+    }
   }
 
   private func markHelperMissing(_ provider: ProviderID) {
@@ -3551,6 +3579,17 @@ final class UsageStore {
       if var state = self.states[provider] {
         Self.applyFailure(error, to: &state)
         self.states[provider] = state
+      }
+      // Reserve reads Claude's usage without Claude Code, but signs in through
+      // it. When there is no sign-in, say now whether Claude Code has to be
+      // installed or updated first, rather than offering a sign-in that
+      // cannot start.
+      if provider.isAnthropic, fetchOverride == nil || self.claudeCodeSelectionOverride != nil,
+        self.states[provider]?.requiresConnection == true
+      {
+        let selection = await self.claudeCodeSelection()
+        guard isCurrent() else { return }
+        self.noteClaudeCodeNeedsSetup(provider, selection)
       }
       // A temporary macOS access failure does not revoke the user's consent.
     }
