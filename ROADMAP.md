@@ -1,7 +1,8 @@
 # Roadmap
-Last updated: 2026-11-02
+Last updated: 2026-11-03
 
 ## Now
+- 2026-11-03: "Check why it is so difficult to login … let's fix it to make it easier" (a user on X could not sign in to Claude: "Reserve could not verify your sign-in … sign-in was not completed"). Cause proven locally against npm releases: Reserve runs `claude auth login --claudeai`, which Claude Code before 2.1.79 rejects before any browser opens ("unknown option '--claudeai'"), and an old copy in /opt/homebrew/bin or /usr/local/bin is picked ahead of a current ~/.local/bin install. Fix: Reserve reads each Claude Code copy's version and signs in with the first that is 2.1.79 or newer, otherwise offers Update and continue (`claude update`, then the official installer); a failed sign-in shows Claude Code's own error line; the Claude desktop app's bundled Claude Code is found in its current folder layout. Not yet confirmed on the user's Mac. PR open, not merged or released.
 
 ## Next
 
