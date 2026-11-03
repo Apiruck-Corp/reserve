@@ -3585,7 +3585,9 @@ final class UsageStore {
       // installed or updated first, rather than offering a sign-in that
       // cannot start.
       if provider.isAnthropic, fetchOverride == nil || self.claudeCodeSelectionOverride != nil,
-        self.states[provider]?.requiresConnection == true
+        self.states[provider]?.requiresConnection == true,
+        // Allowing access reads the limits without Claude Code.
+        self.states[provider]?.requiresKeychainAccess != true
       {
         let selection = await self.claudeCodeSelection()
         guard isCurrent() else { return }

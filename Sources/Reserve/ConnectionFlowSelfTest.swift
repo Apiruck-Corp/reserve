@@ -1332,6 +1332,19 @@ enum ConnectionFlowSelfTest {
       }
       coordinator.close()
     }
+    // Waiting only for Keychain permission needs no Claude Code: allowing
+    // access reads the limits, so the permission screen keeps its own words.
+    await selection.set(.missing)
+    await responses.set(.deniedPermission)
+    let access = ProviderSetupCoordinator(store: store)
+    access.start(.anthropic)
+    await settle { access.phase == .needsAccess }
+    if access.phase != .needsAccess || store.states[.anthropic]?.requiresInstallation == true {
+      failures.append("claude code: a permission request turned into \(access.phase) asking to install")
+    }
+    access.close()
+    await responses.set(.signedOut)
+
     // With a current Claude Code the same signed-out state asks to sign in.
     await selection.set(.ready("/Users/test/.local/bin/claude"))
     let coordinator = ProviderSetupCoordinator(store: store)

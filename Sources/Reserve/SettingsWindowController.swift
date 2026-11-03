@@ -2463,10 +2463,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if state?.usageAccessDenied == true { return ("Usage access denied", ReserveColor.accent) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
     // A sign-in goes through the provider's own tool, so a missing or old one
-    // is named before any sign-in is offered.
-    let tool = ProviderDescriptor.forProvider(provider).loginDisplayName
-    if state?.requiresInstallation == true { return ("\(tool) needed", ReserveColor.accent) }
-    if state?.requiresUpdate == true { return ("\(tool) update needed", ReserveColor.accent) }
+    // is shown before any sign-in is offered. The Connect window names it.
+    if state?.requiresInstallation == true { return ("Install needed", ReserveColor.accent) }
+    if state?.requiresUpdate == true { return ("Update needed", ReserveColor.accent) }
     if state?.requiresConnection == true { return ("Sign-in needed", ReserveColor.accent) }
     return Self.providerStatus(
       provider: provider,
