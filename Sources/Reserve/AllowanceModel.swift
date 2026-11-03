@@ -175,6 +175,8 @@ enum ProviderSetupAction: String, Equatable {
 
   func message(for provider: ProviderID) -> String {
     switch self {
+    case .install where provider.isAnthropic: "Install Claude Code to show plan limits"
+    case .update where provider.isAnthropic: "Update Claude Code to show plan limits"
     case .install: "Set up \(provider.displayName) to show plan limits"
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"

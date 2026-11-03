@@ -295,6 +295,11 @@ public struct AnthropicProvider: UsageProvider {
   static let signInExpiredCredentials = UsageProviderError.credentialsNotFound(
     "Claude sign-in expired. Use Sign in to reconnect.")
 
+  /// Nothing is stored anywhere Claude Code keeps a sign-in (no Keychain
+  /// item, no credentials file), so signing in replaces nothing.
+  public static let noStoredSignIn = UsageProviderError.credentialsNotFound(
+    "Claude OAuth credentials were not found. Use Sign in to authenticate.")
+
   private func loadCredentials() async throws -> ClaudeCredentials {
     try await ClaudeCredentialLoader.load(
       environment: self.environment, allowKeychainRead: self.allowKeychainRead,
@@ -658,8 +663,7 @@ enum ClaudeCredentialLoader {
       if consentIsPending { throw UsageProviderError.keychainConsentRequired(provider) }
     #endif
     guard collected.all.isEmpty else { throw AnthropicProvider.signInExpiredCredentials }
-    throw UsageProviderError.credentialsNotFound(
-      "Claude OAuth credentials were not found. Use Sign in to authenticate.")
+    throw AnthropicProvider.noStoredSignIn
   }
 
   /// What one pass over the stores found, including whether the protected store
@@ -988,8 +992,13 @@ actor ClaudeSessionRenewer {
     scopes: [String]?,
     environment: [String: String],
     now: Date = Date(),
-    locator: @Sendable ([String: String]) -> String? = {
-      BinaryLocator.find("claude", environment: $0)
+    locator: @Sendable ([String: String]) async -> String? = {
+      // The renewal uses `auth login --claudeai` too, so an old copy ahead
+      // in the search order would fail it the same way.
+      if case .ready(let path) = await ClaudeCodeHelper.select(
+        candidates: BinaryLocator.candidates("claude", environment: $0))
+      { return path }
+      return nil
     },
     runner: @Sendable (String, [String], [String: String], Duration) async throws -> Void = {
       executable, arguments, environment, timeout in
@@ -1000,7 +1009,7 @@ actor ClaudeSessionRenewer {
   ) async -> Bool {
     if Self.isWithin(Self.failureBackoff, of: self.lastFailureAt, now: now) { return false }
     if Self.isWithin(Self.cooldown, of: self.lastAttemptAt, now: now) { return false }
-    guard let executable = locator(environment) else { return false }
+    guard let executable = await locator(environment) else { return false }
     self.lastAttemptAt = now
     // This login must stay non-interactive, and it is Reserve's own initiative
     // rather than a command the user typed. The allowlisted environment leaves

@@ -544,6 +544,7 @@ enum ConnectionFlowSelfTest {
     failures += await self.checkHourlyHistoryBeforeBackfill(in: directory)
     failures += await self.checkLoginHandoff(in: directory)
     failures += await self.checkEarlyCompletions(in: directory)
+    failures += await self.checkClaudeCodeSetup(in: directory)
     failures += self.checkPhaseTable()
     failures += self.checkDashboardHotKeyRegistration()
     failures += self.checkAdaptiveRefresh(in: directory)
@@ -1287,6 +1288,122 @@ enum ConnectionFlowSelfTest {
 
   /// Every early return hands back to its caller exactly once, so a window
   /// waiting on it can never stay in a busy step.
+  /// Claude is signed in through Claude Code. Without it, or with a copy too
+  /// old for `auth login --claudeai`, the window asks to install or update
+  /// first and names the reason, instead of a sign-in that cannot start.
+  private static func checkClaudeCodeSetup(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    let suite = "Reserve.ClaudeCodeSetupSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["claude code: isolated preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let responses = ConnectionTestResponses()
+    await responses.set(.signedOut)
+    let selection = ClaudeCodeSelectionFixture()
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      cache: SnapshotCache(fileURL: directory.appendingPathComponent("claude-code.json")),
+      fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+      openLoginURL: { _ in failures.append("claude code: unexpectedly opened sign-in"); return false },
+      planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
+      claudeCodeSelection: { await selection.current })
+    for provider in store.accounts { store.setEnabled(provider, enabled: false, refreshImmediately: false) }
+
+    let cases: [(ClaudeCodeHelper.Selection, ProviderSetupCoordinator.Phase, String, String)] = [
+      (.missing, .needsInstall, "Claude Code is not installed", "Install Claude Code to show plan limits"),
+      (.tooOld(path: "/usr/local/bin/claude", version: "2.1.70"), .needsUpdate,
+        "Claude Code 2.1.70 is too old", "Update Claude Code to show plan limits"),
+    ]
+    for (fixture, phase, detail, cardMessage) in cases {
+      await selection.set(fixture)
+      let coordinator = ProviderSetupCoordinator(store: store)
+      coordinator.start(.anthropic)
+      await settle { coordinator.phase == phase }
+      if coordinator.phase != phase {
+        failures.append("claude code: \(fixture) opened \(coordinator.phase) instead of \(phase)")
+      }
+      if visibleText("connection-detail", in: coordinator.panel)?.contains(detail) != true {
+        failures.append("claude code: the window did not say \"\(detail)\"")
+      }
+      if let state = store.states[.anthropic] {
+        let action = AllowanceBuilder.summary(for: state).setupAction
+        if action?.message(for: .anthropic) != cardMessage {
+          failures.append("claude code: the card said \(action?.message(for: .anthropic) ?? "nothing") instead of \(cardMessage)")
+        }
+      }
+      coordinator.close()
+    }
+    // Waiting only for Keychain permission needs no Claude Code: allowing
+    // access reads the limits, so the permission screen keeps its own words.
+    await selection.set(.missing)
+    await responses.set(.deniedPermission)
+    let access = ProviderSetupCoordinator(store: store)
+    access.start(.anthropic)
+    await settle { access.phase == .needsAccess }
+    if access.phase != .needsAccess || store.states[.anthropic]?.requiresInstallation == true {
+      failures.append("claude code: a permission request turned into \(access.phase) asking to install")
+    }
+    access.close()
+    await responses.set(.signedOut)
+
+    // With a current Claude Code the same signed-out state asks to sign in.
+    await selection.set(.ready("/Users/test/.local/bin/claude"))
+    let coordinator = ProviderSetupCoordinator(store: store)
+    coordinator.start(.anthropic)
+    await settle { coordinator.phase == .needsSignIn }
+    if coordinator.phase != .needsSignIn {
+      failures.append("claude code: a current Claude Code opened \(coordinator.phase) instead of sign-in")
+    }
+    coordinator.close()
+    for provider in store.accounts { store.cancelConnection(provider) }
+
+    // Once Reserve has installed Claude Code on a Mac with no stored sign-in,
+    // there is nothing to replace, so the browser opens without the
+    // "replaces the sign-in" stop. A sign-in that exists but is rejected
+    // (another organization, expired) keeps the stop even after an install.
+    let script = directory.appendingPathComponent("claude-code-login.sh")
+    do { try "#!/bin/sh\nsleep 5\n".write(to: script, atomically: true, encoding: .utf8) }
+    catch { return failures + ["claude code: login fixture could not be saved"] }
+    for (mode, expected) in [
+      (ConnectionTestResponses.Mode.noStoredSignIn, ProviderSetupCoordinator.Phase.signingIn),
+      (.signedOut, .needsSignIn),
+    ] {
+      await selection.set(.missing)
+      await responses.set(mode)
+      let installStore = UsageStore(
+        defaults: defaults, startAutomatically: false, notificationsActive: false,
+        cache: SnapshotCache(fileURL: directory.appendingPathComponent("claude-code-install-\(mode).json")),
+        fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+        loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
+        openLoginURL: { _ in false },
+        planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
+        claudeCodeSelection: { await selection.current })
+      for provider in installStore.accounts {
+        installStore.setEnabled(provider, enabled: false, refreshImmediately: false)
+      }
+      let installer = InstallingFixture(selection: selection)
+      let installing = ProviderSetupCoordinator(store: installStore, installer: installer)
+      installing.start(.anthropic)
+      await settle { installing.phase == .needsInstall }
+      click("connection-primary", in: installing.panel)
+      await settle { installing.phase == expected && (expected != .signingIn
+        || installStore.loginLaunchCount(for: .anthropic) == 1) }
+      if await installer.installs != 1 {
+        failures.append("claude code (\(mode)): Install and continue did not run the installer once")
+      }
+      if installing.phase != expected {
+        failures.append("claude code (\(mode)): after installing, sign-in reached \(installing.phase) instead of \(expected)")
+      }
+      let launches = installStore.loginLaunchCount(for: .anthropic)
+      if launches != (expected == .signingIn ? 1 : 0) {
+        failures.append("claude code (\(mode)): after installing, sign-in launched \(launches) times")
+      }
+      installing.close()
+      for provider in installStore.accounts { installStore.cancelConnection(provider) }
+    }
+    await responses.set(.signedOut)
+    return failures
+  }
+
   private static func checkEarlyCompletions(in directory: URL) async -> [String] {
     var failures: [String] = []
     let suite = "Reserve.CompletionSelfTest.\(UUID().uuidString)"
@@ -1841,9 +1958,29 @@ enum ConnectionFlowSelfTest {
   }
 }
 
+/// Stands in for the real installer: "installing" makes a current Claude
+/// Code appear, as the official installer does.
+private actor InstallingFixture: HelperInstalling {
+  let selection: ClaudeCodeSelectionFixture
+  private(set) var installs = 0
+  init(selection: ClaudeCodeSelectionFixture) { self.selection = selection }
+  func install(_ provider: ProviderID) async throws {
+    self.installs += 1
+    await self.selection.set(.ready("/Users/test/.local/bin/claude"))
+  }
+  func update(_ provider: ProviderID) async throws {}
+}
+
+private actor ClaudeCodeSelectionFixture {
+  private(set) var current: ClaudeCodeHelper.Selection = .missing
+  func set(_ selection: ClaudeCodeHelper.Selection) { self.current = selection }
+}
+
 private actor ConnectionTestResponses {
   enum Mode {
     case success, missingHelper, permission, deniedPermission, offline, signedOut, slowSuccess
+    /// No Claude sign-in is stored anywhere (a Mac that never had Claude Code).
+    case noStoredSignIn
     case slowPermission, accessDenied
     /// The protected item can be read once allowed, but holds no usable sign-in.
     case unusableSavedSignIn
@@ -1876,6 +2013,7 @@ private actor ConnectionTestResponses {
     case .offline: throw UsageProviderError.unavailable("offline fixture")
     case .accessDenied: throw UsageProviderError.accessDenied("denied fixture")
     case .signedOut: throw UsageProviderError.unauthorized("expired fixture")
+    case .noStoredSignIn: throw AnthropicProvider.noStoredSignIn
     case .slowSuccess: try? await Task.sleep(for: .milliseconds(250))
     case .success: break
     }

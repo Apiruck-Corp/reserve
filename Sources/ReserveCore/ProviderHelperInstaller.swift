@@ -5,6 +5,12 @@ public struct ProviderHelperDefinition: Sendable, Equatable {
   public let executable: String
   public let displayName: String
   public let installerURL: URL
+  /// Domains the installer may be served from after a redirect, each with
+  /// its subdomains. `claude.ai/install.sh` answers with a redirect to
+  /// `downloads.claude.ai`, and `chatgpt.com/codex/install.sh` to
+  /// `releases.openai.com` (both checked 2026-11-03), so the installer
+  /// host alone is not enough.
+  public let installerDomains: [String]
   public let updateArguments: [String]
 
   public init(
@@ -12,13 +18,27 @@ public struct ProviderHelperDefinition: Sendable, Equatable {
     executable: String,
     displayName: String,
     installerURL: URL,
+    installerDomains: [String] = [],
     updateArguments: [String]
   ) {
     self.provider = provider
     self.executable = executable
     self.displayName = displayName
     self.installerURL = installerURL
+    self.installerDomains = installerDomains
     self.updateArguments = updateArguments
+  }
+
+  /// An HTTPS address on the installer's own host or one of its official
+  /// domains.
+  public func isOfficialInstallerAddress(_ url: URL?) -> Bool {
+    guard let url, url.scheme?.lowercased() == "https", let host = url.host?.lowercased()
+    else { return false }
+    if host == self.installerURL.host?.lowercased() { return true }
+    return self.installerDomains.contains { domain in
+      let domain = domain.lowercased()
+      return host == domain || host.hasSuffix("." + domain)
+    }
   }
 }
 
@@ -44,12 +64,23 @@ public enum ProviderHelperInstallerError: LocalizedError, Sendable, Equatable {
   }
 }
 
+/// What the connect window needs from an installer. Self-tests stand in a
+/// fixture so a successful setup can be followed without installing anything.
+public protocol HelperInstalling: Sendable {
+  func install(_ provider: ProviderID) async throws
+  func update(_ provider: ProviderID) async throws
+}
+
 /// Installs only the fixed, official provider helpers that Reserve knows
 /// how to use. The remote script is downloaded first, bounded and checked as a
 /// shell script, then run from a private temporary directory. It never receives
 /// the app's environment, which may contain unrelated API keys.
-public final class ProviderHelperInstaller: @unchecked Sendable {
+public final class ProviderHelperInstaller: HelperInstalling, @unchecked Sendable {
   static let maximumInstallerBytes = 1_048_576
+  /// Claude Code's installer downloads about 313 MB on a Mac without `zstd`
+  /// (every stock Mac), checked 2026-11-03. Three minutes needed roughly
+  /// 14 Mbit/s; ten minutes is enough for about 4 Mbit/s.
+  static let installTimeout: Duration = .seconds(600)
 
   private let session: URLSession
 
@@ -63,26 +94,7 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
     else {
       throw ProviderHelperInstallerError.installFailed("Install \(provider.displayName) from its official download page, then return to Reserve.")
     }
-    var request = URLRequest(url: definition.installerURL)
-    request.timeoutInterval = 30
-    request.cachePolicy = .reloadIgnoringLocalCacheData
-    request.httpShouldHandleCookies = false
-    request.setValue("text/plain, text/x-shellscript, */*", forHTTPHeaderField: "Accept")
-
-    let (data, response) = try await ProviderHTTPSession.boundedData(
-      for: request, using: self.session, maximumBytes: Self.maximumInstallerBytes)
-    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-      let host = definition.installerURL.host ?? "the provider"
-      throw ProviderHelperInstallerError.invalidResponse(
-        "\(definition.displayName) could not be downloaded from \(host).")
-    }
-    guard response.url?.scheme?.lowercased() == "https",
-      response.url?.host?.lowercased() == definition.installerURL.host?.lowercased()
-    else {
-      throw ProviderHelperInstallerError.invalidResponse(
-        "\(definition.displayName) download left the provider's official address.")
-    }
-    try Self.validateInstallerFormat(data)
+    let data = try await self.downloadInstaller(definition)
 
     let fileManager = FileManager.default
     let directory = fileManager.temporaryDirectory
@@ -102,7 +114,7 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
         executable: "/bin/bash",
         arguments: ["--noprofile", "--norc", script.path],
         environment: Self.installerEnvironment(),
-        timeout: .seconds(180))
+        timeout: Self.installTimeout)
     } catch {
       throw ProviderHelperInstallerError.installFailed(
         "\(definition.displayName) setup did not finish. \(error.localizedDescription)")
@@ -112,6 +124,33 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
     }
   }
 
+  /// The installer script, read from the provider's official address only.
+  func downloadInstaller(_ definition: ProviderHelperDefinition) async throws -> Data {
+    var request = URLRequest(url: definition.installerURL)
+    request.timeoutInterval = 30
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    request.httpShouldHandleCookies = false
+    request.setValue("text/plain, text/x-shellscript, */*", forHTTPHeaderField: "Accept")
+
+    // The request carries no credentials, so following a redirect to the
+    // provider's own download domain hands nothing to anyone. Any other
+    // destination is refused before it is requested.
+    let (data, response) = try await ProviderHTTPSession.boundedData(
+      for: request, using: self.session, maximumBytes: Self.maximumInstallerBytes,
+      allowsRedirect: { definition.isOfficialInstallerAddress($0) })
+    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+      let host = definition.installerURL.host ?? "the provider"
+      throw ProviderHelperInstallerError.invalidResponse(
+        "\(definition.displayName) could not be downloaded from \(host).")
+    }
+    guard definition.isOfficialInstallerAddress(response.url) else {
+      throw ProviderHelperInstallerError.invalidResponse(
+        "\(definition.displayName) download left the provider's official address.")
+    }
+    try Self.validateInstallerFormat(data)
+    return data
+  }
+
   public func update(_ provider: ProviderID) async throws {
     // A helper without an update command must not be launched bare: that
     // would start its interactive session, not an update.
@@ -119,6 +158,10 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
       let definition = ProviderHelperCatalog.definition(for: provider)
     else {
       throw ProviderHelperInstallerError.installFailed("Update \(provider.displayName) using its official installation instructions, then return to Reserve.")
+    }
+    if provider.isAnthropic {
+      try await self.updateClaudeCode(definition)
+      return
     }
     guard let executable = BinaryLocator.find(definition.executable) else {
       throw ProviderHelperInstallerError.helperNotFound(definition.displayName)
@@ -135,6 +178,31 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
     }
     guard BinaryLocator.find(definition.executable) != nil else {
       throw ProviderHelperInstallerError.helperNotFound(definition.displayName)
+    }
+  }
+
+  /// Claude Code updates itself with `claude update`, but an old npm copy in
+  /// a system folder often cannot (no write access), and a Homebrew copy
+  /// leaves it to `brew`. When the copy Reserve would sign in with is still
+  /// too old afterwards, the official installer puts a current native build
+  /// in `~/.local/bin`, which the version check then picks.
+  private func updateClaudeCode(_ definition: ProviderHelperDefinition) async throws {
+    let selection = await ClaudeCodeHelper.select()
+    if case .tooOld(let path, _) = selection {
+      _ = try? await ProcessRunner.output(
+        executable: path,
+        arguments: definition.updateArguments,
+        environment: BinaryLocator.environment(Self.installerEnvironment(), launching: path),
+        standardInput: FileHandle.nullDevice,
+        timeout: .seconds(180))
+    }
+    switch await ClaudeCodeHelper.select() {
+    case .ready: return
+    case .missing, .tooOld: try await self.install(definition.provider)
+    }
+    if case .tooOld(_, let version) = await ClaudeCodeHelper.select() {
+      throw ProviderHelperInstallerError.installFailed(
+        "Claude Code is still \(version) after updating. Reserve needs \(ClaudeCodeHelper.minimumSignInVersionText) or newer.")
     }
   }
 
