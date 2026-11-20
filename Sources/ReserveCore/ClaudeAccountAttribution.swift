@@ -93,13 +93,21 @@ public enum ClaudeAccountAttribution {
     accounts: [ClaudeAccountBinding],
     homeDirectory: URL,
     requiresVerifiedOrganization: Bool? = nil,
+    includeSignedOutManagedHistory: Bool = false,
     identity: (URL) -> ClaudeFolderIdentity?
   ) -> ProviderID? {
     let claude = accounts.filter(\.account.isAnthropic)
     let path = Self.resolved(folder)
-    // An added account's own folder is its sign-in by construction; its
-    // limits read already refuses a folder signed in elsewhere.
+    // An explicitly attached folder may supply its card directly. Once the
+    // card has verified an organization, its current sign-in must still match.
     if let own = claude.first(where: { $0.account.isAdded && $0.folder?.resolvedPath == path }) {
+      if let expected = own.verifiedOrganization {
+        let profile = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))
+        // Signing out keeps this explicitly assigned folder's saved history.
+        // A live reading or a profile naming a different organization needs proof.
+        if profile == nil && includeSignedOutManagedHistory { return own.account }
+        guard profile?.organization == expected else { return nil }
+      }
       return own.account
     }
     let first = claude.first { $0.account.isDefault }
@@ -119,13 +127,15 @@ public enum ClaudeAccountAttribution {
       let organization = mine.organization
     else { return nil }
     let matches = claude.filter { binding in
+      guard binding.account.isDefault || binding.folder != nil else { return false }
       let own = identity(binding.folder?.accountProfileURL ?? homeProfile)
       // The first card follows whatever Claude Code last signed in to, so
       // only an organization a limits read verified counts for it.
       let expected = binding.verifiedOrganization ?? (binding.account.isAdded ? own?.organization : nil)
       guard let expected, expected == organization else { return false }
-      if let a = mine.member, let b = own?.member, a != b { return false }
-      return true
+      if isDefaultHome && binding.account.isDefault { return true }
+      guard let own else { return false }
+      return Self.samePerson(mine, own)
     }
     // As for limits: when both cards name one organization, the added card,
     // signed in on purpose, keeps it.
@@ -158,7 +168,8 @@ public enum ClaudeAccountAttribution {
       guard !roots.contains(where: { Self.overlaps(root, $0) }) else { continue }
       var account = Self.owner(
         ofFolder: folder, accounts: claude, homeDirectory: homeDirectory,
-        requiresVerifiedOrganization: requiresVerifiedOrganization, identity: identity)
+        requiresVerifiedOrganization: requiresVerifiedOrganization, includeSignedOutManagedHistory: true,
+        identity: identity)
       // The default home follows whatever plain Claude Code last signed in
       // to, and its profile proves only today's sign-in, not who wrote the
       // transcripts already there. Its history is the first card's or a
@@ -242,9 +253,8 @@ public enum ClaudeAccountAttribution {
   }
 
   private static func samePerson(_ lhs: ClaudeFolderIdentity, _ rhs: ClaudeFolderIdentity) -> Bool {
-    guard let organization = lhs.organization, organization == rhs.organization else { return false }
-    if let a = lhs.member, let b = rhs.member { return a == b }
-    return true
+    guard let organization = lhs.organization, let member = lhs.member else { return false }
+    return organization == rhs.organization && member == rhs.member
   }
 
   static func overlaps(_ lhs: String, _ rhs: String) -> Bool {

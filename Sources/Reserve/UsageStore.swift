@@ -137,17 +137,12 @@ final class UsageStore {
 
   private let cache: SnapshotCache
   private let fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)?
-  /// Production uses one scanner so its in-memory index survives between
-  /// scans. Test and preview stores leave this nil so they never watch this
-  /// Mac's session roots.
+  /// Reuse the hourly index across scans. A test can supply an isolated scanner.
   private let hourlyUsageScanner: LocalHourlyUsageScanner?
   private(set) var publishedHourlyHistory: [ProviderID: HourlyUsageHistory] = [:]
   private(set) var hourlyHistoryStatus = "Hourly detail has not been loaded yet."
 
   private let localUsageScanner: LocalUsageScanner?
-  /// True only for the app's own store: its scanners read this Mac's real
-  /// Claude folders. Test stores never have their sources replaced.
-  private let ownsHistoryScanners: Bool
   /// Set once a history plan proved the first card's folder is signed in to
   /// the organization that card verified. Until then, while several Claude
   /// accounts are tracked, that folder's history stays a device total.
@@ -421,6 +416,7 @@ final class UsageStore {
     cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
     localUsageProgress: (@Sendable () async -> (incomplete: Bool, checkpoints: Int))? = nil,
     localScanContinuationDelay: Duration = .seconds(5),
+    localUsageScanner: LocalUsageScanner? = nil,
     hourlyUsageScanner: LocalHourlyUsageScanner? = nil,
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
@@ -441,14 +437,13 @@ final class UsageStore {
     self.now = now
     let productionStore = planKeys == nil && apiKeys == nil && fetchOverride == nil
       && localUsageScan == nil && cachedLocalUsageLoad == nil && localUsageProgress == nil
-      && hourlyUsageScanner == nil && startAutomatically
+      && localUsageScanner == nil && hourlyUsageScanner == nil && startAutomatically
     self.usesProductionKeychain = productionStore
     self.honorsHostRefreshEnvironment = productionStore
     self.loginHandoffDeadline = loginHandoffDeadline
     self.cache = cache
     self.fetchOverride = fetchOverride
-    self.localUsageScanner = productionStore ? Self.makeProductionLocalUsageScanner() : nil
-    self.ownsHistoryScanners = productionStore
+    self.localUsageScanner = localUsageScanner ?? (productionStore ? Self.makeProductionLocalUsageScanner() : nil)
     self.hourlyUsageScanner = hourlyUsageScanner ?? (productionStore ? LocalHourlyUsageScanner() : nil)
     if let localUsageScan {
       self.localUsageScan = localUsageScan
@@ -608,7 +603,7 @@ final class UsageStore {
   /// list to the history scanners. Reads only each folder's profile (its
   /// organization and member ids, hashed); never a credential.
   @discardableResult
-  func syncClaudeHistorySources() async -> ClaudeAccountAttribution.HistoryPlan {
+  func syncClaudeHistorySources(reloadHistoryOnChange: Bool = true) async -> ClaudeAccountAttribution.HistoryPlan {
     let home = self.accountsHome
     let plan = ClaudeAccountAttribution.historyPlan(
       accounts: self.claudeAccountBindings(), homeDirectory: home,
@@ -621,9 +616,21 @@ final class UsageStore {
       self.claudeDefaultHistoryAttributed = attributed
       self.changed()
     }
-    if self.ownsHistoryScanners {
-      await self.localUsageScanner?.setClaudeSources(plan.sources)
-      await self.hourlyUsageScanner?.setClaudeSources(plan.sources)
+    if let scanner = self.localUsageScanner {
+      await scanner.setClaudeSources(plan.sources)
+      let changedAccounts = await self.hourlyUsageScanner?.setClaudeSources(plan.sources) ?? []
+      for account in changedAccounts {
+        self.publishedHourlyHistory[account] = nil
+        self.publishedDailyHistory[account] = nil
+        if self.states[account]?.localUsage?.origin == .localDevice { self.states[account]?.localUsage = nil }
+      }
+      if !changedAccounts.isEmpty {
+        self.changed()
+        if reloadHistoryOnChange {
+          await self.loadPublishedDailyHistory(now: self.now())
+          self.changed()
+        }
+      }
     }
     return plan
   }
@@ -3073,7 +3080,8 @@ final class UsageStore {
   }
 
   private func loadCacheAndStart() async {
-    if self.ownsHistoryScanners { await self.syncClaudeHistorySources() }
+    // The startup load below reads the cache once after the folders have been resolved.
+    if self.localUsageScanner != nil { await self.syncClaudeHistorySources(reloadHistoryOnChange: false) }
     let cached = await self.cache.load()
     for (provider, snapshot) in cached where self.isEnabled(provider) {
       self.states[provider]?.snapshot = snapshot
@@ -3256,7 +3264,7 @@ final class UsageStore {
         if notify { self.changed() }
       }
     }
-    if self.ownsHistoryScanners { await self.syncClaudeHistorySources() }
+    if self.localUsageScanner != nil { await self.syncClaudeHistorySources() }
     await self.loadCachedLocalUsage(now: self.now())
     let enabledForHours = Set(self.accounts.filter { self.isEnabled($0) })
     await self.performHourlyUsageScan(providers: enabledForHours, generation: generation, notify: notify)

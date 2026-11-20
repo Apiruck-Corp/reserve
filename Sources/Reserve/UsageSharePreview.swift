@@ -804,14 +804,14 @@ private enum ShareCardPainter {
       y += 12
       let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
       let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-      let value = "\(UsageShareFormat.percent(limit.remainingPercent)) left"
+      let value = limit.valueLabel
       let valueWidth = ShareCanvas.textWidth(value, font: valueFont) + 2
       canvas.text(limit.label, x: x, y: y, width: width - valueWidth - 8, font: labelFont,
         color: self.primary, singleLine: true)
       canvas.text(value, x: x + width - valueWidth, y: y, width: valueWidth, font: valueFont,
         color: self.primary, alignment: .right, singleLine: true)
       y += ShareCanvas.lineHeight(labelFont) + 5
-      self.meter(limit.remainingPercent, canvas: canvas, x: x, y: y, width: width, height: 6,
+      self.meter(limit.displayPercent, canvas: canvas, x: x, y: y, width: width, height: 6,
         color: limit.pace == .overPace || limit.pace == .exhausted ? self.warning : self.accent)
       y += 6 + 5
       // Pace and forecast on the left, the reset on the right; the reset

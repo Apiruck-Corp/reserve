@@ -549,6 +549,7 @@ enum ConnectionFlowSelfTest {
     failures += self.checkDashboardHotKeyRegistration()
     failures += self.checkAdaptiveRefresh(in: directory)
     failures += await self.checkAddedAccounts(in: directory)
+    failures += await self.checkClaudeFolderHistoryChange(in: directory)
 
     // Render actual native controls for each step, with no real credentials.
     let preview = ProviderConnectionPanel(provider: .anthropic)
@@ -1699,6 +1700,66 @@ enum ConnectionFlowSelfTest {
     expect(plan.sources.filter { $0.account == .anthropic }.count == 1,
       "the unproven home was dropped or counted twice")
     return failures
+  }
+
+  private static func checkClaudeFolderHistoryChange(in directory: URL) async -> [String] {
+    let suite = "Reserve.FolderHistory.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["Claude folder history: preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let home = directory.appendingPathComponent("folder-history")
+    let roots = LocalUsageScanner.Roots(codex: home.appendingPathComponent(".codex/sessions"),
+      claude: home.appendingPathComponent(".claude/projects"), grok: home.appendingPathComponent(".grok"))
+    let daily = LocalUsageScanner(roots: roots, cacheURL: home.appendingPathComponent("daily.json"))
+    let hourly = LocalHourlyUsageScanner(roots: roots, cacheURL: home.appendingPathComponent("hourly.json"))
+    let now = Date()
+    let store = UsageStore(defaults: defaults, startAutomatically: false, notificationsActive: false,
+      cache: SnapshotCache(fileURL: home.appendingPathComponent("snapshots.json")),
+      localUsageScanner: daily, hourlyUsageScanner: hourly,
+      now: { now })
+    store.accountsHome = home
+    defaults.set(true, forKey: "history.localEnabled")
+    do {
+      try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+      let team = try store.addAccount(kind: .anthropic)
+      guard let owned = store.claudeConfigDirectory(for: team) else { return ["Claude folder history: no managed folder"] }
+      let extra = home.appendingPathComponent(".claude_team_t3")
+      let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now)!
+      let older = InsightHistoryRange.dayKeys(count: 2, now: now)[0]
+      let formatter = ISO8601DateFormatter()
+      let profile = #"{"oauthAccount":{"organizationUuid":"org-team","accountUuid":"member-a"}}"#
+      func seed(_ folder: URL, tokens: Int) throws {
+        let projects = folder.appendingPathComponent("projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        let rows = [yesterday, now].map { date in
+          #"{"type":"assistant","timestamp":"\#(formatter.string(from: date))","message":{"usage":{"input_tokens":\#(tokens)}}}"#
+        }
+        try Data((rows.joined(separator: "\n") + "\n").utf8).write(to: projects.appendingPathComponent("session.jsonl"))
+        try Data(profile.utf8).write(to: folder.appendingPathComponent(".claude.json"))
+      }
+      try seed(owned.url, tokens: 5)
+      try seed(extra, tokens: 70)
+      defaults.set(StableIdentifier.notificationComponent("org-team"), forKey: "\(team.rawValue).organizationIdentifier")
+      await store.syncClaudeHistorySources()
+      let summaries = try await daily.scan(now: now, providers: [team])
+      _ = try await hourly.scan(now: now, providers: [team])
+      await store.loadPublishedDailyHistory(now: now)
+      store.seedLocalUsageForSelfTest(summaries[team], provider: team)
+      func olderTokens() -> Int64? { store.publishedDailyHistory[team]?.first { $0.day == older }?.tokens }
+      guard olderTokens() == 75, store.publishedHourlyHistory[team]?.dailyUsage().tokens == 75,
+        store.states[team]?.localUsage?.todayTokens == 75 else { return ["Claude folder history: fixture did not publish both folders"] }
+
+      let changed = profile.replacingOccurrences(of: "member-a", with: "member-b")
+      try Data(changed.utf8).write(to: extra.appendingPathComponent(".claude.json"))
+      let parsed = await daily.scanMetrics.filesParsed
+      await store.syncClaudeHistorySources()
+      var failures: [String] = []
+      if olderTokens() != 5 { failures.append("Claude folder history: yesterday did not show the remaining 5 tokens before a rescan") }
+      if store.publishedHourlyHistory[team] != nil || store.states[team]?.localUsage != nil {
+        failures.append("Claude folder history: the old 75-token hourly or local total remained visible")
+      }
+      if await daily.scanMetrics.filesParsed != parsed { failures.append("Claude folder history: regrouping reopened session files") }
+      return failures
+    } catch { return ["Claude folder history: fixture failed (\(type(of: error)))"] }
   }
 
   /// Two Claude API keys: each an account with its own key and reading, and

@@ -69,6 +69,13 @@ public struct UsageShareModel: Equatable, Sendable {
     /// Nil while a forecast would not be honest: too early, stale or unknown.
     public var pace: Pace?
     public var projectedRemainingAtResetPercent: Double?
+    public var isComponentShare = false
+
+    public var displayPercent: Double { self.isComponentShare ? 100 - self.remainingPercent : self.remainingPercent }
+
+    public var valueLabel: String {
+      UsageShareFormat.percent(self.displayPercent) + (self.isComponentShare ? " of pool used" : " left")
+    }
   }
 
   public struct Plan: Equatable, Sendable {
@@ -170,7 +177,7 @@ public struct UsageShareModel: Equatable, Sendable {
       for plan in self.plans {
         lines.append(format.planTitle(plan))
         for limit in plan.limits {
-          var parts = ["\(format.percent(limit.remainingPercent)) left"]
+          var parts = [limit.valueLabel]
           if let reset = limit.resetsAt { parts.append("resets \(format.reset(reset))") }
           if let pace = limit.pace { parts.append(pace.label.lowercased()) }
           lines.append("  \(limit.label): " + parts.joined(separator: ", "))
@@ -374,6 +381,10 @@ public enum UsageShareCardBuilder {
       guard let label = Self.normalizedWindowLabel(window.label) else { return nil }
       let remaining = 100 - window.usedPercent
       guard remaining.isFinite else { return nil }
+      if window.isComponentShare {
+        return UsageShareModel.Limit(label: label, remainingPercent: remaining, resetsAt: nil,
+          pace: nil, projectedRemainingAtResetPercent: nil, isComponentShare: true)
+      }
       let state = UsagePaceState.calculate(for: window, fetchedAt: account.checkedAt, now: now)
       let pace: UsageShareModel.Pace? = switch state {
       case .reserve: .underPace
@@ -431,6 +442,7 @@ public enum UsageShareCardBuilder {
     case "daily": return "Daily"
     case "monthly", "monthly total": return "Monthly"
     case "primary": return "Primary"
+    case "usage pool": return "Usage pool"
     case "coding limit": return "Coding limit"
     case "build share", "grok build share": return "Build share"
     case "grok chat share": return "Grok Chat share"
@@ -646,23 +658,30 @@ public enum UsageShareCardBuilder {
     unpriced: Set<ProviderID>,
     calendar: Calendar
   ) -> [UsageShareModel.Bar] {
-    var buckets = Array(repeating: [ProviderKind: Double](), count: 24)
+    var buckets: [Date: [ProviderKind: Double]] = [:]
     for history in histories {
       if metric == .cost && unpriced.contains(history.provider) { continue }
       for point in history.hours {
-        let hour = calendar.component(.hour, from: point.start)
-        guard (0..<24).contains(hour) else { continue }
+        // Even a quiet observed hour has a place on the axis. The timestamp
+        // distinguishes the two occurrences of 1 AM when clocks go back.
+        var segments = buckets[point.start] ?? [:]
         let value = metric == .cost ? point.costUSD : Double(point.tokens)
-        guard let value, value.isFinite, value > 0 else { continue }
-        buckets[hour][history.provider.kind, default: 0] += value
+        if let value, value.isFinite, value > 0 {
+          segments[history.provider.kind, default: 0] += value
+        }
+        buckets[point.start] = segments
       }
     }
-    return buckets.enumerated().map { hour, values in
-      UsageShareModel.Bar(
-        label: Self.hourLabel(hour),
-        segments: ProviderKind.allCases.compactMap { kind in
-          values[kind].map { UsageShareModel.Segment(kind: kind, value: $0) }
-        })
+    let starts = buckets.keys.sorted()
+    let labels = starts.map { Self.hourLabel($0, calendar: calendar) }
+    let repeated = Dictionary(grouping: labels, by: { $0 }).filter { $0.value.count > 1 }
+    var seen: Set<String> = []
+    return zip(starts, labels).map { start, label in
+      let suffix = repeated[label] == nil ? "" : (seen.insert(label).inserted ? " (first)" : " (second)")
+      let values = buckets[start] ?? [:]
+      return UsageShareModel.Bar(label: label + suffix, segments: ProviderKind.allCases.compactMap { kind in
+        values[kind].map { UsageShareModel.Segment(kind: kind, value: $0) }
+      })
     }
   }
 
@@ -671,9 +690,12 @@ public enum UsageShareCardBuilder {
     return keys.indices.contains(index) ? keys[index] : nil
   }
 
-  static func hourLabel(_ hour: Int) -> String {
+  private static func hourLabel(_ start: Date, calendar: Calendar) -> String {
+    let hour = calendar.component(.hour, from: start)
+    let minute = calendar.component(.minute, from: start)
     let twelve = hour % 12 == 0 ? 12 : hour % 12
-    return "\(twelve) \(hour < 12 ? "AM" : "PM")"
+    let minutes = minute == 0 ? "" : String(format: ":%02d", minute)
+    return "\(twelve)\(minutes) \(hour < 12 ? "AM" : "PM")"
   }
 
   private static func date(fromKey key: String, calendar: Calendar) -> Date? {

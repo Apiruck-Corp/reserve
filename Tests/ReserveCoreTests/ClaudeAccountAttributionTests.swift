@@ -124,6 +124,61 @@ import Testing
     #expect(!fixture.plan(requiresVerifiedOrganization: false, bindings: alone).defaultHistoryUnattributed)
   }
 
+  @Test func discoveredFoldersNeedProofOfTheSameSeat() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let unknownSeat = fixture.colleague.appendingPathComponent(".claude.json")
+    try Fixture.profile(unknownSeat, "org-team", "")
+    #expect(self.accounts(fixture.plan(), fixture.colleague).isEmpty)
+    let cache = fixture.root.appendingPathComponent("claude-statusline.json")
+    func route(_ folder: URL) -> URL? {
+      ClaudeStatuslineBridge.routedCacheURL(requested: cache, environment: ["CLAUDE_CONFIG_DIR": folder.path],
+        accounts: fixture.bindings, homeDirectory: fixture.home)
+    }
+    #expect(route(fixture.colleague) == nil)
+
+    try Fixture.profile(fixture.managed.appendingPathComponent(".claude.json"), "org-team", "")
+    #expect(self.accounts(fixture.plan(), fixture.t3).isEmpty)
+    #expect(route(fixture.t3) == nil)
+    try Fixture.profile(unknownSeat, "org-personal", "")
+    let single = Array(fixture.bindings.prefix(1))
+    #expect(self.accounts(fixture.plan(bindings: single), fixture.colleague).isEmpty)
+  }
+
+  @Test func clearingAnAddedAccountsFolderCannotClaimTheDefaultSignIn() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let accounts = [fixture.bindings[0], ClaudeAccountBinding(account: Self.team, folder: nil, verifiedOrganization: nil)]
+    let requested = fixture.root.appendingPathComponent("claude-statusline.json")
+    #expect(ClaudeStatuslineBridge.routedCacheURL(requested: requested, environment: [:],
+      accounts: accounts, homeDirectory: fixture.home) == requested)
+    #expect(!fixture.plan(bindings: accounts).defaultHistoryUnattributed)
+  }
+
+  @Test func aSwitchedManagedFolderCannotWriteAnotherOrganizationsQuotaToItsCard() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try Fixture.profile(fixture.managed.appendingPathComponent(".claude.json"), "org-untracked", "member")
+    let routed = ClaudeStatuslineBridge.routedCacheURL(
+      requested: fixture.root.appendingPathComponent("claude-statusline.json"),
+      environment: ["CLAUDE_CONFIG_DIR": fixture.managed.path],
+      accounts: fixture.bindings, homeDirectory: fixture.home)
+    #expect(routed == nil)
+  }
+
+  @Test func signedOutManagedFolderKeepsHistoryButCannotSupplyLiveQuota() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try FileManager.default.removeItem(at: fixture.managed.appendingPathComponent(".claude.json"))
+    #expect(self.accounts(fixture.plan(), fixture.managed) == [Self.team])
+    let requested = fixture.root.appendingPathComponent("claude-statusline.json")
+    for path in [fixture.managed.path, "relative-folder"] {
+      let routed = ClaudeStatuslineBridge.routedCacheURL(requested: requested,
+        environment: ["CLAUDE_CONFIG_DIR": path], accounts: fixture.bindings, homeDirectory: fixture.home)
+      #expect(routed == nil)
+    }
+  }
+
   @Test func oneAccountOnlyClaimsFoldersOfTheSamePerson() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -216,6 +271,30 @@ import Testing
     let after = try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])
     #expect(after[Self.team] == nil)
     #expect(after[.anthropic]?.dailyUsage(timeZone: .gmt).tokens == 0)
+  }
+
+  @Test func cachedHoursCannotFollowAChangedSetOfAccountFolders() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try fixture.session(fixture.managed, input: 5)
+    try fixture.session(fixture.t3, input: 70)
+    let roots = LocalUsageScanner.Roots(codex: fixture.codex, claude: fixture.projects(fixture.defaultHome),
+      grok: fixture.root)
+    let cache = fixture.root.appendingPathComponent("hourly.json")
+    let scanner = LocalHourlyUsageScanner(roots: roots, cacheURL: cache, timeZone: .gmt)
+    let original = fixture.plan().sources
+    await scanner.setClaudeSources(original)
+    let before = try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])
+    #expect(before[Self.team]?.dailyUsage(timeZone: .gmt).tokens == 75)
+
+    let restarted = LocalHourlyUsageScanner(roots: roots, cacheURL: cache, timeZone: .gmt)
+    await restarted.setClaudeSources(original.filter { $0.projects != fixture.projects(fixture.t3) })
+    let cached = await restarted.cachedHistory(now: fixture.now)
+    #expect(cached[.anthropic] == before[.anthropic])
+    #expect(cached[Self.team] == nil)
+    #expect(try await restarted.scan(now: fixture.now, providers: [.anthropic])[Self.team] == nil)
+    let refreshed = try await restarted.scan(now: fixture.now, providers: [Self.team])
+    #expect(refreshed[Self.team]?.dailyUsage(timeZone: .gmt).tokens == 5)
   }
 
   @Test func hourlyHistoryIsSplitPerAccount() async throws {

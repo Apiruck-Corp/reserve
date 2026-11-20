@@ -86,6 +86,23 @@ import Testing
     #expect(try await reloaded.scan(now: f.now)[.openAI]?.hours[5].tokens == 100)
   }
 
+  @Test func codexHourWithSomeUnnamedUsageKeepsItsTokensWithoutClaimingAFullPrice() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let model = #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"# + "\n"
+    let text = Fixture.codex(stamp: "2026-10-19T01:05:00Z", input: 100) + model
+      + Fixture.codex(stamp: "2026-10-19T01:10:00Z", input: 150)
+      + Fixture.codex(stamp: "2026-10-19T02:10:00Z", input: 200)
+    try f.write(text, to: f.codex.appendingPathComponent("mixed.jsonl"))
+    let scanner = f.scanner()
+    let history = try #require(try await scanner.scan(now: f.now)[.openAI])
+    #expect(history.hours[1].tokens == 150)
+    #expect(history.hours[1].detail?.models["gpt-5.4"]?.tokens == 50)
+    #expect(history.hours[1].costUSD == nil)
+    #expect(history.hours[2].costUSD != nil)
+    #expect(history.dailyUsage(timeZone: .gmt).costUSD == nil)
+  }
+
   @Test func boundedPassesResumeAcrossLaunchesAndNeverPublishPartialTotals() async throws {
     let f = try Fixture(); defer { f.remove() }
     let file = f.claude.appendingPathComponent("session.jsonl")

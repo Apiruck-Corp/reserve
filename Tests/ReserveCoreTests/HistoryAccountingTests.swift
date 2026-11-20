@@ -4,6 +4,389 @@ import Testing
 
 @Suite("Local history accounting")
 struct HistoryAccountingTests {
+  @Test func dailyAndHourlyHistoryUseOnlyTheAssistantMessageUsage() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    func update(tool: String, input: Int) -> String {
+      #"{"type":"assistant","requestId":"request","timestamp":"2026-10-19T10:00:00Z","message":{"content":[{"id":"\#(tool)","input":{"model":"nested","usage":{"input_tokens":999}}}],"id":"message","model":"claude-sonnet-4-5","usage":{"input_tokens":\#(input)}}}"#
+    }
+    let unnamed = #"{"type": "assistant", "timestamp": "2026-10-19T10:05:00Z", "message": {"usage": {"input_tokens": 7}}}"#
+    let unrelated = #"{"type":"user","timestamp":"2026-10-19T10:00:00Z","message":{"content":[{"example":{"type":"assistant","usage":{"input_tokens":5000}}}]}}"#
+    let file = fixture.claude.appendingPathComponent("session.jsonl")
+    let lines = [update(tool: "first", input: 10), update(tool: "second", input: 20), unnamed, unrelated]
+    try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
+
+    let scanner = fixture.scanner(zone: "UTC")
+    _ = try await scanner.scan(now: now, providers: [.anthropic])
+    let daily = try #require(await scanner.cachedHistory(now: now, providers: [.anthropic])[.anthropic]?.days.last)
+    let hourly = LocalHourlyUsageScanner(
+      roots: .init(codex: fixture.codex, claude: fixture.claude, grok: fixture.grok),
+      cacheURL: fixture.root.appendingPathComponent("hours.json"), timeZone: .gmt)
+    let today = try #require(try await hourly.scan(now: now)[.anthropic]?.dailyUsage(timeZone: .gmt))
+    for day in [daily, today] {
+      #expect(day.tokens == 27)
+      #expect(day.costUSD == nil)
+      #expect(day.detail?.models.mapValues(\.tokens) == ["claude-sonnet-4-5": 20])
+    }
+  }
+
+  @Test(arguments: ["UTC", "America/New_York"])
+  func legacyClaudeMessageDaysAreRepairedOnceWithoutLosingUnrelatedHistory(zone: String) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let line = Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 10)
+    try Data((line + "\n").utf8).write(to: fixture.claude.appendingPathComponent("session.jsonl"))
+    _ = try await fixture.scanner(zone: "UTC").scan(now: now, providers: [.anthropic])
+
+    // The old parser picked a nested timestamp one day early. Five tokens
+    // on the old date and six on the correct date survive only in the archive.
+    var index = try fixture.index()
+    var records = try #require(index["records"] as? [String: [String: Any]])
+    let key = try #require(records.keys.first)
+    let days = try #require(records[key]?["days"] as? [String: Any])
+    records[key]?["days"] = ["2026-10-18": try #require(days["2026-10-19"])]
+    records[key]?["insightDetailsVersion"] = 1
+    index["records"] = records
+    try fixture.writeIndex(index)
+    try fixture.editArchive(.anthropic) { archive in
+      archive["2026-10-19"] = ArchivedDay(tokens: 6, costUSD: nil, fetchedAt: now)
+      archive["2026-10-18"] = ArchivedDay(tokens: 16, costUSD: nil, fetchedAt: now)
+      archive["2026-09-01"] = ArchivedDay(tokens: 777, costUSD: nil, fetchedAt: now)
+    }
+
+    let scanner = fixture.scanner(zone: zone)
+    _ = try await scanner.scan(now: now, providers: [.anthropic])
+    let repaired = try fixture.archive(.anthropic)
+    #expect(repaired["2026-10-18"]?.tokens == 5)
+    #expect(repaired["2026-10-19"]?.tokens == 17)
+    #expect(repaired["2026-09-01"]?.tokens == 777)
+    _ = try await scanner.scan(now: now, providers: [.anthropic])
+    #expect(await scanner.scanMetrics.filesParsed == 1)
+    #expect(try fixture.archive(.anthropic)["2026-10-18"]?.tokens == 5)
+    #expect(try fixture.archive(.anthropic)["2026-10-19"]?.tokens == 17)
+
+    let file = fixture.claude.appendingPathComponent("session.jsonl")
+    let handle = try FileHandle(forWritingTo: file)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 20) + "\n").utf8))
+    try handle.close()
+    _ = try await fixture.scanner(zone: zone).scan(now: now, providers: [.anthropic])
+    #expect(try fixture.archive(.anthropic)["2026-10-19"]?.tokens == 27)
+  }
+
+  @Test(arguments: [false, true], ["UTC", "America/New_York"])
+  func aMessageUpgradePreservesDaysOutsideTheScanWindow(oldRecordHasDay: Bool, zone: String) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let older = "2026-09-09"
+    let oldRow = Fixture.claudeLine(stamp: older + "T01:00:00Z", input: 10)
+      .replacingOccurrences(of: "m1", with: "older-message")
+    let current = Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 20)
+    let file = fixture.claude.appendingPathComponent("long-session.jsonl")
+    try Data(([oldRow, current].joined(separator: "\n") + "\n").utf8).write(to: file)
+    _ = try await fixture.scanner(zone: "UTC").scan(
+      periodDays: oldRecordHasDay ? 90 : 30, now: now, providers: [.anthropic])
+    var index = try fixture.index()
+    var records = try #require(index["records"] as? [String: [String: Any]])
+    let key = try #require(records.keys.first)
+    let days = try #require(records[key]?["days"] as? [String: Any])
+    #expect((days[older] != nil) == oldRecordHasDay)
+    records[key]?["insightDetailsVersion"] = 1
+    index["records"] = records
+    try fixture.writeIndex(index)
+    let archived = ArchivedDay(tokens: 16, costUSD: 0.75, fetchedAt: now)
+    try fixture.editArchive(.anthropic) { $0[older] = archived }
+
+    if oldRecordHasDay {
+      let first = fixture.scanner(zone: zone)
+      await first.testingSetBudget(stopBeforePublish: true)
+      await #expect(throws: UsageProviderError.self) {
+        _ = try await first.scan(now: now, providers: [.anthropic])
+      }
+      #expect(try fixture.archive(.anthropic)[older]?.tokens == 16)
+      let handle = try FileHandle(forWritingTo: file)
+      try handle.seekToEnd()
+      let revised = Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 30)
+      try handle.write(contentsOf: Data((revised + "\n").utf8))
+      try handle.close()
+    }
+    let resumed = fixture.scanner(zone: zone)
+    let summary = try await resumed.scan(now: now, providers: [.anthropic])
+    #expect(await resumed.scanMetrics.resumes == (oldRecordHasDay ? 1 : 0))
+    #expect(summary[.anthropic]?.todayTokens == (oldRecordHasDay ? 31 : 21))
+    let history = await resumed.cachedHistory(now: now, providers: [.anthropic])
+    let saved = try #require(history[.anthropic]?.days.first { $0.day == older })
+    #expect(saved.tokens == archived.tokens)
+    #expect(saved.costUSD == archived.costUSD)
+    _ = try await resumed.scan(now: now, providers: [.anthropic])
+    #expect(try fixture.archive(.anthropic)[older]?.tokens == archived.tokens)
+    if zone != "UTC" {
+      let home = fixture.scanner(zone: "UTC")
+      _ = try await home.scan(now: now, providers: [.anthropic])
+      let returned = try fixture.archive(.anthropic)
+      #expect(returned[older]?.tokens == archived.tokens && returned[older]?.costUSD == archived.costUSD)
+      #expect(returned["2026-09-08"] == nil)
+    }
+  }
+
+  @Test(arguments: [false, true])
+  func aMessageUpgradeMovesUsageAcrossTheReportingBoundaryExactlyOnce(travelEast: Bool) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let oldZone = travelEast ? "America/New_York" : "UTC"
+    let newZone = travelEast ? "UTC" : "America/New_York"
+    let before = "2026-09-19"
+    let first = "2026-09-20"
+    let crossing = Fixture.claudeLine(stamp: first + "T02:00:00Z", input: 10)
+    let neighbor = Fixture.claudeLine(stamp: before + "T16:00:00Z", input: 3)
+    let sameFile = Fixture.claudeLine(stamp: before + "T14:00:00Z", input: 1)
+      .replacingOccurrences(of: "m1", with: "prior-message")
+    for (name, lines) in [("crossing", [sameFile, crossing]), ("neighbor", [neighbor])] {
+      try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: fixture.claude.appendingPathComponent(name + ".jsonl"))
+    }
+    _ = try await fixture.scanner(zone: oldZone).scan(periodDays: 90, now: now, providers: [.anthropic])
+    var index = try fixture.index()
+    var records = try #require(index["records"] as? [String: [String: Any]])
+    var trimmed = 0
+    for key in records.keys {
+      records[key]?["insightDetailsVersion"] = 1
+      // A later append in just one file trimmed its per-file day. The other
+      // file's four tokens and another archive-only token still belong there.
+      if travelEast, let days = records[key]?["days"] as? [String: [String: Any]],
+        days[before]?["input"] as? Int == 11 {
+        records[key]?["days"] = [:] as [String: Any]
+        trimmed += 1
+      }
+    }
+    #expect(trimmed == (travelEast ? 1 : 0))
+    index["records"] = records
+    try fixture.writeIndex(index)
+    try fixture.editArchive(.anthropic) { days in
+      days[before] = ArchivedDay(tokens: travelEast ? 18 : 7, costUSD: nil, fetchedAt: now)
+      days[first] = ArchivedDay(tokens: travelEast ? 7 : 18, costUSD: nil, fetchedAt: now)
+    }
+    let scanner = fixture.scanner(zone: newZone)
+    _ = try await scanner.scan(now: now, providers: [.anthropic])
+    for _ in 0..<2 {
+      let days = try fixture.archive(.anthropic)
+      #expect(days[before]?.tokens == (travelEast ? 7 : 18))
+      #expect(days[first]?.tokens == (travelEast ? 18 : 7))
+      _ = try await scanner.scan(now: now, providers: [.anthropic])
+    }
+    let home = fixture.scanner(zone: oldZone)
+    _ = try await home.scan(now: now, providers: [.anthropic])
+    let returned = try fixture.archive(.anthropic)
+    #expect(returned[before]?.tokens == (travelEast ? 18 : 7))
+    #expect(returned[first]?.tokens == (travelEast ? 7 : 18))
+  }
+
+  @Test func aWestwardUpgradeIncludesTheDayAlreadyTrimmedAfterMidnightUTC() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let oldNow = Fixture.date("2026-10-19T01:00:00Z")
+    let newNow = Fixture.date("2026-10-19T01:30:00Z")
+    let day = "2026-09-19"
+    let main = fixture.claude.appendingPathComponent("long-session.jsonl")
+    let neighbor = fixture.claude.appendingPathComponent("neighbor.jsonl")
+    try Data((Fixture.claudeLine(stamp: day + "T16:00:00Z", input: 10) + "\n").utf8).write(to: main)
+    try Data((Fixture.claudeLine(stamp: day + "T12:00:00Z", input: 3) + "\n").utf8).write(to: neighbor)
+    _ = try await fixture.scanner(zone: "UTC").scan(periodDays: 90, now: oldNow, providers: [.anthropic])
+    let append = Fixture.claudeLine(stamp: "2026-10-19T01:00:00Z", input: 1)
+      .replacingOccurrences(of: "m1", with: "later-message")
+    let handle = try FileHandle(forWritingTo: main)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((append + "\n").utf8))
+    try handle.close()
+    _ = try await fixture.scanner(zone: "UTC").scan(now: oldNow, providers: [.anthropic])
+    let index = try fixture.index()
+    let records = try #require(index["records"] as? [String: [String: Any]])
+    #expect(records.values.filter { ($0["days"] as? [String: Any])?[day] != nil }.count == 1)
+    try fixture.markOldMessageVersion()
+    try fixture.editArchive(.anthropic) { $0[day] = ArchivedDay(tokens: 20, costUSD: nil, fetchedAt: oldNow) }
+    let scanner = fixture.scanner(zone: "America/New_York")
+    for _ in 0..<2 {
+      _ = try await scanner.scan(now: newNow, providers: [.anthropic])
+      let archive = try fixture.archive(.anthropic)
+      #expect(archive[day]?.tokens == 20)
+      #expect(archive["2026-10-18"]?.tokens == 2)
+    }
+  }
+
+  @Test func aFolderKeepsItsPublishedFilesUntilAllCanFinishRebucketing() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let moved = fixture.claude.appendingPathComponent("moving.jsonl")
+    let partial = fixture.claude.appendingPathComponent("partial.jsonl")
+    let moving = Fixture.claudeLine(stamp: "2026-09-20T02:00:00Z", input: 10) + "\n"
+    let first = Fixture.claudeLine(stamp: "2026-09-20T15:00:00Z", input: 3) + "\n"
+    let second = Fixture.claudeLine(stamp: "2026-09-20T16:00:00Z", input: 2)
+      .replacingOccurrences(of: "m1", with: "other-message") + "\n"
+    try Data(moving.utf8).write(to: moved)
+    try Data((first + second).utf8).write(to: partial)
+    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: moved.path)
+    try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: partial.path)
+    _ = try await fixture.scanner(zone: "UTC").scan(now: now, providers: [.anthropic])
+    try fixture.markOldMessageVersion()
+    try fixture.editArchive(.anthropic) { $0["2026-09-19"] = ArchivedDay(tokens: 5, costUSD: nil, fetchedAt: now) }
+    let saved = try Data(contentsOf: fixture.cache)
+    let interrupted = fixture.scanner(zone: "America/New_York")
+    await interrupted.testingSetBudget(maximumBytes: moving.utf8.count + first.utf8.count)
+    await #expect(throws: UsageProviderError.self) {
+      _ = try await interrupted.scan(now: now, providers: [.anthropic])
+    }
+    #expect(try Data(contentsOf: fixture.cache) == saved)
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: partial.path)
+    let held = fixture.scanner(zone: "America/New_York")
+    _ = try await held.scan(now: now, providers: [.anthropic])
+    #expect(await held.scanIncomplete)
+    #expect(try Data(contentsOf: fixture.cache) == saved)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: partial.path)
+    let recovered = fixture.scanner(zone: "America/New_York")
+    _ = try await recovered.scan(now: now, providers: [.anthropic])
+    let archive = try fixture.archive(.anthropic)
+    #expect(archive["2026-09-19"]?.tokens == 16)
+    #expect(archive["2026-09-20"]?.tokens == 7)
+    #expect(await recovered.testingCheckpointExists() == false)
+  }
+
+  @Test(arguments: [false, true], [false, true])
+  func aTimeZoneChangeIncludesNewUsageOnlyOnce(trimOldDay: Bool, streamingCorrection: Bool) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let lastScan = Fixture.date("2026-10-19T01:34:00Z")
+    let nextScan = Fixture.date("2026-10-19T01:45:00Z")
+    let oldDay = trimOldDay ? "2026-09-08" : "2026-10-18"
+    let newDay = trimOldDay ? "2026-09-09" : "2026-10-19"
+    let session = fixture.claude.appendingPathComponent("open-session.jsonl")
+    let original = Fixture.claudeLine(stamp: newDay + "T01:30:00Z", input: 10)
+    try Data((original + "\n").utf8).write(to: session)
+    func append(_ row: String) throws {
+      let handle = try FileHandle(forWritingTo: session)
+      defer { try? handle.close() }
+      try handle.seekToEnd()
+      try handle.write(contentsOf: Data((row + "\n").utf8))
+    }
+    let old = fixture.scanner(zone: "America/New_York")
+    _ = try await old.scan(periodDays: 90, now: lastScan, providers: [.anthropic])
+    if trimOldDay {
+      try append(Fixture.claudeLine(stamp: "2026-10-19T01:33:00Z", input: 1)
+        .replacingOccurrences(of: "m1", with: "recent-marker"))
+      _ = try await old.scan(now: lastScan, providers: [.anthropic])
+      let index = try fixture.index()
+      let records = try #require(index["records"] as? [String: [String: Any]])
+      #expect((records.values.first?["days"] as? [String: Any])?[oldDay] == nil)
+    }
+    #expect(try fixture.archive(.anthropic)[oldDay]?.tokens == 11)
+    let revised = Fixture.claudeLine(stamp: newDay + "T01:40:00Z", input: streamingCorrection ? 15 : 4)
+    try append(streamingCorrection ? revised : revised.replacingOccurrences(of: "m1", with: "new-message"))
+    let scanner = fixture.scanner(zone: "UTC")
+    for _ in 0..<2 {
+      _ = try await scanner.scan(now: nextScan, providers: [.anthropic])
+      let archived = try fixture.archive(.anthropic)
+      #expect(archived[oldDay] == nil)
+      #expect(archived[newDay]?.tokens == 16)
+    }
+  }
+
+  @Test(arguments: [false, true], [
+    (trimOldDay: false, atCutoff: false), (trimOldDay: false, atCutoff: true),
+    (trimOldDay: true, atCutoff: false), (trimOldDay: true, atCutoff: true),
+  ])
+  func aRestoredTranscriptPreservesArchivedDaysWithoutAFileRecord(
+    replaceFile: Bool, history: (trimOldDay: Bool, atCutoff: Bool)
+  ) async throws {
+    let (trimOldDay, atCutoff) = history
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let file = fixture.claude.appendingPathComponent("restored.jsonl")
+    let oldDay = atCutoff ? "2026-09-19" : "2026-09-08"
+    let newDay = atCutoff ? "2026-09-20" : "2026-09-09"
+    let older = Fixture.claudeLine(stamp: newDay + "T01:30:00Z", input: 10)
+    let recent = Fixture.claudeLine(stamp: "2026-10-19T01:30:00Z", input: 3)
+      .replacingOccurrences(of: "m1", with: "recent-message")
+    try Data((older + "\n").utf8).write(to: file)
+    let original = fixture.scanner(zone: "America/New_York")
+    _ = try await original.scan(periodDays: 90, now: now, providers: [.anthropic])
+    func append(_ row: String) throws {
+      let handle = try FileHandle(forWritingTo: file)
+      defer { try? handle.close() }
+      try handle.seekToEnd()
+      try handle.write(contentsOf: Data((row + "\n").utf8))
+    }
+    try append(recent)
+    _ = try await original.scan(periodDays: trimOldDay ? 30 : 90, now: now, providers: [.anthropic])
+    let records = try #require(fixture.index()["records"] as? [String: [String: Any]])
+    let recordedDays = try #require(records.values.first?["days"] as? [String: Any])
+    #expect((recordedDays[oldDay] == nil) == trimOldDay)
+    try fixture.editArchive(.anthropic) { rows in
+      rows[oldDay] = ArchivedDay(tokens: 16, costUSD: 0.5, fetchedAt: now)
+      rows[newDay] = ArchivedDay(tokens: 7, costUSD: nil, fetchedAt: now)
+    }
+    if replaceFile {
+      try Data(contentsOf: file).write(to: file, options: .atomic)
+    } else {
+      try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: file.path)
+    }
+    let restored = fixture.scanner(zone: "UTC")
+    for _ in 0..<2 {
+      _ = try await restored.scan(now: now, providers: [.anthropic])
+      let rows = try fixture.archive(.anthropic)
+      #expect(rows[oldDay]?.tokens == (trimOldDay ? 16 : 5))
+      #expect(rows[newDay]?.tokens == (trimOldDay ? 7 : 18))
+      if trimOldDay { #expect(rows[oldDay]?.costUSD == 0.5) }
+      #expect(rows["2026-10-18"] == nil && rows["2026-10-19"]?.tokens == 4)
+    }
+    if trimOldDay && atCutoff {
+      // A second restore can expose the first day of the report in this same zone.
+      try Data(contentsOf: file).write(to: file, options: .atomic)
+      _ = try await restored.scan(now: now, providers: [.anthropic])
+      #expect(try fixture.archive(.anthropic)[newDay]?.tokens == 7)
+    }
+    for zone in ["America/New_York", "America/Chicago"] {
+      let returned = fixture.scanner(zone: zone)
+      _ = try await returned.scan(now: now, providers: [.anthropic])
+      let rows = try fixture.archive(.anthropic)
+      #expect(rows[oldDay]?.tokens == 16 && rows[oldDay]?.costUSD == 0.5)
+      #expect(rows[newDay]?.tokens == 7)
+      #expect(rows["2026-10-18"]?.tokens == 4 && rows["2026-10-19"] == nil)
+    }
+
+    // Six newly appended tokens on an archive-only date must still follow the user.
+    let late = Fixture.claudeLine(stamp: newDay + "T02:00:00Z", input: 5)
+      .replacingOccurrences(of: "m1", with: "late-message")
+    try append(late)
+    let away = fixture.scanner(zone: "UTC")
+    _ = try await away.scan(periodDays: 90, now: now, providers: [.anthropic])
+    #expect(try fixture.archive(.anthropic)[newDay]?.tokens == (trimOldDay ? 13 : 24))
+    try Data(contentsOf: file).write(to: file, options: .atomic)
+    _ = try await away.scan(periodDays: 90, now: now, providers: [.anthropic])
+    let home = fixture.scanner(zone: "America/New_York")
+    _ = try await home.scan(periodDays: 90, now: now, providers: [.anthropic])
+    let final = try fixture.archive(.anthropic)
+    #expect(final[oldDay]?.tokens == 22 && final[newDay]?.tokens == 7)
+  }
+
+  @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T15:30:00Z")
+    let stamp = "2026-10-13T06:00:00Z"
+    let file = fixture.claude.appendingPathComponent("first-day.jsonl")
+    try Data((Fixture.claudeLine(stamp: stamp, input: 10) + "\n").utf8).write(to: file)
+    try FileManager.default.setAttributes([.modificationDate: Fixture.date(stamp)], ofItemAtPath: file.path)
+    let scanner = fixture.scanner(zone: "UTC")
+    let result = try await scanner.scan(periodDays: 7, now: now, providers: [.anthropic])
+    #expect(result[.anthropic]?.totalTokens == 11)
+    #expect(await scanner.cachedHistory(periodDays: 7, now: now)[.anthropic]?.days.first?.day == "2026-10-13")
+  }
+
   @Test func alreadyPricedLegacyRecordsBackfillTokenSplitAndModelsOnce() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -274,7 +657,7 @@ struct HistoryAccountingTests {
   func claudeUsesTheLocalCivilDay(zone: String, stamp: String, day: String) throws {
     let line = Fixture.claudeLine(stamp: stamp, input: 10)
     let timeZone = try #require(TimeZone(identifier: zone))
-    let row = try #require(LocalUsageScanner.parseClaudeLine(
+    let (_, row) = try #require(LocalUsageScanner.parseClaudeLine(
       Data(line.utf8), timeZone: timeZone))
     #expect(row.dayKey == day)
     #expect(row.totals.totalTokens(provider: .anthropic) == 11)
@@ -567,6 +950,14 @@ struct HistoryAccountingTests {
 
     func index() throws -> [String: Any] {
       try #require(JSONSerialization.jsonObject(with: Data(contentsOf: cache)) as? [String: Any])
+    }
+
+    func markOldMessageVersion() throws {
+      var object = try index()
+      var records = try #require(object["records"] as? [String: [String: Any]])
+      for key in records.keys { records[key]?["insightDetailsVersion"] = 1 }
+      object["records"] = records
+      try writeIndex(object)
     }
 
     func writeIndex(_ object: [String: Any]) throws {
