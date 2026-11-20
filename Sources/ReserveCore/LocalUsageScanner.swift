@@ -836,9 +836,6 @@ public actor LocalUsageScanner {
       .flatMap(TimeZone.init(identifier:))
       ?? TimeZone(secondsFromGMT: 0)!
     let staleDays = record != nil && record?.dayTimeZone != self.timeZone.identifier
-    // A previous parser may have used a different timestamp entirely. Its
-    // published record is the only evidence for the day it originally charged.
-    let rebucketDays = staleDays && record?.insightDetailsVersion == CachedFile.claudeMessageVersion
     let continueSavingsMigration = record?.savingsPriced == false
       && record?.insightDetailsVersion == CachedFile.claudeMessageVersion && !staleDays
     let staleSavings = record?.needsSavingsRefresh == true && !continueSavingsMigration
@@ -851,8 +848,8 @@ public actor LocalUsageScanner {
         provider: unit, size: 0, modifiedAt: 0, offset: 0,
         days: [:], recentRows: [:], recentOrder: [],
         dayTimeZone: self.timeZone.identifier,
-        rebucketedFromDays: rebucketDays ? [:] : nil,
-        rebucketedFromTimeZone: rebucketDays ? previousTimeZone.identifier : nil)
+        rebucketedFromDays: staleDays ? [:] : nil,
+        rebucketedFromTimeZone: staleDays ? previousTimeZone.identifier : nil)
     }
     let needsUpdate = !metadata.matches(record) || (record?.offset ?? 0) < metadata.size
       || staleSavings || staleDays || continueSavingsMigration
@@ -876,11 +873,14 @@ public actor LocalUsageScanner {
           provider: unit, size: 0, modifiedAt: 0, offset: 0,
           days: [:], recentRows: [:], recentOrder: [],
           dayTimeZone: self.timeZone.identifier,
-          rebucketedFromDays: rebucketDays ? [:] : nil,
-          rebucketedFromTimeZone: rebucketDays ? previousTimeZone.identifier : nil)
+          rebucketedFromDays: staleDays ? [:] : nil,
+          rebucketedFromTimeZone: staleDays ? previousTimeZone.identifier : nil)
       }
       var updated = record!
       let previousZone = updated.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:))
+      let upgradingAcrossZones = previousZone != nil && ledger.publishedRecords[key].map {
+        $0.insightDetailsVersion != CachedFile.claudeMessageVersion
+      } == true
       let migrating = staleSavings || staleDays || continueSavingsMigration
       let retentionKey = previousZone == nil ? cutoffKey : Self.dayKey(
         self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays + 1,
@@ -895,6 +895,10 @@ public actor LocalUsageScanner {
         guard let row = Self.parseClaudeLine(
           data, timeZone: self.timeZone, previousTimeZone: previousZone),
           row.dayKey >= retentionKey else { return }
+        // Include a boundary-crossing message on both sides of the move. Older
+        // rows outside the reporting window in both zones stay in the archive.
+        if upgradingAcrossZones, row.dayKey < cutoffKey,
+          (row.previousDayKey ?? row.dayKey) < cutoffKey { return }
         if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
           updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
           if let previousDay = previous.previousDayKey {
@@ -1559,17 +1563,24 @@ public actor LocalUsageScanner {
       }
       if let old = published[key], old.insightDetailsVersion != record.insightDetailsVersion {
         // Only the old record shows which timestamps its parser actually used.
-        affected[record.provider, default: []].formUnion(old.days.keys.filter { $0 >= cutoffKey })
-        affected[record.provider, default: []].formUnion(record.days.keys.filter { $0 >= cutoffKey })
+        var previous = old
+        previous.days = old.days.filter { $0.key >= cutoffKey }
+        // Outside the window, per-file totals can already be trimmed. Move
+        // only the messages we actually saw cross the boundary in this file.
+        for (day, totals) in record.rebucketedFromDays ?? [:] where day < cutoffKey {
+          previous.days[day] = totals
+        }
+        prior.records[key] = previous
+        affected[record.provider, default: []].formUnion(previous.days.keys)
       } else if let oldDays = record.rebucketedFromDays {
         var previous = record
         previous.days = oldDays
         prior.records[key] = previous
         affected[record.provider, default: []].formUnion(oldDays.keys)
-        affected[record.provider, default: []].formUnion(record.days.keys)
       } else {
         continue
       }
+      affected[record.provider, default: []].formUnion(record.days.keys)
       migrated.insert(key)
     }
     // A later scan of the same files still accounts for only part of the
@@ -1595,7 +1606,7 @@ public actor LocalUsageScanner {
     for (unit, days) in affected {
       let reconstructed = reconstructedByUnit[unit] ?? [:]
       for day in days {
-        let previous = legacy[unit]?[day] ?? reconstructed[day]
+        let previous = day < cutoffKey ? reconstructed[day] : (legacy[unit]?[day] ?? reconstructed[day])
         let corrected = fresh[unit]?[day]
         if let archived = index.dailyHistory[unit]?[day] {
           let previousTokens = previous?.tokens ?? 0
