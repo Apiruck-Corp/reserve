@@ -884,6 +884,7 @@ public actor LocalUsageScanner {
         metadata.size > original.size || (metadata.size == original.size && metadata.modifiedAt == original.modifiedAt) {
         publishedOffset = original.offset
       }
+      let unknownPrefix = previousZone != nil && publishedOffset == 0 && (original?.offset ?? 0) > 0
       let upgradingAcrossZones = previousZone != nil && original.map {
         $0.insightDetailsVersion != CachedFile.claudeMessageVersion
       } == true
@@ -898,13 +899,20 @@ public actor LocalUsageScanner {
           ? self.maximumMigrationFileBytes : self.maximumBytesPerFileScan,
         deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
       ) { data, wasPublished in
-        guard let row = Self.parseClaudeLine(
-          data, timeZone: self.timeZone, previousTimeZone: wasPublished ? previousZone : nil),
+        guard var row = Self.parseClaudeLine(
+          data, timeZone: self.timeZone, previousTimeZone: wasPublished || unknownPrefix ? previousZone : nil),
           row.dayKey >= retentionKey else { return }
         // Include a boundary-crossing message on both sides of the move. Older
         // rows outside the reporting window in both zones stay in the archive.
         if upgradingAcrossZones, row.dayKey < cutoffKey,
           (row.previousDayKey ?? row.dayKey) < cutoffKey { return }
+        if !wasPublished, let oldDay = row.previousDayKey {
+          // A restore can change the file's identity or timestamp. Keep an
+          // archive-only day when its share from the old file cannot be proved.
+          if min(oldDay, row.dayKey) <= cutoffKey, original?.days[oldDay] == nil,
+            box.index.dailyHistory[unit]?[oldDay] != nil { return }
+          row.previousDayKey = nil
+        }
         if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
           updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
           if wasPublished, let previousDay = previous.previousDayKey {
