@@ -124,6 +124,38 @@ import Testing
     #expect(!fixture.plan(requiresVerifiedOrganization: false, bindings: alone).defaultHistoryUnattributed)
   }
 
+  @Test func discoveredFoldersNeedProofOfTheSameSeat() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let unknownSeat = fixture.colleague.appendingPathComponent(".claude.json")
+    try Fixture.profile(unknownSeat, "org-team", "")
+    #expect(self.accounts(fixture.plan(), fixture.colleague).isEmpty)
+    let cache = fixture.root.appendingPathComponent("claude-statusline.json")
+    func route(_ folder: URL) -> URL? {
+      ClaudeStatuslineBridge.routedCacheURL(requested: cache, environment: ["CLAUDE_CONFIG_DIR": folder.path],
+        accounts: fixture.bindings, homeDirectory: fixture.home)
+    }
+    #expect(route(fixture.colleague) == nil)
+
+    try Fixture.profile(fixture.managed.appendingPathComponent(".claude.json"), "org-team", "")
+    #expect(self.accounts(fixture.plan(), fixture.t3).isEmpty)
+    #expect(route(fixture.t3) == nil)
+    try Fixture.profile(unknownSeat, "org-personal", "")
+    let single = Array(fixture.bindings.prefix(1))
+    #expect(self.accounts(fixture.plan(bindings: single), fixture.colleague).isEmpty)
+  }
+
+  @Test func aSwitchedManagedFolderCannotWriteAnotherOrganizationsQuotaToItsCard() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try Fixture.profile(fixture.managed.appendingPathComponent(".claude.json"), "org-untracked", "member")
+    let routed = ClaudeStatuslineBridge.routedCacheURL(
+      requested: fixture.root.appendingPathComponent("claude-statusline.json"),
+      environment: ["CLAUDE_CONFIG_DIR": fixture.managed.path],
+      accounts: fixture.bindings, homeDirectory: fixture.home)
+    #expect(routed == nil)
+  }
+
   @Test func oneAccountOnlyClaimsFoldersOfTheSamePerson() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }

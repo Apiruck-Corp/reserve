@@ -68,6 +68,8 @@ struct UsageGlanceTests {
     ]))
     #expect(glance.lead == .cost)
     #expect(glance.unpricedProviders.isEmpty)
+    #expect(glance.providers.first?.costUSD == 2)
+    #expect(glance.providers.first?.share == 1)
   }
 
   @Test func noPriceAtAllHidesCostInsteadOfShowingZero() {

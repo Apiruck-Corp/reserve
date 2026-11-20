@@ -88,6 +88,44 @@ struct UsageShareCardTests {
     #expect(text.contains("under pace"))
   }
 
+  @Test func shareCardShowsProductUseOfAPoolWithoutAnIndependentForecast() throws {
+    let reset = Self.now.addingTimeInterval(5 * 86_400)
+    let windows = [
+      UsageWindow(id: "pool", label: "Weekly", usedPercent: 40, windowMinutes: 10_080, resetsAt: reset),
+      UsageWindow(id: "product-grokchat", label: "Grok Chat share", usedPercent: 30,
+        windowMinutes: 10_080, resetsAt: reset),
+    ]
+    let card = Self.build(accounts: [
+      UsageShareAccount(provider: .grok, planName: "Premium", windows: windows, checkedAt: Self.now),
+    ], history: nil)
+    let text = card.plainText()
+    #expect(text.contains("Weekly limit: 60% left"))
+    #expect(text.contains("Grok Chat share: 30% of pool used"))
+    let share = try #require(card.plans.first?.limits.last)
+    #expect(share.pace == nil)
+    #expect(share.projectedRemainingAtResetPercent == nil)
+  }
+
+  @Test func busiestHourUsesSeparateObservationsWhenClocksGoBack() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "America/New_York"))
+    let now = try #require(ISO8601DateFormatter().date(from: "2026-11-01T08:30:00Z"))
+    let starts = HourlyUsageHistory.hourStarts(now: now, timeZone: calendar.timeZone)
+    let values: [Int64] = [0, 50, 60, 80, 0]
+    #expect(starts.count == values.count)
+    let history = HourlyUsageHistory(provider: .openAI, dayStart: calendar.startOfDay(for: now),
+      observedAt: now, hours: zip(starts, values).map { HourlyUsagePoint(start: $0, tokens: $1, costUSD: nil) })
+    let card = UsageShareCardBuilder.model(accounts: [], history: [
+      Self.entry(.openAI, "2026-11-01", tokens: 190, cost: nil),
+    ], hourly: [history], usageCheckedAt: now, options: UsageShareOptions(periodDays: 1),
+      now: now, calendar: calendar)
+    let usage = try #require(card.usage)
+    #expect(usage.bars.map(\.total) == values.map(Double.init))
+    #expect(usage.bars[1].label != usage.bars[2].label)
+    #expect(usage.peakValue == 80)
+    #expect(usage.peakLabel == "2 AM")
+  }
+
   @Test func staleLimitsHaveNoPace() {
     let window = UsageWindow(
       id: "weekly", label: "Weekly", usedPercent: 10, windowMinutes: 10_080,
