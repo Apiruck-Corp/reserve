@@ -32,7 +32,8 @@ struct HistoryAccountingTests {
     }
   }
 
-  @Test func legacyClaudeMessageDaysAreRepairedOnceWithoutLosingUnrelatedHistory() async throws {
+  @Test(arguments: ["UTC", "America/New_York"])
+  func legacyClaudeMessageDaysAreRepairedOnceWithoutLosingUnrelatedHistory(zone: String) async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
     let now = Fixture.date("2026-10-19T12:00:00Z")
@@ -40,8 +41,8 @@ struct HistoryAccountingTests {
     try Data((line + "\n").utf8).write(to: fixture.claude.appendingPathComponent("session.jsonl"))
     _ = try await fixture.scanner(zone: "UTC").scan(now: now, providers: [.anthropic])
 
-    // The old parser picked a nested timestamp one day early. Five other
-    // tokens from that day survive only in the archive.
+    // The old parser picked a nested timestamp one day early. Five tokens
+    // on the old date and six on the correct date survive only in the archive.
     var index = try fixture.index()
     var records = try #require(index["records"] as? [String: [String: Any]])
     let key = try #require(records.keys.first)
@@ -56,7 +57,7 @@ struct HistoryAccountingTests {
       archive["2026-09-01"] = ArchivedDay(tokens: 777, costUSD: nil, fetchedAt: now)
     }
 
-    let scanner = fixture.scanner(zone: "UTC")
+    let scanner = fixture.scanner(zone: zone)
     _ = try await scanner.scan(now: now, providers: [.anthropic])
     let repaired = try fixture.archive(.anthropic)
     #expect(repaired["2026-10-18"]?.tokens == 5)
@@ -66,6 +67,14 @@ struct HistoryAccountingTests {
     #expect(await scanner.scanMetrics.filesParsed == 1)
     #expect(try fixture.archive(.anthropic)["2026-10-18"]?.tokens == 5)
     #expect(try fixture.archive(.anthropic)["2026-10-19"]?.tokens == 17)
+
+    let file = fixture.claude.appendingPathComponent("session.jsonl")
+    let handle = try FileHandle(forWritingTo: file)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 20) + "\n").utf8))
+    try handle.close()
+    _ = try await fixture.scanner(zone: zone).scan(now: now, providers: [.anthropic])
+    #expect(try fixture.archive(.anthropic)["2026-10-19"]?.tokens == 27)
   }
 
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
