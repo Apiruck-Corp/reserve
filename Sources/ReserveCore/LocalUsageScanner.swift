@@ -916,28 +916,32 @@ public actor LocalUsageScanner {
           parsedRow.dayKey >= retentionKey,
           !archiveOnlyDays.contains(where: { $0.covers(timestamp, at: sourceOffset) }) else { return }
         var row = parsedRow
-        // Include a boundary-crossing message on both sides of the move. Older
-        // rows outside the reporting window in both zones stay in the archive.
-        if upgradingAcrossZones, row.dayKey < cutoffKey,
-          (row.previousDayKey ?? row.dayKey) < cutoffKey { return }
-        if !wasPublished, let oldDay = row.previousDayKey, let previousZone {
-          // Keep this part of the restored file on the archive's original civil
-          // day. Later zone changes must preserve it, while new appends can count.
-          if min(oldDay, row.dayKey) <= cutoffKey, original?.days[oldDay] == nil,
-            box.index.dailyHistory[unit]?[oldDay] != nil {
+        let outsideUpgradeWindow = upgradingAcrossZones && row.dayKey < cutoffKey
+          && (row.previousDayKey ?? row.dayKey) < cutoffKey
+        if let oldDay = row.previousDayKey, let previousZone {
+          let unverifiedRestore = !wasPublished && min(oldDay, row.dayKey) <= cutoffKey
+            && original?.days[oldDay] == nil
+          if (outsideUpgradeWindow || unverifiedRestore), box.index.dailyHistory[unit]?[oldDay] != nil {
+            // Remember only the hours that belong to this pair of local dates.
+            // A later message on the same source day may cross into the report.
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = previousZone
-            if let interval = calendar.dateInterval(of: .day, for: timestamp) {
+            let sourceDay = calendar.dateInterval(of: .day, for: timestamp)
+            calendar.timeZone = self.timeZone
+            if let destinationDay = calendar.dateInterval(of: .day, for: timestamp),
+              let interval = sourceDay?.intersection(with: destinationDay) {
+              let end = wasPublished ? publishedOffset : metadata.size
               if let i = archiveOnlyDays.firstIndex(where: { $0.interval == interval }) {
-                archiveOnlyDays[i].throughOffset = metadata.size
+                archiveOnlyDays[i].throughOffset = max(archiveOnlyDays[i].throughOffset, end)
               } else {
-                archiveOnlyDays.append(ArchiveOnlyClaudeDay(interval: interval, throughOffset: metadata.size))
+                archiveOnlyDays.append(ArchiveOnlyClaudeDay(interval: interval, throughOffset: end))
               }
             }
             return
           }
-          row.previousDayKey = nil
+          if !wasPublished { row.previousDayKey = nil }
         }
+        if outsideUpgradeWindow { return }
         if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
           updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
           if wasPublished, let previousDay = previous.previousDayKey {
@@ -2500,7 +2504,7 @@ private struct UsageIndex: Codable {
   }
 }
 
-/// The archive already owns this civil day's rows in the restored file prefix.
+/// Rows in this part of a file and local day remain accounted for in the archive.
 private struct ArchiveOnlyClaudeDay: Codable {
   let interval: DateInterval
   var throughOffset: Int64
