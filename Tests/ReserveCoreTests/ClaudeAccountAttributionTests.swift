@@ -145,6 +145,16 @@ import Testing
     #expect(self.accounts(fixture.plan(bindings: single), fixture.colleague).isEmpty)
   }
 
+  @Test func clearingAnAddedAccountsFolderCannotClaimTheDefaultSignIn() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let accounts = [fixture.bindings[0], ClaudeAccountBinding(account: Self.team, folder: nil, verifiedOrganization: nil)]
+    let requested = fixture.root.appendingPathComponent("claude-statusline.json")
+    #expect(ClaudeStatuslineBridge.routedCacheURL(requested: requested, environment: [:],
+      accounts: accounts, homeDirectory: fixture.home) == requested)
+    #expect(!fixture.plan(bindings: accounts).defaultHistoryUnattributed)
+  }
+
   @Test func aSwitchedManagedFolderCannotWriteAnotherOrganizationsQuotaToItsCard() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
