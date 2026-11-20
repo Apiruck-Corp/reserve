@@ -126,6 +126,51 @@ struct HistoryAccountingTests {
     #expect(try fixture.archive(.anthropic)[older]?.tokens == archived.tokens)
   }
 
+  @Test(arguments: [false, true])
+  func aMessageUpgradeMovesUsageAcrossTheReportingBoundaryExactlyOnce(travelEast: Bool) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let oldZone = travelEast ? "America/New_York" : "UTC"
+    let newZone = travelEast ? "UTC" : "America/New_York"
+    let before = "2026-09-19"
+    let first = "2026-09-20"
+    let crossing = Fixture.claudeLine(stamp: first + "T02:00:00Z", input: 10)
+    let neighbor = Fixture.claudeLine(stamp: before + "T16:00:00Z", input: 3)
+    for (name, line) in [("crossing", crossing), ("neighbor", neighbor)] {
+      try Data((line + "\n").utf8).write(to: fixture.claude.appendingPathComponent(name + ".jsonl"))
+    }
+    _ = try await fixture.scanner(zone: oldZone).scan(periodDays: 90, now: now, providers: [.anthropic])
+    var index = try fixture.index()
+    var records = try #require(index["records"] as? [String: [String: Any]])
+    var trimmed = 0
+    for key in records.keys {
+      records[key]?["insightDetailsVersion"] = 1
+      // A later append in just one file trimmed its per-file day. The other
+      // file's four tokens and another archive-only token still belong there.
+      if travelEast, let days = records[key]?["days"] as? [String: [String: Any]],
+        days[before]?["input"] as? Int == 10 {
+        records[key]?["days"] = [:] as [String: Any]
+        trimmed += 1
+      }
+    }
+    #expect(trimmed == (travelEast ? 1 : 0))
+    index["records"] = records
+    try fixture.writeIndex(index)
+    try fixture.editArchive(.anthropic) { days in
+      days[before] = ArchivedDay(tokens: travelEast ? 16 : 5, costUSD: nil, fetchedAt: now)
+      days[first] = ArchivedDay(tokens: travelEast ? 7 : 18, costUSD: nil, fetchedAt: now)
+    }
+    let scanner = fixture.scanner(zone: newZone)
+    _ = try await scanner.scan(now: now, providers: [.anthropic])
+    for _ in 0..<2 {
+      let days = try fixture.archive(.anthropic)
+      #expect(days[before]?.tokens == (travelEast ? 5 : 16))
+      #expect(days[first]?.tokens == (travelEast ? 18 : 7))
+      _ = try await scanner.scan(now: now, providers: [.anthropic])
+    }
+  }
+
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
