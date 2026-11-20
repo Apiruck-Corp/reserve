@@ -1548,7 +1548,7 @@ public actor LocalUsageScanner {
     legacy: [ProviderID: [String: ArchivedUsageDay]],
     fresh: [ProviderID: [String: ArchivedUsageDay]],
     observed: inout [ProviderID: [String: ArchivedUsageDay]],
-    held: Set<ProviderID>, cutoffKey: String
+    held: Set<ProviderID>, cutoffKey: String, periodDays: Int
   ) {
     var prior = index
     prior.records = published
@@ -1556,6 +1556,7 @@ public actor LocalUsageScanner {
     // Each Claude folder keeps its own archive, so each moves on its own.
     var affected: [ProviderID: Set<String>] = [:]
     var newFileDays: [ProviderID: Set<String>] = [:]
+    var oldCutoffs: [TimeZone: String] = [:]
     for (key, record) in index.records
     where record.savingsPriced == true && record.provider.isAnthropic && !held.contains(record.provider) {
       if published[key] == nil, legacy[record.provider] != nil {
@@ -1565,10 +1566,19 @@ public actor LocalUsageScanner {
         // Only the old record shows which timestamps its parser actually used.
         var previous = old
         previous.days = old.days.filter { $0.key >= cutoffKey }
-        // Outside the window, per-file totals can already be trimmed. Move
-        // only the messages we actually saw cross the boundary in this file.
-        for (day, totals) in record.rebucketedFromDays ?? [:] where day < cutoffKey {
-          previous.days[day] = totals
+        if let oldDays = record.rebucketedFromDays,
+          let zone = record.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:)) {
+          // The old zone can already be on the next date. One file may have
+          // trimmed a day that another file still has when the window expands.
+          var calendar = Calendar(identifier: .gregorian)
+          calendar.timeZone = zone
+          let oldCutoff = oldCutoffs[zone] ?? CachedUsageHistory.dayKey(
+            daysBefore: periodDays - 1, from: index.updatedAt, calendar: calendar) ?? cutoffKey
+          oldCutoffs[zone] = oldCutoff
+          for (day, totals) in oldDays
+          where day < cutoffKey || (day < oldCutoff && previous.days[day] == nil) {
+            previous.days[day] = totals
+          }
         }
         prior.records[key] = previous
         affected[record.provider, default: []].formUnion(previous.days.keys)
@@ -1606,7 +1616,7 @@ public actor LocalUsageScanner {
     for (unit, days) in affected {
       let reconstructed = reconstructedByUnit[unit] ?? [:]
       for day in days {
-        let previous = day < cutoffKey ? reconstructed[day] : (legacy[unit]?[day] ?? reconstructed[day])
+        let previous = migrated.isEmpty ? legacy[unit]?[day] : reconstructed[day]
         let corrected = fresh[unit]?[day]
         if let archived = index.dailyHistory[unit]?[day] {
           let previousTokens = previous?.tokens ?? 0
@@ -1787,7 +1797,7 @@ public actor LocalUsageScanner {
     let cutoffKey = Self.dayKey(cutoff, timeZone: self.timeZone)
     Self.reconcileClaudeDayKeys(
       index: &box.index, published: ledger.publishedRecords, legacy: legacy,
-      fresh: fresh, observed: &observed, held: ledger.heldProviders, cutoffKey: cutoffKey)
+      fresh: fresh, observed: &observed, held: ledger.heldProviders, cutoffKey: cutoffKey, periodDays: days)
     // An unchanged file set does not establish why an archive differs from
     // its retained records. The exact legacy cache-write case was repaired
     // above; preserve other saved totals until new source data is read.
@@ -1877,31 +1887,21 @@ public actor LocalUsageScanner {
     return summaries
   }
 
-  /// A checkpoint can overlay a half-read savings reparse, then this pass can
-  /// return without finishing it. Opening fails when the file is unreadable,
-  /// and that path never reaches the incomplete-read guard. Put the published
-  /// record back. The partial stays in the ledger so the next checkpoint can
-  /// resume. A file that was never published still keeps its prefix.
+  /// A folder's published records and archive must move together. Keep all
+  /// progress in the checkpoint if one previously published file cannot finish.
   private func withholdUnfinishedMigrations(box: IndexBox, ledger: ScanLedger) {
-    var restored: Set<String> = []
-    for (key, record) in box.index.records where record.savingsPriced == false {
-      guard let original = ledger.publishedRecords[key] else { continue }
-      guard original.savingsPriced != false else { continue }
-      box.index.records[key] = original
-      ledger.heldProviders.insert(record.provider)
-      ledger.dirtyProviders.remove(record.provider)
-      restored.insert(key)
+    let unfinished = Set(box.index.records.compactMap { key, record -> ProviderID? in
+      guard record.savingsPriced == false, let original = ledger.publishedRecords[key],
+        original.savingsPriced != false else { return nil }
+      return record.provider
+    })
+    for provider in unfinished {
+      self.withholdPendingMigration(provider, box: box, ledger: ledger)
+      ledger.dirtyProviders.remove(provider)
     }
-    guard !restored.isEmpty else { return }
-    let otherChange = ledger.parsedRecords.keys.contains { !restored.contains($0) }
-      || !ledger.removedKeys.isEmpty
-    if !otherChange && !ledger.historyChanged { ledger.indexChanged = false }
   }
 
-  /// A checkpoint can overlay a half-read savings reparse before this pass
-  /// finds the provider root gone. Put the published record back so finalize
-  /// cannot save that prefix, and keep the partial record in the checkpoint.
-  private func withholdUnvisitedMigration(
+  private func withholdPendingMigration(
     _ provider: ProviderID, box: IndexBox, ledger: ScanLedger
   ) {
     let partial = ledger.parsedRecords.contains {
@@ -1945,7 +1945,7 @@ public actor LocalUsageScanner {
       let root = self.root(for: plan.provider)
       if self.watchChanges, !self.directoryExists(root) {
         self.changeTracker.noteUnavailable(plan.provider)
-        self.withholdUnvisitedMigration(plan.provider, box: box, ledger: ledger)
+        self.withholdPendingMigration(plan.provider, box: box, ledger: ledger)
         ledger.dirtyProviders.remove(plan.provider)
         return
       }
