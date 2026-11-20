@@ -250,6 +250,30 @@ import Testing
     #expect(after[.anthropic]?.dailyUsage(timeZone: .gmt).tokens == 0)
   }
 
+  @Test func cachedHoursCannotFollowAChangedSetOfAccountFolders() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try fixture.session(fixture.managed, input: 5)
+    try fixture.session(fixture.t3, input: 70)
+    let roots = LocalUsageScanner.Roots(codex: fixture.codex, claude: fixture.projects(fixture.defaultHome),
+      grok: fixture.root)
+    let cache = fixture.root.appendingPathComponent("hourly.json")
+    let scanner = LocalHourlyUsageScanner(roots: roots, cacheURL: cache, timeZone: .gmt)
+    let original = fixture.plan().sources
+    await scanner.setClaudeSources(original)
+    let before = try await scanner.scan(now: fixture.now, providers: [.anthropic, Self.team])
+    #expect(before[Self.team]?.dailyUsage(timeZone: .gmt).tokens == 75)
+
+    let restarted = LocalHourlyUsageScanner(roots: roots, cacheURL: cache, timeZone: .gmt)
+    await restarted.setClaudeSources(original.filter { $0.projects != fixture.projects(fixture.t3) })
+    let cached = await restarted.cachedHistory(now: fixture.now)
+    #expect(cached[.anthropic] == before[.anthropic])
+    #expect(cached[Self.team] == nil)
+    #expect(try await restarted.scan(now: fixture.now, providers: [.anthropic])[Self.team] == nil)
+    let refreshed = try await restarted.scan(now: fixture.now, providers: [Self.team])
+    #expect(refreshed[Self.team]?.dailyUsage(timeZone: .gmt).tokens == 5)
+  }
+
   @Test func hourlyHistoryIsSplitPerAccount() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
