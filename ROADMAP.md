@@ -2,7 +2,7 @@
 Last updated: 2026-11-19
 
 ## Now
-- 2026-11-19: Find bugs and make Reserve better. Fixed inflated Claude usage, account matching, saved history through upgrades and time-zone changes, incomplete cost estimates, and misleading share cards. Verified 467 Swift tests, 43 self-tests, native Mac workflows, and release builds for Apple silicon and Intel. Five Opus review rounds completed. The last restore fix passed its regressions and a separate replay. Local branch `codex/usage-reliability-review` awaits independent review of that last adjustment and approval for a public PR.
+- 2026-11-19: Find bugs and make Reserve better. Fixed inflated Claude token counts, account attribution, saved history across upgrades and time-zone changes, incomplete price estimates, and misleading share cards. Verified with 467 Swift tests, 43 self-tests, native Mac workflows, and release builds for Apple silicon and Intel. The final Opus review recorded one rare case where entering a third time zone on upgrade day can keep a message outside the 30-day report. Open for review in [PR #84](https://github.com/Apiruck-Corp/reserve/pull/84).
 
 ## Next
 
