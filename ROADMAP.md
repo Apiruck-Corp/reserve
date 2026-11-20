@@ -2,7 +2,7 @@
 Last updated: 2026-11-19
 
 ## Now
-- 2026-11-19: Find bugs and make Reserve better. Fixed Claude account attribution, daily and hourly token accounting, and share-card reporting. Existing source files can repair older cached totals. Regression cases cover account changes, cache reloads, the start of a reporting period, price coverage, shared quotas and daylight saving time. Implemented on codex/usage-reliability-review, awaiting review.
+- 2026-11-19: Find bugs and make Reserve better. Fixed inflated Claude usage, account matching, saved history through upgrades and time-zone changes, incomplete cost estimates, and misleading share cards. Verified 467 Swift tests, 43 self-tests, native Mac workflows, and release builds for Apple silicon and Intel. Five Opus review rounds completed. The last restore fix passed its regressions and a separate replay. Local branch `codex/usage-reliability-review` awaits independent review of that last adjustment and approval for a public PR.
 
 ## Next
 
