@@ -878,7 +878,13 @@ public actor LocalUsageScanner {
       }
       var updated = record!
       let previousZone = updated.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:))
-      let upgradingAcrossZones = previousZone != nil && ledger.publishedRecords[key].map {
+      let original = ledger.publishedRecords[key]
+      var publishedOffset: Int64 = 0
+      if let original, previousZone != nil, metadata.sameFile(as: original),
+        metadata.size > original.size || (metadata.size == original.size && metadata.modifiedAt == original.modifiedAt) {
+        publishedOffset = original.offset
+      }
+      let upgradingAcrossZones = previousZone != nil && original.map {
         $0.insightDetailsVersion != CachedFile.claudeMessageVersion
       } == true
       let migrating = staleSavings || staleDays || continueSavingsMigration
@@ -886,14 +892,14 @@ public actor LocalUsageScanner {
         self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays + 1,
           to: self.scanNow) ?? self.scanNow, timeZone: self.timeZone)
       let scanResult = try self.scanLines(
-        opened, from: updated.offset,
+        opened, from: updated.offset, publishedOffset: publishedOffset,
         discardingOversizedLine: updated.discardingOversizedLine ?? false,
         fileByteLimit: (staleSavings || staleDays || continueSavingsMigration)
           ? self.maximumMigrationFileBytes : self.maximumBytesPerFileScan,
         deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
-      ) { data in
+      ) { data, wasPublished in
         guard let row = Self.parseClaudeLine(
-          data, timeZone: self.timeZone, previousTimeZone: previousZone),
+          data, timeZone: self.timeZone, previousTimeZone: wasPublished ? previousZone : nil),
           row.dayKey >= retentionKey else { return }
         // Include a boundary-crossing message on both sides of the move. Older
         // rows outside the reporting window in both zones stay in the archive.
@@ -901,7 +907,7 @@ public actor LocalUsageScanner {
           (row.previousDayKey ?? row.dayKey) < cutoffKey { return }
         if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
           updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
-          if let previousDay = previous.previousDayKey {
+          if wasPublished, let previousDay = previous.previousDayKey {
             updated.rebucketedFromDays?[previousDay, default: UsageTotals()].subtract(previous.totals)
           }
         }
@@ -1223,12 +1229,13 @@ public actor LocalUsageScanner {
   private func scanLines(
     _ file: DescriptorBoundFile,
     from offset: Int64,
+    publishedOffset: Int64,
     discardingOversizedLine: Bool,
     fileByteLimit: Int,
     deadline: Date,
     budget: ScanBudget?,
     remainingBytes: inout Int,
-    visit: (Data) -> Void
+    visit: (Data, Bool) -> Void
   ) throws -> (offset: Int64, discardingOversizedLine: Bool) {
     let handle = file.handle
     try handle.seek(toOffset: UInt64(max(0, offset)))
@@ -1236,6 +1243,7 @@ public actor LocalUsageScanner {
       maximumBytes: self.maximumLineBytes,
       discardingOversizedLine: discardingOversizedLine)
     var fileBytesRemaining = min(fileByteLimit, remainingBytes)
+    var readPosition = max(0, offset)
     var consumedBytes = 0
     var lineCount = 0
     do {
@@ -1244,7 +1252,12 @@ public actor LocalUsageScanner {
       {
         try Self.checkDeadline(deadline, budget: budget)
         let allowance = min(64 * 1_024, remainingBytes, fileBytesRemaining)
-        guard let chunk = try handle.read(upToCount: allowance), !chunk.isEmpty else { break }
+        // The old cursor ends at a consumed line (or inside an oversized line
+        // being discarded). Keep appends out of the prior time-zone totals.
+        let wasPublished = readPosition < publishedOffset
+        let count = wasPublished ? Int(min(Int64(allowance), publishedOffset - readPosition)) : allowance
+        guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { break }
+        readPosition += Int64(chunk.count)
         if let budget {
           budget.consume(chunk.count, remaining: &remainingBytes)
         } else {
@@ -1256,7 +1269,7 @@ public actor LocalUsageScanner {
         consumedBytes += result.consumedBytes
         for data in result.lines {
           lineCount += 1
-          autoreleasepool { visit(data) }
+          autoreleasepool { visit(data, wasPublished) }
         }
       }
       try Self.checkDeadline(deadline, budget: budget)
@@ -1562,34 +1575,30 @@ public actor LocalUsageScanner {
       if published[key] == nil, legacy[record.provider] != nil {
         newFileDays[record.provider, default: []].formUnion(record.days.keys)
       }
-      if let old = published[key], old.insightDetailsVersion != record.insightDetailsVersion {
-        // Only the old record shows which timestamps its parser actually used.
-        var previous = old
-        previous.days = old.days.filter { $0.key >= cutoffKey }
-        if let oldDays = record.rebucketedFromDays,
-          let zone = record.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:)) {
-          // The old zone can already be on the next date. One file may have
-          // trimmed a day that another file still has when the window expands.
-          var calendar = Calendar(identifier: .gregorian)
-          calendar.timeZone = zone
-          let oldCutoff = oldCutoffs[zone] ?? CachedUsageHistory.dayKey(
-            daysBefore: periodDays - 1, from: index.updatedAt, calendar: calendar) ?? cutoffKey
-          oldCutoffs[zone] = oldCutoff
-          for (day, totals) in oldDays
-          where day < cutoffKey || (day < oldCutoff && previous.days[day] == nil) {
-            previous.days[day] = totals
-          }
+      let old = published[key]
+      let changedParser = old.map { $0.insightDetailsVersion != record.insightDetailsVersion } == true
+      guard changedParser || record.rebucketedFromDays != nil else { continue }
+      var previous = old ?? record
+      // For a time-zone change the published values are already authoritative.
+      // A parser upgrade only repairs dates covered by the source scan.
+      previous.days = old?.days ?? [:]
+      if changedParser { previous.days = previous.days.filter { $0.key >= cutoffKey } }
+      if let oldDays = record.rebucketedFromDays,
+        let zone = record.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:)) {
+        // The old zone can already be on the next date. Fill missing, trimmed
+        // days from the portion of this file the previous scan actually read.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let oldCutoff = oldCutoffs[zone] ?? CachedUsageHistory.dayKey(
+          daysBefore: periodDays - 1, from: index.updatedAt, calendar: calendar) ?? cutoffKey
+        oldCutoffs[zone] = oldCutoff
+        let trimmedBefore = max(cutoffKey, oldCutoff)
+        for (day, totals) in oldDays where previous.days[day] == nil && (old == nil || day < trimmedBefore) {
+          previous.days[day] = totals
         }
-        prior.records[key] = previous
-        affected[record.provider, default: []].formUnion(previous.days.keys)
-      } else if let oldDays = record.rebucketedFromDays {
-        var previous = record
-        previous.days = oldDays
-        prior.records[key] = previous
-        affected[record.provider, default: []].formUnion(oldDays.keys)
-      } else {
-        continue
       }
+      prior.records[key] = previous
+      affected[record.provider, default: []].formUnion(previous.days.keys)
       affected[record.provider, default: []].formUnion(record.days.keys)
       migrated.insert(key)
     }
