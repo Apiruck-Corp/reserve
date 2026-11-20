@@ -83,7 +83,7 @@ struct HistoryAccountingTests {
     defer { fixture.remove() }
     let now = Fixture.date("2026-10-19T12:00:00Z")
     let older = "2026-09-09"
-    let oldRow = Fixture.claudeLine(stamp: older + "T11:00:00Z", input: 10)
+    let oldRow = Fixture.claudeLine(stamp: older + "T01:00:00Z", input: 10)
       .replacingOccurrences(of: "m1", with: "older-message")
     let current = Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 20)
     let file = fixture.claude.appendingPathComponent("long-session.jsonl")
@@ -124,6 +124,13 @@ struct HistoryAccountingTests {
     #expect(saved.costUSD == archived.costUSD)
     _ = try await resumed.scan(now: now, providers: [.anthropic])
     #expect(try fixture.archive(.anthropic)[older]?.tokens == archived.tokens)
+    if zone != "UTC" {
+      let home = fixture.scanner(zone: "UTC")
+      _ = try await home.scan(now: now, providers: [.anthropic])
+      let returned = try fixture.archive(.anthropic)
+      #expect(returned[older]?.tokens == archived.tokens && returned[older]?.costUSD == archived.costUSD)
+      #expect(returned["2026-09-08"] == nil)
+    }
   }
 
   @Test(arguments: [false, true])
@@ -137,8 +144,10 @@ struct HistoryAccountingTests {
     let first = "2026-09-20"
     let crossing = Fixture.claudeLine(stamp: first + "T02:00:00Z", input: 10)
     let neighbor = Fixture.claudeLine(stamp: before + "T16:00:00Z", input: 3)
-    for (name, line) in [("crossing", crossing), ("neighbor", neighbor)] {
-      try Data((line + "\n").utf8).write(to: fixture.claude.appendingPathComponent(name + ".jsonl"))
+    let sameFile = Fixture.claudeLine(stamp: before + "T14:00:00Z", input: 1)
+      .replacingOccurrences(of: "m1", with: "prior-message")
+    for (name, lines) in [("crossing", [sameFile, crossing]), ("neighbor", [neighbor])] {
+      try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: fixture.claude.appendingPathComponent(name + ".jsonl"))
     }
     _ = try await fixture.scanner(zone: oldZone).scan(periodDays: 90, now: now, providers: [.anthropic])
     var index = try fixture.index()
@@ -149,7 +158,7 @@ struct HistoryAccountingTests {
       // A later append in just one file trimmed its per-file day. The other
       // file's four tokens and another archive-only token still belong there.
       if travelEast, let days = records[key]?["days"] as? [String: [String: Any]],
-        days[before]?["input"] as? Int == 10 {
+        days[before]?["input"] as? Int == 11 {
         records[key]?["days"] = [:] as [String: Any]
         trimmed += 1
       }
@@ -158,17 +167,22 @@ struct HistoryAccountingTests {
     index["records"] = records
     try fixture.writeIndex(index)
     try fixture.editArchive(.anthropic) { days in
-      days[before] = ArchivedDay(tokens: travelEast ? 16 : 5, costUSD: nil, fetchedAt: now)
+      days[before] = ArchivedDay(tokens: travelEast ? 18 : 7, costUSD: nil, fetchedAt: now)
       days[first] = ArchivedDay(tokens: travelEast ? 7 : 18, costUSD: nil, fetchedAt: now)
     }
     let scanner = fixture.scanner(zone: newZone)
     _ = try await scanner.scan(now: now, providers: [.anthropic])
     for _ in 0..<2 {
       let days = try fixture.archive(.anthropic)
-      #expect(days[before]?.tokens == (travelEast ? 5 : 16))
+      #expect(days[before]?.tokens == (travelEast ? 7 : 18))
       #expect(days[first]?.tokens == (travelEast ? 18 : 7))
       _ = try await scanner.scan(now: now, providers: [.anthropic])
     }
+    let home = fixture.scanner(zone: oldZone)
+    _ = try await home.scan(now: now, providers: [.anthropic])
+    let returned = try fixture.archive(.anthropic)
+    #expect(returned[before]?.tokens == (travelEast ? 18 : 7))
+    #expect(returned[first]?.tokens == (travelEast ? 7 : 18))
   }
 
   @Test func aWestwardUpgradeIncludesTheDayAlreadyTrimmedAfterMidnightUTC() async throws {
