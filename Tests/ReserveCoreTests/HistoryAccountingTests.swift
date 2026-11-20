@@ -280,13 +280,20 @@ struct HistoryAccountingTests {
     }
   }
 
-  @Test(arguments: [false, true])
-  func aRestoredTranscriptPreservesArchivedDaysWithoutAFileRecord(replaceFile: Bool) async throws {
+  @Test(arguments: [
+    (false, false, false), (false, false, true), (false, true, false), (false, true, true),
+    (true, false, false), (true, false, true), (true, true, false), (true, true, true),
+  ])
+  func aRestoredTranscriptPreservesArchivedDaysWithoutAFileRecord(
+    replaceFile: Bool, trimOldDay: Bool, atCutoff: Bool
+  ) async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
     let now = Fixture.date("2026-10-19T12:00:00Z")
     let file = fixture.claude.appendingPathComponent("restored.jsonl")
-    let older = Fixture.claudeLine(stamp: "2026-09-09T01:30:00Z", input: 10)
+    let oldDay = atCutoff ? "2026-09-19" : "2026-09-08"
+    let newDay = atCutoff ? "2026-09-20" : "2026-09-09"
+    let older = Fixture.claudeLine(stamp: newDay + "T01:30:00Z", input: 10)
     let recent = Fixture.claudeLine(stamp: "2026-10-19T01:30:00Z", input: 3)
       .replacingOccurrences(of: "m1", with: "recent-message")
     try Data((older + "\n").utf8).write(to: file)
@@ -296,12 +303,13 @@ struct HistoryAccountingTests {
     try handle.seekToEnd()
     try handle.write(contentsOf: Data((recent + "\n").utf8))
     try handle.close()
-    _ = try await original.scan(now: now, providers: [.anthropic])
+    _ = try await original.scan(periodDays: trimOldDay ? 30 : 90, now: now, providers: [.anthropic])
     let records = try #require(fixture.index()["records"] as? [String: [String: Any]])
-    #expect((records.values.first?["days"] as? [String: Any])?["2026-09-08"] == nil)
+    let recordedDays = try #require(records.values.first?["days"] as? [String: Any])
+    #expect((recordedDays[oldDay] == nil) == trimOldDay)
     try fixture.editArchive(.anthropic) { rows in
-      rows["2026-09-08"] = ArchivedDay(tokens: 16, costUSD: 0.5, fetchedAt: now)
-      rows["2026-09-09"] = ArchivedDay(tokens: 7, costUSD: nil, fetchedAt: now)
+      rows[oldDay] = ArchivedDay(tokens: 16, costUSD: 0.5, fetchedAt: now)
+      rows[newDay] = ArchivedDay(tokens: 7, costUSD: nil, fetchedAt: now)
     }
     if replaceFile {
       try Data(contentsOf: file).write(to: file, options: .atomic)
@@ -312,9 +320,24 @@ struct HistoryAccountingTests {
     for _ in 0..<2 {
       _ = try await restored.scan(now: now, providers: [.anthropic])
       let rows = try fixture.archive(.anthropic)
-      #expect(rows["2026-09-08"]?.tokens == 16 && rows["2026-09-08"]?.costUSD == 0.5)
-      #expect(rows["2026-09-09"]?.tokens == 7)
+      #expect(rows[oldDay]?.tokens == (trimOldDay ? 16 : 5))
+      #expect(rows[newDay]?.tokens == (trimOldDay ? 7 : 18))
+      if trimOldDay { #expect(rows[oldDay]?.costUSD == 0.5) }
       #expect(rows["2026-10-18"] == nil && rows["2026-10-19"]?.tokens == 4)
+    }
+    if trimOldDay && atCutoff {
+      // A second restore can expose the first day of the report in this same zone.
+      try Data(contentsOf: file).write(to: file, options: .atomic)
+      _ = try await restored.scan(now: now, providers: [.anthropic])
+      #expect(try fixture.archive(.anthropic)[newDay]?.tokens == 7)
+    }
+    for zone in ["America/New_York", "America/Chicago"] {
+      let returned = fixture.scanner(zone: zone)
+      _ = try await returned.scan(now: now, providers: [.anthropic])
+      let rows = try fixture.archive(.anthropic)
+      #expect(rows[oldDay]?.tokens == 16 && rows[oldDay]?.costUSD == 0.5)
+      #expect(rows[newDay]?.tokens == 7)
+      #expect(rows["2026-10-18"]?.tokens == 4 && rows["2026-10-19"] == nil)
     }
   }
 
