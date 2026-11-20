@@ -171,6 +171,76 @@ struct HistoryAccountingTests {
     }
   }
 
+  @Test func aWestwardUpgradeIncludesTheDayAlreadyTrimmedAfterMidnightUTC() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let oldNow = Fixture.date("2026-10-19T01:00:00Z")
+    let newNow = Fixture.date("2026-10-19T01:30:00Z")
+    let day = "2026-09-19"
+    let main = fixture.claude.appendingPathComponent("long-session.jsonl")
+    let neighbor = fixture.claude.appendingPathComponent("neighbor.jsonl")
+    try Data((Fixture.claudeLine(stamp: day + "T16:00:00Z", input: 10) + "\n").utf8).write(to: main)
+    try Data((Fixture.claudeLine(stamp: day + "T12:00:00Z", input: 3) + "\n").utf8).write(to: neighbor)
+    _ = try await fixture.scanner(zone: "UTC").scan(periodDays: 90, now: oldNow, providers: [.anthropic])
+    let append = Fixture.claudeLine(stamp: "2026-10-19T01:00:00Z", input: 1)
+      .replacingOccurrences(of: "m1", with: "later-message")
+    let handle = try FileHandle(forWritingTo: main)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((append + "\n").utf8))
+    try handle.close()
+    _ = try await fixture.scanner(zone: "UTC").scan(now: oldNow, providers: [.anthropic])
+    let index = try fixture.index()
+    let records = try #require(index["records"] as? [String: [String: Any]])
+    #expect(records.values.filter { ($0["days"] as? [String: Any])?[day] != nil }.count == 1)
+    try fixture.markOldMessageVersion()
+    try fixture.editArchive(.anthropic) { $0[day] = ArchivedDay(tokens: 20, costUSD: nil, fetchedAt: oldNow) }
+    let scanner = fixture.scanner(zone: "America/New_York")
+    for _ in 0..<2 {
+      _ = try await scanner.scan(now: newNow, providers: [.anthropic])
+      let archive = try fixture.archive(.anthropic)
+      #expect(archive[day]?.tokens == 20)
+      #expect(archive["2026-10-18"]?.tokens == 2)
+    }
+  }
+
+  @Test func aFolderKeepsItsPublishedFilesUntilAllCanFinishRebucketing() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let moved = fixture.claude.appendingPathComponent("moving.jsonl")
+    let partial = fixture.claude.appendingPathComponent("partial.jsonl")
+    let moving = Fixture.claudeLine(stamp: "2026-09-20T02:00:00Z", input: 10) + "\n"
+    let first = Fixture.claudeLine(stamp: "2026-09-20T15:00:00Z", input: 3) + "\n"
+    let second = Fixture.claudeLine(stamp: "2026-09-20T16:00:00Z", input: 2)
+      .replacingOccurrences(of: "m1", with: "other-message") + "\n"
+    try Data(moving.utf8).write(to: moved)
+    try Data((first + second).utf8).write(to: partial)
+    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: moved.path)
+    try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: partial.path)
+    _ = try await fixture.scanner(zone: "UTC").scan(now: now, providers: [.anthropic])
+    try fixture.markOldMessageVersion()
+    try fixture.editArchive(.anthropic) { $0["2026-09-19"] = ArchivedDay(tokens: 5, costUSD: nil, fetchedAt: now) }
+    let saved = try Data(contentsOf: fixture.cache)
+    let interrupted = fixture.scanner(zone: "America/New_York")
+    await interrupted.testingSetBudget(maximumBytes: moving.utf8.count + first.utf8.count)
+    await #expect(throws: UsageProviderError.self) {
+      _ = try await interrupted.scan(now: now, providers: [.anthropic])
+    }
+    #expect(try Data(contentsOf: fixture.cache) == saved)
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: partial.path)
+    let held = fixture.scanner(zone: "America/New_York")
+    _ = try await held.scan(now: now, providers: [.anthropic])
+    #expect(await held.scanIncomplete)
+    #expect(try Data(contentsOf: fixture.cache) == saved)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: partial.path)
+    let recovered = fixture.scanner(zone: "America/New_York")
+    _ = try await recovered.scan(now: now, providers: [.anthropic])
+    let archive = try fixture.archive(.anthropic)
+    #expect(archive["2026-09-19"]?.tokens == 16)
+    #expect(archive["2026-09-20"]?.tokens == 7)
+    #expect(await recovered.testingCheckpointExists() == false)
+  }
+
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -748,6 +818,14 @@ struct HistoryAccountingTests {
 
     func index() throws -> [String: Any] {
       try #require(JSONSerialization.jsonObject(with: Data(contentsOf: cache)) as? [String: Any])
+    }
+
+    func markOldMessageVersion() throws {
+      var object = try index()
+      var records = try #require(object["records"] as? [String: [String: Any]])
+      for key in records.keys { records[key]?["insightDetailsVersion"] = 1 }
+      object["records"] = records
+      try writeIndex(object)
     }
 
     func writeIndex(_ object: [String: Any]) throws {
