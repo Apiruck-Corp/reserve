@@ -903,6 +903,7 @@ public actor LocalUsageScanner {
       let retentionKey = previousZone == nil ? cutoffKey : Self.dayKey(
         self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays + 1,
           to: self.scanNow) ?? self.scanNow, timeZone: self.timeZone)
+      let archivedDays = box.index.dailyHistory[unit]
       let scanResult = try self.scanLines(
         opened, from: updated.offset, splitAt: archiveOnlyDays.map(\.throughOffset) + [publishedOffset],
         discardingOversizedLine: updated.discardingOversizedLine ?? false,
@@ -921,7 +922,7 @@ public actor LocalUsageScanner {
         if let oldDay = row.previousDayKey, let previousZone {
           let unverifiedRestore = !wasPublished && min(oldDay, row.dayKey) <= cutoffKey
             && original?.days[oldDay] == nil
-          if (outsideUpgradeWindow || unverifiedRestore), box.index.dailyHistory[unit]?[oldDay] != nil {
+          if (outsideUpgradeWindow || unverifiedRestore), archivedDays?[oldDay] != nil {
             // Remember only the hours that belong to this pair of local dates.
             // A later message on the same source day may cross into the report.
             var calendar = Calendar(identifier: .gregorian)
