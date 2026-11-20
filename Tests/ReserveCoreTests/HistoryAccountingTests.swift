@@ -77,6 +77,55 @@ struct HistoryAccountingTests {
     #expect(try fixture.archive(.anthropic)["2026-10-19"]?.tokens == 27)
   }
 
+  @Test(arguments: [false, true], ["UTC", "America/New_York"])
+  func aMessageUpgradePreservesDaysOutsideTheScanWindow(oldRecordHasDay: Bool, zone: String) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let older = "2026-09-09"
+    let oldRow = Fixture.claudeLine(stamp: older + "T11:00:00Z", input: 10)
+      .replacingOccurrences(of: "m1", with: "older-message")
+    let current = Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 20)
+    let file = fixture.claude.appendingPathComponent("long-session.jsonl")
+    try Data(([oldRow, current].joined(separator: "\n") + "\n").utf8).write(to: file)
+    _ = try await fixture.scanner(zone: "UTC").scan(
+      periodDays: oldRecordHasDay ? 90 : 30, now: now, providers: [.anthropic])
+    var index = try fixture.index()
+    var records = try #require(index["records"] as? [String: [String: Any]])
+    let key = try #require(records.keys.first)
+    let days = try #require(records[key]?["days"] as? [String: Any])
+    #expect((days[older] != nil) == oldRecordHasDay)
+    records[key]?["insightDetailsVersion"] = 1
+    index["records"] = records
+    try fixture.writeIndex(index)
+    let archived = ArchivedDay(tokens: 16, costUSD: 0.75, fetchedAt: now)
+    try fixture.editArchive(.anthropic) { $0[older] = archived }
+
+    if oldRecordHasDay {
+      let first = fixture.scanner(zone: zone)
+      await first.testingSetBudget(stopBeforePublish: true)
+      await #expect(throws: UsageProviderError.self) {
+        _ = try await first.scan(now: now, providers: [.anthropic])
+      }
+      #expect(try fixture.archive(.anthropic)[older]?.tokens == 16)
+      let handle = try FileHandle(forWritingTo: file)
+      try handle.seekToEnd()
+      let revised = Fixture.claudeLine(stamp: "2026-10-19T10:00:00Z", input: 30)
+      try handle.write(contentsOf: Data((revised + "\n").utf8))
+      try handle.close()
+    }
+    let resumed = fixture.scanner(zone: zone)
+    let summary = try await resumed.scan(now: now, providers: [.anthropic])
+    #expect(await resumed.scanMetrics.resumes == (oldRecordHasDay ? 1 : 0))
+    #expect(summary[.anthropic]?.todayTokens == (oldRecordHasDay ? 31 : 21))
+    let history = await resumed.cachedHistory(now: now, providers: [.anthropic])
+    let saved = try #require(history[.anthropic]?.days.first { $0.day == older })
+    #expect(saved.tokens == archived.tokens)
+    #expect(saved.costUSD == archived.costUSD)
+    _ = try await resumed.scan(now: now, providers: [.anthropic])
+    #expect(try fixture.archive(.anthropic)[older]?.tokens == archived.tokens)
+  }
+
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
