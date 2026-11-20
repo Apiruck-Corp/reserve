@@ -623,7 +623,13 @@ final class UsageStore {
     }
     if self.ownsHistoryScanners {
       await self.localUsageScanner?.setClaudeSources(plan.sources)
-      await self.hourlyUsageScanner?.setClaudeSources(plan.sources)
+      let changedAccounts = await self.hourlyUsageScanner?.setClaudeSources(plan.sources) ?? []
+      for account in changedAccounts {
+        self.publishedHourlyHistory[account] = nil
+        self.publishedDailyHistory[account] = nil
+        if self.states[account]?.localUsage?.origin == .localDevice { self.states[account]?.localUsage = nil }
+      }
+      if !changedAccounts.isEmpty { self.changed() }
     }
     return plan
   }

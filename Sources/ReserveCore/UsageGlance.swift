@@ -90,7 +90,10 @@ public struct UsageGlance: Equatable, Sendable {
         return ($0.label, $0.provider?.rawValue ?? "") < ($1.label, $1.provider?.rawValue ?? "")
       }
     }
-    self.providers = ordered(report.providerRows)
+    // A quiet day with no price contributes nothing to either total. It must
+    // not turn an otherwise fully priced provider row into a missing price.
+    let providerEntries = report.entries.filter { ($0.day.tokens ?? 0) > 0 || Self.isPrice($0.day.costUSD) }
+    self.providers = ordered(InsightReport(entries: providerEntries).providerRows)
     let models = ordered(report.modelRows)
     self.models = Array(models.filter { $0.label != InsightReport.unknownModelLabel }
       .prefix(max(0, modelLimit)))

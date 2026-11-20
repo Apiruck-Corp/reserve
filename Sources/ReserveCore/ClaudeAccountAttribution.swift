@@ -97,9 +97,13 @@ public enum ClaudeAccountAttribution {
   ) -> ProviderID? {
     let claude = accounts.filter(\.account.isAnthropic)
     let path = Self.resolved(folder)
-    // An added account's own folder is its sign-in by construction; its
-    // limits read already refuses a folder signed in elsewhere.
+    // An explicitly attached folder may supply its card directly. Once the
+    // card has verified an organization, its current sign-in must still match.
     if let own = claude.first(where: { $0.account.isAdded && $0.folder?.resolvedPath == path }) {
+      if let expected = own.verifiedOrganization,
+        identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))?.organization != expected {
+        return nil
+      }
       return own.account
     }
     let first = claude.first { $0.account.isDefault }
@@ -124,8 +128,9 @@ public enum ClaudeAccountAttribution {
       // only an organization a limits read verified counts for it.
       let expected = binding.verifiedOrganization ?? (binding.account.isAdded ? own?.organization : nil)
       guard let expected, expected == organization else { return false }
-      if let a = mine.member, let b = own?.member, a != b { return false }
-      return true
+      if isDefaultHome && binding.account.isDefault { return true }
+      guard let own else { return false }
+      return Self.samePerson(mine, own)
     }
     // As for limits: when both cards name one organization, the added card,
     // signed in on purpose, keeps it.
@@ -242,9 +247,8 @@ public enum ClaudeAccountAttribution {
   }
 
   private static func samePerson(_ lhs: ClaudeFolderIdentity, _ rhs: ClaudeFolderIdentity) -> Bool {
-    guard let organization = lhs.organization, organization == rhs.organization else { return false }
-    if let a = lhs.member, let b = rhs.member { return a == b }
-    return true
+    guard let organization = lhs.organization, let member = lhs.member else { return false }
+    return organization == rhs.organization && member == rhs.member
   }
 
   static func overlaps(_ lhs: String, _ rhs: String) -> Bool {

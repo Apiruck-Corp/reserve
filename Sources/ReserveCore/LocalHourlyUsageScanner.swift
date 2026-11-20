@@ -24,11 +24,14 @@ public actor LocalHourlyUsageScanner {
     var consumedTailHash: String?
   }
   private struct Index: Codable {
-    var version = 3
+    static let currentVersion = 4
+    var version = Self.currentVersion
     var dayStart: Date
     var timeZone: String
     var records: [String: Record] = [:]
     var published: [ProviderID: HourlyUsageHistory] = [:]
+    /// Hashed folder IDs behind each published Claude total.
+    var publishedClaudeUnits: [ProviderID: Set<ProviderID>] = [:]
   }
 
   private let roots: LocalUsageScanner.Roots
@@ -56,8 +59,16 @@ public actor LocalHourlyUsageScanner {
   func setTestingBudget(bytes: Int) { self.maximumBytesPerScan = bytes }
 
   /// Which Claude `projects` folders count, and toward which account.
-  public func setClaudeSources(_ sources: [ClaudeHistorySource]) {
+  @discardableResult
+  public func setClaudeSources(_ sources: [ClaudeHistorySource]) -> Set<ProviderID> {
+    let previous = self.claudeGroups
     self.claudeUnits = ClaudeHistoryUnit.make(sources, defaultRoot: self.roots.claude)
+    let current = self.claudeGroups
+    return Set(previous.keys).union(current.keys).filter { previous[$0] != current[$0] }
+  }
+
+  private var claudeGroups: [ProviderID: Set<ProviderID>] {
+    Dictionary(grouping: self.claudeUnits, by: \.account).mapValues { Set($0.map(\.id)) }
   }
 
   private func load(now: Date) -> Index {
@@ -66,7 +77,7 @@ public actor LocalHourlyUsageScanner {
       return index
     }
     if let data = BoundedFileReader.read(self.cacheURL, maximumBytes: LocalHistoryStorageLimits.indexBytes),
-      let saved = try? JSONDecoder().decode(Index.self, from: data), saved.version == 3,
+      let saved = try? JSONDecoder().decode(Index.self, from: data), saved.version == Index.currentVersion,
       saved.dayStart == start, saved.timeZone == self.timeZone.identifier,
       saved.records.count <= 5000,
       saved.records.values.allSatisfy({ $0.hours.count <= 25 && $0.recent.count <= 128 && $0.order.count <= 128 }) {
@@ -79,7 +90,17 @@ public actor LocalHourlyUsageScanner {
   }
 
   public func cachedHistory(now: Date = Date()) -> [ProviderID: HourlyUsageHistory] {
-    self.load(now: now).published.filter { $0.value.observedAt <= now }
+    self.publishedHistory(in: self.load(now: now), now: now)
+  }
+
+  private func publishedHistory(in index: Index, now: Date) -> [ProviderID: HourlyUsageHistory] {
+    let groups = self.claudeGroups
+    return index.published.filter { account, history in
+      guard history.observedAt <= now else { return false }
+      guard account.isAnthropic else { return true }
+      guard let units = groups[account] else { return false }
+      return units == index.publishedClaudeUnits[account]
+    }
   }
 
   @discardableResult
@@ -186,11 +207,14 @@ public actor LocalHourlyUsageScanner {
       next.records = next.records.filter { !supported.contains($0.value.provider) || seen.contains($0.key) }
       // A Claude account asked for that no longer has a folder publishes
       // nothing, rather than keeping hours its folder now credits elsewhere.
-      for provider in providers where provider.isAnthropic && groups[provider] == nil {
-        next.published[provider] = nil
+      let currentGroups = self.claudeGroups
+      for account in next.publishedClaudeUnits.keys where next.publishedClaudeUnits[account] != currentGroups[account] {
+        next.published[account] = nil
+        next.publishedClaudeUnits[account] = nil
       }
       for (provider, units) in groups {
         next.published[provider] = nil
+        next.publishedClaudeUnits[provider] = nil
         guard !available.isDisjoint(with: units) else { continue }
         var hours: [String: UsageTotals] = [:]
         for record in next.records.values where units.contains(record.provider) {
@@ -198,14 +222,14 @@ public actor LocalHourlyUsageScanner {
         }
         let points = HourlyUsageHistory.hourStarts(now: now, timeZone: self.timeZone).map { hour in
           let totals = hours[Self.hourKey(hour, dayStart: next.dayStart)] ?? UsageTotals()
-          let priced = totals.totalTokens(provider: provider) == 0
-            || (totals.models != nil && totals.models!.values.allSatisfy { $0.costUSD != nil })
+          let priced = totals.hasFullMessagePrice(for: provider)
           return HourlyUsagePoint(start: hour, tokens: totals.totalTokens(provider: provider),
             costUSD: priced ? totals.costUSD : nil,
             detail: UsageDayDetail(input: totals.input, cached: totals.cached, cacheWrite: totals.cacheWrite,
               output: totals.output, cacheSavingsUSD: totals.pricedSavings,
               unpricedCacheReads: totals.unpricedCacheReads, models: totals.models ?? [:]))
         }
+        if provider.isAnthropic { next.publishedClaudeUnits[provider] = units }
         next.published[provider] = HourlyUsageHistory(provider: provider, dayStart: next.dayStart,
           observedAt: now, hours: points)
       }
@@ -217,7 +241,7 @@ public actor LocalHourlyUsageScanner {
     self.scanIncomplete = incomplete
     if progressed || !incomplete { self.checkpoints += 1 }
     if incomplete { throw UsageProviderError.timedOut("hourly history scan") }
-    return next.published
+    return self.publishedHistory(in: next, now: now)
   }
 
   /// Validate the consumed boundary before accepting an append. This catches
@@ -239,9 +263,8 @@ public actor LocalHourlyUsageScanner {
       || (record.provider == .openAI && line.range(of: Data("turn_context".utf8)) != nil) else { return }
     guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
     if record.provider.isAnthropic {
-      guard let row = LocalUsageScanner.parseClaudeObject(object),
-        let stamp = object["timestamp"] as? String,
-        let timestamp = LocalUsageScanner.parseDate(stamp), timestamp >= dayStart, timestamp < dayEnd else { return }
+      guard let (timestamp, row) = LocalUsageScanner.parseClaudeObject(object),
+        timestamp >= dayStart, timestamp < dayEnd else { return }
       let hour = Self.hourKey(timestamp, dayStart: dayStart)
       if let key = row.key {
         if let previous = record.recent[key] {
