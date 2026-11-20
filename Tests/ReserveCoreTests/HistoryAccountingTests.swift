@@ -280,6 +280,44 @@ struct HistoryAccountingTests {
     }
   }
 
+  @Test(arguments: [false, true])
+  func aRestoredTranscriptPreservesArchivedDaysWithoutAFileRecord(replaceFile: Bool) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-19T12:00:00Z")
+    let file = fixture.claude.appendingPathComponent("restored.jsonl")
+    let older = Fixture.claudeLine(stamp: "2026-09-09T01:30:00Z", input: 10)
+    let recent = Fixture.claudeLine(stamp: "2026-10-19T01:30:00Z", input: 3)
+      .replacingOccurrences(of: "m1", with: "recent-message")
+    try Data((older + "\n").utf8).write(to: file)
+    let original = fixture.scanner(zone: "America/New_York")
+    _ = try await original.scan(periodDays: 90, now: now, providers: [.anthropic])
+    let handle = try FileHandle(forWritingTo: file)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((recent + "\n").utf8))
+    try handle.close()
+    _ = try await original.scan(now: now, providers: [.anthropic])
+    let records = try #require(fixture.index()["records"] as? [String: [String: Any]])
+    #expect((records.values.first?["days"] as? [String: Any])?["2026-09-08"] == nil)
+    try fixture.editArchive(.anthropic) { rows in
+      rows["2026-09-08"] = ArchivedDay(tokens: 16, costUSD: 0.5, fetchedAt: now)
+      rows["2026-09-09"] = ArchivedDay(tokens: 7, costUSD: nil, fetchedAt: now)
+    }
+    if replaceFile {
+      try Data(contentsOf: file).write(to: file, options: .atomic)
+    } else {
+      try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: file.path)
+    }
+    let restored = fixture.scanner(zone: "UTC")
+    for _ in 0..<2 {
+      _ = try await restored.scan(now: now, providers: [.anthropic])
+      let rows = try fixture.archive(.anthropic)
+      #expect(rows["2026-09-08"]?.tokens == 16 && rows["2026-09-08"]?.costUSD == 0.5)
+      #expect(rows["2026-09-09"]?.tokens == 7)
+      #expect(rows["2026-10-18"] == nil && rows["2026-10-19"]?.tokens == 4)
+    }
+  }
+
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
