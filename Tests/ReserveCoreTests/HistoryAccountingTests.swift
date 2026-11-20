@@ -51,7 +51,7 @@ struct HistoryAccountingTests {
     index["records"] = records
     try fixture.writeIndex(index)
     try fixture.editArchive(.anthropic) { archive in
-      archive.removeValue(forKey: "2026-10-19")
+      archive["2026-10-19"] = ArchivedDay(tokens: 6, costUSD: nil, fetchedAt: now)
       archive["2026-10-18"] = ArchivedDay(tokens: 16, costUSD: nil, fetchedAt: now)
       archive["2026-09-01"] = ArchivedDay(tokens: 777, costUSD: nil, fetchedAt: now)
     }
@@ -60,11 +60,12 @@ struct HistoryAccountingTests {
     _ = try await scanner.scan(now: now, providers: [.anthropic])
     let repaired = try fixture.archive(.anthropic)
     #expect(repaired["2026-10-18"]?.tokens == 5)
-    #expect(repaired["2026-10-19"]?.tokens == 11)
+    #expect(repaired["2026-10-19"]?.tokens == 17)
     #expect(repaired["2026-09-01"]?.tokens == 777)
     _ = try await scanner.scan(now: now, providers: [.anthropic])
     #expect(await scanner.scanMetrics.filesParsed == 1)
     #expect(try fixture.archive(.anthropic)["2026-10-18"]?.tokens == 5)
+    #expect(try fixture.archive(.anthropic)["2026-10-19"]?.tokens == 17)
   }
 
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {

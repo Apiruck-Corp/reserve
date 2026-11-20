@@ -156,6 +156,19 @@ import Testing
     #expect(routed == nil)
   }
 
+  @Test func signedOutManagedFolderKeepsHistoryButCannotSupplyLiveQuota() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try FileManager.default.removeItem(at: fixture.managed.appendingPathComponent(".claude.json"))
+    #expect(self.accounts(fixture.plan(), fixture.managed) == [Self.team])
+    let requested = fixture.root.appendingPathComponent("claude-statusline.json")
+    for path in [fixture.managed.path, "relative-folder"] {
+      let routed = ClaudeStatuslineBridge.routedCacheURL(requested: requested,
+        environment: ["CLAUDE_CONFIG_DIR": path], accounts: fixture.bindings, homeDirectory: fixture.home)
+      #expect(routed == nil)
+    }
+  }
+
   @Test func oneAccountOnlyClaimsFoldersOfTheSamePerson() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
