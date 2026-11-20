@@ -7,6 +7,8 @@ and Kimi Code.
 Optional insights show provider-reported account activity or activity from this Mac.
 Copilot support is experimental and still needs an authenticated release check.
 
+[Reserve 1.12.2](https://github.com/Apiruck-Corp/reserve/releases/tag/v1.12.2) fixes inflated Claude token counts in Insights and corrects a double count that could appear after restoring history while travelling. If a Claude folder switches accounts, its old reading is cleared.
+
 Learn more at [pocarles.com/reserve](https://pocarles.com/reserve/).
 
 It is deliberately small: no Reserve account, browser automation, WebView,

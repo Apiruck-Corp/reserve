@@ -176,7 +176,7 @@ retry() {
 }
 
 detach_dmg() {
-  retry 6 2 hdiutil detach -quiet "$1"
+  retry 6 2 hdiutil detach "$1"
 }
 
 staple_dmg() {
@@ -357,10 +357,10 @@ dmg_root="$temp_root/dmg-root"
 mkdir -p "$dmg_root"
 ditto "$stage_app" "$dmg_root/Reserve.app"
 ln -s /Applications "$dmg_root/Applications"
-hdiutil create -quiet -volname Reserve -srcfolder "$dmg_root" \
+hdiutil create -volname Reserve -srcfolder "$dmg_root" \
   -format UDRW "$layout_dmg"
 mkdir -p "$mount_dir"
-hdiutil attach -quiet -nobrowse -readwrite -mountpoint "$mount_dir" "$layout_dmg"
+hdiutil attach -nobrowse -readwrite -mountpoint "$mount_dir" "$layout_dmg"
 mounted_dmg=1
 
 # The install gesture should read naturally from left to right: drag Reserve
@@ -397,7 +397,7 @@ APPLESCRIPT
 }
 detach_dmg "$mount_dir"
 mounted_dmg=0
-hdiutil convert -quiet "$layout_dmg" -format UDZO -o "$staged_dmg"
+hdiutil convert "$layout_dmg" -format UDZO -o "$staged_dmg"
 
 if [[ "$mode" == release ]]; then
   codesign --force --timestamp --sign "$sign_identity" "$staged_dmg"
@@ -438,7 +438,7 @@ if [[ "$mode" == release ]]; then
 fi
 
 mkdir -p "$mount_dir"
-hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount_dir" "$final_dmg"
+hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$final_dmg"
 mounted_dmg=1
 [[ -d "$mount_dir/Reserve.app" && -L "$mount_dir/Applications" \
   && "$(readlink "$mount_dir/Applications")" == /Applications ]] || {
