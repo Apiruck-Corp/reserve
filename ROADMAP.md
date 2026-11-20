@@ -2,7 +2,7 @@
 Last updated: 2026-11-20
 
 ## Now
-- 2026-11-19: Find bugs and make Reserve better. Fixed inflated Claude token counts, account attribution, saved history across upgrades and time-zone changes, incomplete price estimates, and misleading share cards. Verified with 467 Swift tests, 43 self-tests, native Mac workflows, and release builds for Apple silicon and Intel. The final Opus review recorded one rare case where entering a third time zone on upgrade day can keep a message outside the 30-day report. Release 1.12.2 is in progress through [PR #84](https://github.com/Apiruck-Corp/reserve/pull/84).
+- 2026-11-19: Find bugs and make Reserve better. Fixed inflated Claude token counts, account attribution, saved history across upgrades and time-zone changes, incomplete price estimates, and misleading share cards. Verified with 467 Swift tests, 43 self-tests, native Mac workflows, and release builds for Apple silicon and Intel. The final Opus review recorded one rare case where entering a third time zone on upgrade day can keep a message outside the 30-day report. [PR #84](https://github.com/Apiruck-Corp/reserve/pull/84) merged on 2026-11-20. The [signed 1.12.2 rehearsal](https://github.com/Apiruck-Corp/reserve/actions/runs/44735667127) passed notarization, Gatekeeper, legacy migration, and a Sparkle upgrade and relaunch from the public 1.12.0 app. The 30-minute idle test passed. Publication is waiting for live OpenAI, Claude, Grok, and Cursor account checks.
 
 ## Next
 
