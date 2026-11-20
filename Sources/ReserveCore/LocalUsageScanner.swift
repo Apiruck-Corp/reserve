@@ -836,6 +836,9 @@ public actor LocalUsageScanner {
       .flatMap(TimeZone.init(identifier:))
       ?? TimeZone(secondsFromGMT: 0)!
     let staleDays = record != nil && record?.dayTimeZone != self.timeZone.identifier
+    // A previous parser may have used a different timestamp entirely. Its
+    // published record is the only evidence for the day it originally charged.
+    let rebucketDays = staleDays && record?.insightDetailsVersion == CachedFile.claudeMessageVersion
     let continueSavingsMigration = record?.savingsPriced == false
       && record?.insightDetailsVersion == CachedFile.claudeMessageVersion && !staleDays
     let staleSavings = record?.needsSavingsRefresh == true && !continueSavingsMigration
@@ -848,8 +851,8 @@ public actor LocalUsageScanner {
         provider: unit, size: 0, modifiedAt: 0, offset: 0,
         days: [:], recentRows: [:], recentOrder: [],
         dayTimeZone: self.timeZone.identifier,
-        rebucketedFromDays: staleDays ? [:] : nil,
-        rebucketedFromTimeZone: staleDays ? previousTimeZone.identifier : nil)
+        rebucketedFromDays: rebucketDays ? [:] : nil,
+        rebucketedFromTimeZone: rebucketDays ? previousTimeZone.identifier : nil)
     }
     let needsUpdate = !metadata.matches(record) || (record?.offset ?? 0) < metadata.size
       || staleSavings || staleDays || continueSavingsMigration
@@ -873,13 +876,13 @@ public actor LocalUsageScanner {
           provider: unit, size: 0, modifiedAt: 0, offset: 0,
           days: [:], recentRows: [:], recentOrder: [],
           dayTimeZone: self.timeZone.identifier,
-          rebucketedFromDays: staleDays ? [:] : nil,
-          rebucketedFromTimeZone: staleDays ? previousTimeZone.identifier : nil)
+          rebucketedFromDays: rebucketDays ? [:] : nil,
+          rebucketedFromTimeZone: rebucketDays ? previousTimeZone.identifier : nil)
       }
       var updated = record!
       let previousZone = updated.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:))
       let migrating = staleSavings || staleDays || continueSavingsMigration
-      let retentionKey = !migrating ? cutoffKey : Self.dayKey(
+      let retentionKey = previousZone == nil ? cutoffKey : Self.dayKey(
         self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays + 1,
           to: self.scanNow) ?? self.scanNow, timeZone: self.timeZone)
       let scanResult = try self.scanLines(
@@ -1541,7 +1544,7 @@ public actor LocalUsageScanner {
     legacy: [ProviderID: [String: ArchivedUsageDay]],
     fresh: [ProviderID: [String: ArchivedUsageDay]],
     observed: inout [ProviderID: [String: ArchivedUsageDay]],
-    held: Set<ProviderID>
+    held: Set<ProviderID>, cutoffKey: String
   ) {
     var prior = index
     prior.records = published
@@ -1556,23 +1559,30 @@ public actor LocalUsageScanner {
       }
       if let old = published[key], old.insightDetailsVersion != record.insightDetailsVersion {
         // Only the old record shows which timestamps its parser actually used.
-        affected[record.provider, default: []].formUnion(old.days.keys)
+        affected[record.provider, default: []].formUnion(old.days.keys.filter { $0 >= cutoffKey })
+        affected[record.provider, default: []].formUnion(record.days.keys.filter { $0 >= cutoffKey })
       } else if let oldDays = record.rebucketedFromDays {
         var previous = record
         previous.days = oldDays
         prior.records[key] = previous
         affected[record.provider, default: []].formUnion(oldDays.keys)
+        affected[record.provider, default: []].formUnion(record.days.keys)
       } else {
         continue
       }
       migrated.insert(key)
-      affected[record.provider, default: []].formUnion(record.days.keys)
     }
     // A later scan of the same files still accounts for only part of the
     // archived day. Carry that remainder across appends as well. A newly
     // discovered file might itself be the missing source.
     for (unit, days) in legacy where unit.isAnthropic && !held.contains(unit) {
       for (day, previous) in days {
+        // Per-file totals may already have been trimmed to a shorter window.
+        // Only a time-zone rebucket can still revise those archived days.
+        if day < cutoffKey, index.dailyHistory[unit]?[day] != nil {
+          observed[unit]?.removeValue(forKey: day)
+          continue
+        }
         if let saved = index.dailyHistory[unit]?[day], saved.tokens > previous.tokens,
           fresh[unit]?[day] != nil, newFileDays[unit]?.contains(day) != true {
           affected[unit, default: []].insert(day)
@@ -1763,9 +1773,10 @@ public actor LocalUsageScanner {
       for (key, day) in days { stored[key] = day }
       observed[provider] = stored
     }
+    let cutoffKey = Self.dayKey(cutoff, timeZone: self.timeZone)
     Self.reconcileClaudeDayKeys(
       index: &box.index, published: ledger.publishedRecords, legacy: legacy,
-      fresh: fresh, observed: &observed, held: ledger.heldProviders)
+      fresh: fresh, observed: &observed, held: ledger.heldProviders, cutoffKey: cutoffKey)
     // An unchanged file set does not establish why an archive differs from
     // its retained records. The exact legacy cache-write case was repaired
     // above; preserve other saved totals until new source data is read.
@@ -1792,7 +1803,6 @@ public actor LocalUsageScanner {
     if Self.mergeDailyHistory(&box.index, observed: observed, now: now, calendar: self.calendar) {
       ledger.indexChanged = true
     }
-    let cutoffKey = Self.dayKey(cutoff, timeZone: self.timeZone)
     let todayKey = Self.dayKey(now, timeZone: self.timeZone)
     var selectedIndex = box.index
     selectedIndex.records = box.index.records.filter { selected.contains($0.value.provider) }

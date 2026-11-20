@@ -1714,7 +1714,7 @@ enum ConnectionFlowSelfTest {
     let now = Date()
     let store = UsageStore(defaults: defaults, startAutomatically: false, notificationsActive: false,
       cache: SnapshotCache(fileURL: home.appendingPathComponent("snapshots.json")),
-      hourlyUsageScanner: hourly, dailyHistoryLoad: { await daily.cachedHistory(now: $1, providers: $0) },
+      localUsageScanner: daily, hourlyUsageScanner: hourly,
       now: { now })
     store.accountsHome = home
     defaults.set(true, forKey: "history.localEnabled")
@@ -1739,9 +1739,7 @@ enum ConnectionFlowSelfTest {
       try seed(owned.url, tokens: 5)
       try seed(extra, tokens: 70)
       defaults.set(StableIdentifier.notificationComponent("org-team"), forKey: "\(team.rawValue).organizationIdentifier")
-      let plan = await store.syncClaudeHistorySources()
-      await daily.setClaudeSources(plan.sources)
-      await hourly.setClaudeSources(plan.sources)
+      await store.syncClaudeHistorySources()
       let summaries = try await daily.scan(now: now, providers: [team])
       _ = try await hourly.scan(now: now, providers: [team])
       await store.loadPublishedDailyHistory(now: now)
@@ -1752,8 +1750,6 @@ enum ConnectionFlowSelfTest {
 
       let changed = profile.replacingOccurrences(of: "member-a", with: "member-b")
       try Data(changed.utf8).write(to: extra.appendingPathComponent(".claude.json"))
-      let removed = extra.appendingPathComponent("projects").standardizedFileURL.path
-      await daily.setClaudeSources(plan.sources.filter { $0.projects.standardizedFileURL.path != removed })
       let parsed = await daily.scanMetrics.filesParsed
       await store.syncClaudeHistorySources()
       var failures: [String] = []
