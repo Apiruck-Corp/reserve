@@ -241,6 +241,45 @@ struct HistoryAccountingTests {
     #expect(await recovered.testingCheckpointExists() == false)
   }
 
+  @Test(arguments: [false, true], [false, true])
+  func aTimeZoneChangeIncludesNewUsageOnlyOnce(trimOldDay: Bool, streamingCorrection: Bool) async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let lastScan = Fixture.date("2026-10-19T01:34:00Z")
+    let nextScan = Fixture.date("2026-10-19T01:45:00Z")
+    let oldDay = trimOldDay ? "2026-09-08" : "2026-10-18"
+    let newDay = trimOldDay ? "2026-09-09" : "2026-10-19"
+    let session = fixture.claude.appendingPathComponent("open-session.jsonl")
+    let original = Fixture.claudeLine(stamp: newDay + "T01:30:00Z", input: 10)
+    try Data((original + "\n").utf8).write(to: session)
+    func append(_ row: String) throws {
+      let handle = try FileHandle(forWritingTo: session)
+      defer { try? handle.close() }
+      try handle.seekToEnd()
+      try handle.write(contentsOf: Data((row + "\n").utf8))
+    }
+    let old = fixture.scanner(zone: "America/New_York")
+    _ = try await old.scan(periodDays: 90, now: lastScan, providers: [.anthropic])
+    if trimOldDay {
+      try append(Fixture.claudeLine(stamp: "2026-10-19T01:33:00Z", input: 1)
+        .replacingOccurrences(of: "m1", with: "recent-marker"))
+      _ = try await old.scan(now: lastScan, providers: [.anthropic])
+      let index = try fixture.index()
+      let records = try #require(index["records"] as? [String: [String: Any]])
+      #expect((records.values.first?["days"] as? [String: Any])?[oldDay] == nil)
+    }
+    #expect(try fixture.archive(.anthropic)[oldDay]?.tokens == 11)
+    let revised = Fixture.claudeLine(stamp: newDay + "T01:40:00Z", input: streamingCorrection ? 15 : 4)
+    try append(streamingCorrection ? revised : revised.replacingOccurrences(of: "m1", with: "new-message"))
+    let scanner = fixture.scanner(zone: "UTC")
+    for _ in 0..<2 {
+      _ = try await scanner.scan(now: nextScan, providers: [.anthropic])
+      let archived = try fixture.archive(.anthropic)
+      #expect(archived[oldDay] == nil)
+      #expect(archived[newDay]?.tokens == 16)
+    }
+  }
+
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
