@@ -884,6 +884,17 @@ public actor LocalUsageScanner {
         metadata.size > original.size || (metadata.size == original.size && metadata.modifiedAt == original.modifiedAt) {
         publishedOffset = original.offset
       }
+      var archiveOnlyDays = box.index.records[key]?.archiveOnlyDays ?? []
+      if !archiveOnlyDays.isEmpty {
+        let oldest = self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays - 1,
+          to: self.scanNow) ?? .distantPast
+        archiveOnlyDays.removeAll { $0.interval.end <= oldest }
+        // A shorter restore must allow appends after its new end. A longer one
+        // may contain new usage after the original archive-only prefix.
+        for i in archiveOnlyDays.indices where archiveOnlyDays[i].throughOffset > metadata.size {
+          archiveOnlyDays[i].throughOffset = metadata.size
+        }
+      }
       let unknownPrefix = previousZone != nil && publishedOffset == 0 && (original?.offset ?? 0) > 0
       let upgradingAcrossZones = previousZone != nil && original.map {
         $0.insightDetailsVersion != CachedFile.claudeMessageVersion
@@ -893,24 +904,38 @@ public actor LocalUsageScanner {
         self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays + 1,
           to: self.scanNow) ?? self.scanNow, timeZone: self.timeZone)
       let scanResult = try self.scanLines(
-        opened, from: updated.offset, publishedOffset: publishedOffset,
+        opened, from: updated.offset, splitAt: archiveOnlyDays.map(\.throughOffset) + [publishedOffset],
         discardingOversizedLine: updated.discardingOversizedLine ?? false,
         fileByteLimit: (staleSavings || staleDays || continueSavingsMigration)
           ? self.maximumMigrationFileBytes : self.maximumBytesPerFileScan,
         deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
-      ) { data, wasPublished in
-        guard var row = Self.parseClaudeLine(
+      ) { data, sourceOffset in
+        let wasPublished = sourceOffset < publishedOffset
+        guard let (timestamp, parsedRow) = Self.parseClaudeLine(
           data, timeZone: self.timeZone, previousTimeZone: wasPublished || unknownPrefix ? previousZone : nil),
-          row.dayKey >= retentionKey else { return }
+          parsedRow.dayKey >= retentionKey,
+          !archiveOnlyDays.contains(where: { $0.covers(timestamp, at: sourceOffset) }) else { return }
+        var row = parsedRow
         // Include a boundary-crossing message on both sides of the move. Older
         // rows outside the reporting window in both zones stay in the archive.
         if upgradingAcrossZones, row.dayKey < cutoffKey,
           (row.previousDayKey ?? row.dayKey) < cutoffKey { return }
-        if !wasPublished, let oldDay = row.previousDayKey {
-          // A restore can change the file's identity or timestamp. Keep an
-          // archive-only day when its share from the old file cannot be proved.
+        if !wasPublished, let oldDay = row.previousDayKey, let previousZone {
+          // Keep this part of the restored file on the archive's original civil
+          // day. Later zone changes must preserve it, while new appends can count.
           if min(oldDay, row.dayKey) <= cutoffKey, original?.days[oldDay] == nil,
-            box.index.dailyHistory[unit]?[oldDay] != nil { return }
+            box.index.dailyHistory[unit]?[oldDay] != nil {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = previousZone
+            if let interval = calendar.dateInterval(of: .day, for: timestamp) {
+              if let i = archiveOnlyDays.firstIndex(where: { $0.interval == interval }) {
+                archiveOnlyDays[i].throughOffset = metadata.size
+              } else {
+                archiveOnlyDays.append(ArchiveOnlyClaudeDay(interval: interval, throughOffset: metadata.size))
+              }
+            }
+            return
+          }
           row.previousDayKey = nil
         }
         if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
@@ -933,6 +958,7 @@ public actor LocalUsageScanner {
           }
         }
       }
+      updated.archiveOnlyDays = archiveOnlyDays.isEmpty ? nil : archiveOnlyDays
       updated.size = metadata.size
       updated.offset = scanResult.offset
       updated.discardingOversizedLine = scanResult.discardingOversizedLine
@@ -1237,13 +1263,13 @@ public actor LocalUsageScanner {
   private func scanLines(
     _ file: DescriptorBoundFile,
     from offset: Int64,
-    publishedOffset: Int64,
+    splitAt offsets: [Int64],
     discardingOversizedLine: Bool,
     fileByteLimit: Int,
     deadline: Date,
     budget: ScanBudget?,
     remainingBytes: inout Int,
-    visit: (Data, Bool) -> Void
+    visit: (Data, Int64) -> Void
   ) throws -> (offset: Int64, discardingOversizedLine: Bool) {
     let handle = file.handle
     try handle.seek(toOffset: UInt64(max(0, offset)))
@@ -1252,6 +1278,7 @@ public actor LocalUsageScanner {
       discardingOversizedLine: discardingOversizedLine)
     var fileBytesRemaining = min(fileByteLimit, remainingBytes)
     var readPosition = max(0, offset)
+    var boundaries = Set(offsets.filter { $0 > readPosition }).sorted(by: >)
     var consumedBytes = 0
     var lineCount = 0
     do {
@@ -1260,12 +1287,13 @@ public actor LocalUsageScanner {
       {
         try Self.checkDeadline(deadline, budget: budget)
         let allowance = min(64 * 1_024, remainingBytes, fileBytesRemaining)
-        // The old cursor ends at a consumed line (or inside an oversized line
-        // being discarded). Keep appends out of the prior time-zone totals.
-        let wasPublished = readPosition < publishedOffset
-        let count = wasPublished ? Int(min(Int64(allowance), publishedOffset - readPosition)) : allowance
+        // A chunk stays on one side of every saved cursor. A line that was
+        // incomplete at a boundary belongs to the chunk that completes it.
+        let start = readPosition
+        let count = boundaries.last.map { Int(min(Int64(allowance), $0 - start)) } ?? allowance
         guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { break }
         readPosition += Int64(chunk.count)
+        if readPosition == boundaries.last { boundaries.removeLast() }
         if let budget {
           budget.consume(chunk.count, remaining: &remainingBytes)
         } else {
@@ -1277,7 +1305,7 @@ public actor LocalUsageScanner {
         consumedBytes += result.consumedBytes
         for data in result.lines {
           lineCount += 1
-          autoreleasepool { visit(data, wasPublished) }
+          autoreleasepool { visit(data, start) }
         }
       }
       try Self.checkDeadline(deadline, budget: budget)
@@ -1295,11 +1323,11 @@ public actor LocalUsageScanner {
 
   static func parseClaudeLine(
     _ data: Data, timeZone: TimeZone = .current, previousTimeZone: TimeZone? = nil
-  ) -> CachedRow? {
+  ) -> (timestamp: Date, row: CachedRow)? {
     guard data.range(of: Data(#""assistant""#.utf8)) != nil,
       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return nil }
-    return Self.parseClaudeObject(object, timeZone: timeZone, previousTimeZone: previousTimeZone)?.row
+    return Self.parseClaudeObject(object, timeZone: timeZone, previousTimeZone: previousTimeZone)
   }
 
   /// Read only the assistant message's own usage. Tool content may contain
@@ -2472,6 +2500,16 @@ private struct UsageIndex: Codable {
   }
 }
 
+/// The archive already owns this civil day's rows in the restored file prefix.
+private struct ArchiveOnlyClaudeDay: Codable {
+  let interval: DateInterval
+  var throughOffset: Int64
+
+  func covers(_ timestamp: Date, at offset: Int64) -> Bool {
+    offset < self.throughOffset && self.interval.start <= timestamp && timestamp < self.interval.end
+  }
+}
+
 private struct CachedFile: Codable {
   let provider: ProviderID
   var size: Int64
@@ -2500,6 +2538,7 @@ private struct CachedFile: Codable {
   /// Bounded source-day totals carried only until a day migration is published.
   var rebucketedFromDays: [String: UsageTotals]? = nil
   var rebucketedFromTimeZone: String? = nil
+  var archiveOnlyDays: [ArchiveOnlyClaudeDay]? = nil
 
   /// Versioned separately from pricing: caches written before Insights detail
   /// must re-read unchanged sources once, even when savings are already priced.

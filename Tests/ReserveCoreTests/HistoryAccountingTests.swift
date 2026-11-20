@@ -280,13 +280,14 @@ struct HistoryAccountingTests {
     }
   }
 
-  @Test(arguments: [
-    (false, false, false), (false, false, true), (false, true, false), (false, true, true),
-    (true, false, false), (true, false, true), (true, true, false), (true, true, true),
+  @Test(arguments: [false, true], [
+    (trimOldDay: false, atCutoff: false), (trimOldDay: false, atCutoff: true),
+    (trimOldDay: true, atCutoff: false), (trimOldDay: true, atCutoff: true),
   ])
   func aRestoredTranscriptPreservesArchivedDaysWithoutAFileRecord(
-    replaceFile: Bool, trimOldDay: Bool, atCutoff: Bool
+    replaceFile: Bool, history: (trimOldDay: Bool, atCutoff: Bool)
   ) async throws {
+    let (trimOldDay, atCutoff) = history
     let fixture = try Fixture()
     defer { fixture.remove() }
     let now = Fixture.date("2026-10-19T12:00:00Z")
@@ -299,10 +300,13 @@ struct HistoryAccountingTests {
     try Data((older + "\n").utf8).write(to: file)
     let original = fixture.scanner(zone: "America/New_York")
     _ = try await original.scan(periodDays: 90, now: now, providers: [.anthropic])
-    let handle = try FileHandle(forWritingTo: file)
-    try handle.seekToEnd()
-    try handle.write(contentsOf: Data((recent + "\n").utf8))
-    try handle.close()
+    func append(_ row: String) throws {
+      let handle = try FileHandle(forWritingTo: file)
+      defer { try? handle.close() }
+      try handle.seekToEnd()
+      try handle.write(contentsOf: Data((row + "\n").utf8))
+    }
+    try append(recent)
     _ = try await original.scan(periodDays: trimOldDay ? 30 : 90, now: now, providers: [.anthropic])
     let records = try #require(fixture.index()["records"] as? [String: [String: Any]])
     let recordedDays = try #require(records.values.first?["days"] as? [String: Any])
@@ -339,6 +343,20 @@ struct HistoryAccountingTests {
       #expect(rows[newDay]?.tokens == 7)
       #expect(rows["2026-10-18"]?.tokens == 4 && rows["2026-10-19"] == nil)
     }
+
+    // Six newly appended tokens on an archive-only date must still follow the user.
+    let late = Fixture.claudeLine(stamp: newDay + "T02:00:00Z", input: 5)
+      .replacingOccurrences(of: "m1", with: "late-message")
+    try append(late)
+    let away = fixture.scanner(zone: "UTC")
+    _ = try await away.scan(periodDays: 90, now: now, providers: [.anthropic])
+    #expect(try fixture.archive(.anthropic)[newDay]?.tokens == (trimOldDay ? 13 : 24))
+    try Data(contentsOf: file).write(to: file, options: .atomic)
+    _ = try await away.scan(periodDays: 90, now: now, providers: [.anthropic])
+    let home = fixture.scanner(zone: "America/New_York")
+    _ = try await home.scan(periodDays: 90, now: now, providers: [.anthropic])
+    let final = try fixture.archive(.anthropic)
+    #expect(final[oldDay]?.tokens == 22 && final[newDay]?.tokens == 7)
   }
 
   @Test func firstDayOfRangeIncludesFilesLastChangedBeforeTheCurrentHour() async throws {
@@ -625,7 +643,7 @@ struct HistoryAccountingTests {
   func claudeUsesTheLocalCivilDay(zone: String, stamp: String, day: String) throws {
     let line = Fixture.claudeLine(stamp: stamp, input: 10)
     let timeZone = try #require(TimeZone(identifier: zone))
-    let row = try #require(LocalUsageScanner.parseClaudeLine(
+    let (_, row) = try #require(LocalUsageScanner.parseClaudeLine(
       Data(line.utf8), timeZone: timeZone))
     #expect(row.dayKey == day)
     #expect(row.totals.totalTokens(provider: .anthropic) == 11)
