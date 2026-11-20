@@ -38,9 +38,13 @@ public enum ClaudeStatuslineBridge {
     homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
     identity: (URL) -> ClaudeFolderIdentity? = { ClaudeAccountAttribution.liveIdentity(profileURL: $0) }
   ) -> URL? {
-    let folder = environment[ClaudeConfigDirectory.environmentKey]
-      .flatMap { $0.isEmpty ? nil : ClaudeConfigDirectory(path: $0)?.url }
-      ?? homeDirectory.appendingPathComponent(".claude", isDirectory: true)
+    let folder: URL
+    if let configured = environment[ClaudeConfigDirectory.environmentKey], !configured.isEmpty {
+      guard let directory = ClaudeConfigDirectory(path: configured) else { return nil }
+      folder = directory.url
+    } else {
+      folder = homeDirectory.appendingPathComponent(".claude", isDirectory: true)
+    }
     guard let owner = ClaudeAccountAttribution.owner(
       ofFolder: folder, accounts: accounts, homeDirectory: homeDirectory,
       requiresVerifiedOrganization: requiresVerifiedOrganization, identity: identity)

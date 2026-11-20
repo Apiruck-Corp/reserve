@@ -102,6 +102,7 @@ struct UsageShareCardTests {
     #expect(text.contains("Weekly limit: 60% left"))
     #expect(text.contains("Grok Chat share: 30% of pool used"))
     let share = try #require(card.plans.first?.limits.last)
+    #expect(share.displayPercent == 30)
     #expect(share.pace == nil)
     #expect(share.projectedRemainingAtResetPercent == nil)
   }

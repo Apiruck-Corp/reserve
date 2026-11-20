@@ -1548,23 +1548,39 @@ public actor LocalUsageScanner {
     var migrated: Set<String> = []
     // Each Claude folder keeps its own archive, so each moves on its own.
     var affected: [ProviderID: Set<String>] = [:]
+    var newFileDays: [ProviderID: Set<String>] = [:]
     for (key, record) in index.records
     where record.savingsPriced == true && record.provider.isAnthropic && !held.contains(record.provider) {
-      if let oldDays = record.rebucketedFromDays {
+      if published[key] == nil, legacy[record.provider] != nil {
+        newFileDays[record.provider, default: []].formUnion(record.days.keys)
+      }
+      if let old = published[key], old.insightDetailsVersion != record.insightDetailsVersion {
+        // Only the old record shows which timestamps its parser actually used.
+        affected[record.provider, default: []].formUnion(old.days.keys)
+      } else if let oldDays = record.rebucketedFromDays {
         var previous = record
         previous.days = oldDays
         prior.records[key] = previous
         affected[record.provider, default: []].formUnion(oldDays.keys)
-      } else if let old = published[key], old.insightDetailsVersion != record.insightDetailsVersion {
-        affected[record.provider, default: []].formUnion(old.days.keys)
       } else {
         continue
       }
       migrated.insert(key)
       affected[record.provider, default: []].formUnion(record.days.keys)
     }
-    guard !migrated.isEmpty else { return }
-    let reconstructedByUnit = Self.observedDays(
+    // A later scan of the same files still accounts for only part of the
+    // archived day. Carry that remainder across appends as well. A newly
+    // discovered file might itself be the missing source.
+    for (unit, days) in legacy where unit.isAnthropic && !held.contains(unit) {
+      for (day, previous) in days {
+        if let saved = index.dailyHistory[unit]?[day], saved.tokens > previous.tokens,
+          fresh[unit]?[day] != nil, newFileDays[unit]?.contains(day) != true {
+          affected[unit, default: []].insert(day)
+        }
+      }
+    }
+    guard !affected.isEmpty else { return }
+    let reconstructedByUnit = migrated.isEmpty ? [:] : Self.observedDays(
       index: prior, providers: Set(affected.keys), now: index.updatedAt)
     for (unit, days) in affected {
       let reconstructed = reconstructedByUnit[unit] ?? [:]

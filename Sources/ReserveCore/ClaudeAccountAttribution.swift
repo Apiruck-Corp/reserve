@@ -93,6 +93,7 @@ public enum ClaudeAccountAttribution {
     accounts: [ClaudeAccountBinding],
     homeDirectory: URL,
     requiresVerifiedOrganization: Bool? = nil,
+    includeSignedOutManagedHistory: Bool = false,
     identity: (URL) -> ClaudeFolderIdentity?
   ) -> ProviderID? {
     let claude = accounts.filter(\.account.isAnthropic)
@@ -100,9 +101,12 @@ public enum ClaudeAccountAttribution {
     // An explicitly attached folder may supply its card directly. Once the
     // card has verified an organization, its current sign-in must still match.
     if let own = claude.first(where: { $0.account.isAdded && $0.folder?.resolvedPath == path }) {
-      if let expected = own.verifiedOrganization,
-        identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))?.organization != expected {
-        return nil
+      if let expected = own.verifiedOrganization {
+        let profile = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))
+        // Signing out keeps this explicitly assigned folder's saved history.
+        // A live reading or a profile naming a different organization needs proof.
+        if profile == nil && includeSignedOutManagedHistory { return own.account }
+        guard profile?.organization == expected else { return nil }
       }
       return own.account
     }
@@ -123,6 +127,7 @@ public enum ClaudeAccountAttribution {
       let organization = mine.organization
     else { return nil }
     let matches = claude.filter { binding in
+      guard binding.account.isDefault || binding.folder != nil else { return false }
       let own = identity(binding.folder?.accountProfileURL ?? homeProfile)
       // The first card follows whatever Claude Code last signed in to, so
       // only an organization a limits read verified counts for it.
@@ -163,7 +168,8 @@ public enum ClaudeAccountAttribution {
       guard !roots.contains(where: { Self.overlaps(root, $0) }) else { continue }
       var account = Self.owner(
         ofFolder: folder, accounts: claude, homeDirectory: homeDirectory,
-        requiresVerifiedOrganization: requiresVerifiedOrganization, identity: identity)
+        requiresVerifiedOrganization: requiresVerifiedOrganization, includeSignedOutManagedHistory: true,
+        identity: identity)
       // The default home follows whatever plain Claude Code last signed in
       // to, and its profile proves only today's sign-in, not who wrote the
       // transcripts already there. Its history is the first card's or a

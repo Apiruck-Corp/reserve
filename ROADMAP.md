@@ -1,7 +1,8 @@
 # Roadmap
-Last updated: 2026-11-03
+Last updated: 2026-11-19
 
 ## Now
+- 2026-11-19: Find bugs and make Reserve better. Fixed Claude account attribution, daily and hourly token accounting, and share-card reporting. Existing source files can repair older cached totals. Regression cases cover account changes, cache reloads, the start of a reporting period, price coverage, shared quotas and daylight saving time. Implemented on codex/usage-reliability-review, awaiting review.
 
 ## Next
 

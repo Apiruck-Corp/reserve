@@ -1743,6 +1743,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && disclaimerFits
       && copied
       && copiedText.contains("not an actual charge")
+      && copiedText.contains("Grok Chat share: 30% of pool used")
       && !copiedText.contains("ada@")
       && decoded
       && windowFits
@@ -1802,12 +1803,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let resets = now.addingTimeInterval(3 * 86_400)
     let kinds: [ProviderKind] = [.anthropic, .openAI, .grok, .cursor, .copilot, .gemini, .kimi, .zai]
     let accounts = kinds.map { kind in
-      UsageShareAccount(
+      let labels = ["Weekly", "Fable weekly", kind == .grok ? "Grok Chat share" : "5 hours",
+        "5 hours", "5 hours", "5 hours"]
+      return UsageShareAccount(
         provider: ProviderID(kind: kind),
         planName: kind == .anthropic ? "Max 20x" : "Pro",
-        windows: (0..<6).map { index in
+        windows: labels.enumerated().map { index, label in
           UsageWindow(
-            id: "weekly-\(index)", label: index == 0 ? "Weekly" : index == 1 ? "Fable weekly" : "5 hours",
+            id: "weekly-\(index)", label: label,
             usedPercent: Double(index * 15), windowMinutes: 10_080, resetsAt: resets)
         },
         checkedAt: now)
