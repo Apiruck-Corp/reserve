@@ -7,7 +7,7 @@ and Kimi Code.
 Optional insights show provider-reported account activity or activity from this Mac.
 Copilot support is experimental and still needs an authenticated release check.
 
-Reserve 1.12.3 fixes a sign-in warning that could block a third Claude account. Members of the same Claude team can now connect separate cards and see their own usage limits. [Release notes](https://github.com/Apiruck-Corp/reserve/releases/tag/v1.12.3)
+Reserve 1.12.3 fixes a sign-in warning that could block another member of the same Claude team. Each member can now connect a separate card and see their own usage limits. [Release notes](https://github.com/Apiruck-Corp/reserve/releases/tag/v1.12.3)
 
 Learn more at [pocarles.com/reserve](https://pocarles.com/reserve/).
 
