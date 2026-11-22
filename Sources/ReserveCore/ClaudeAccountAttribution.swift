@@ -268,6 +268,8 @@ public enum ClaudeAccountAttribution {
 
   public static func bindings(defaults: UserDefaults) -> [ClaudeAccountBinding] {
     func binding(_ account: ProviderID, folder: ClaudeConfigDirectory? = nil) -> ClaudeAccountBinding {
+      // The standalone status-line command has no registered app defaults.
+      // With no saved choice, it treats Claude's ordinary home as enabled.
       ClaudeAccountBinding(account: account, folder: folder, verifiedIdentity: .verified(for: account, defaults: defaults),
         isEnabled: defaults.object(forKey: "provider.\(account.rawValue).enabled") as? Bool ?? account.isDefault)
     }

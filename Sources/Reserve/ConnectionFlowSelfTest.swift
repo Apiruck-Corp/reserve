@@ -1680,10 +1680,21 @@ enum ConnectionFlowSelfTest {
         failures.append("team seats: hiding personal info left a team name visible")
       }
       store.hidesPersonalInfo = false
+      let firstNumber = ProviderAccountLabels.neutralLabel(for: accounts[1])
+      store.setAccountLabel("Example Team", for: accounts[3])
+      await refresh(1)
+      if store.accountShownLabel(for: accounts[1]) != firstNumber || store.accountShownLabel(for: accounts[3]) != "Example Team" {
+        failures.append("team seats: an automatic team name displaced a user-chosen name")
+      }
       store.setAccountLabel("Support", for: accounts[3])
       await refresh(3)
       if store.accountShownLabel(for: accounts[3]) != "Support" {
         failures.append("team seats: refreshing replaced a name chosen by the user")
+      }
+      await refresh(2)
+      await refresh(1)
+      if store.accountShownLabel(for: accounts[2]) != "Example Team" || store.accountShownLabel(for: accounts[1]) != firstNumber {
+        failures.append("team seats: an earlier card took a unique team name already used by a later card")
       }
       // Reconnecting an older card must not take a seat already verified by a later one.
       try await signIn(1, member: "seat-3")

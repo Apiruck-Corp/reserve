@@ -145,14 +145,16 @@ import Testing
     #expect(self.accounts(fixture.plan(bindings: single), fixture.colleague).isEmpty)
   }
 
-  @Test func reconnectingAnEarlierCardDoesNotTakeAVerifiedSeatsOtherFolders() throws {
+  @Test(arguments: [true, false])
+  func reconnectingAnEarlierCardDoesNotTakeAVerifiedSeatsOtherFolders(cardsEnabled: Bool) throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
     try Fixture.profile(fixture.colleague.appendingPathComponent(".claude.json"), "org-team", "po")
     let earlier = ClaudeAccountBinding(account: ProviderID(rawValue: "anthropic@earlier")!,
-      folder: ClaudeConfigDirectory(path: fixture.colleague.path), verifiedIdentity: nil)
+      folder: ClaudeConfigDirectory(path: fixture.colleague.path), verifiedIdentity: nil, isEnabled: cardsEnabled)
     let verified = ClaudeAccountBinding(account: Self.team, folder: ClaudeConfigDirectory(path: fixture.managed.path),
-      verifiedIdentity: ClaudeAccountAttribution.liveIdentity(profileURL: fixture.managed.appendingPathComponent(".claude.json")))
+      verifiedIdentity: ClaudeAccountAttribution.liveIdentity(profileURL: fixture.managed.appendingPathComponent(".claude.json")),
+      isEnabled: cardsEnabled)
     let cards = [fixture.bindings[0], earlier, verified]
     let plan = fixture.plan(bindings: cards)
     #expect(self.accounts(plan, fixture.t3) == [Self.team])
