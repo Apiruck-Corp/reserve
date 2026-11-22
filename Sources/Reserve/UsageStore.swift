@@ -634,32 +634,32 @@ final class UsageStore {
     binding.profileURL(homeDirectory: self.accountsHome).flatMap(ClaudeAccountAttribution.liveIdentity)
   }
 
-  /// Only one card may show a seat's quota. Explicitly added cards take
-  /// precedence over the default CLI sign-in, then addition order breaks ties.
+  /// Only one card may show a seat's quota. A profile that only identifies
+  /// the team cannot take a seat away from an identified member.
   private func claudeSignInConflict(
     for provider: ProviderID, identity: ClaudeFolderIdentity, among accounts: [ClaudeAccountBinding]
   ) -> UsageProviderError? {
-    let sharing = accounts.compactMap { binding -> (account: ProviderID, member: String?)? in
+    let sharing = accounts.compactMap { binding -> (binding: ClaudeAccountBinding, member: String?)? in
       guard self.isEnabled(binding.account),
         let live = binding.account == provider ? identity : self.claudeIdentity(for: binding),
         binding.verifiedIdentity?.accepts(live) != false,
         live.organization == identity.organization,
         identity.member == nil || live.member == identity.member
       else { return nil }
-      return (binding.account, live.member)
+      return (binding, live.member)
     }
     // An older profile naming only the organization cannot displace a
     // known member. With only such profiles, keep the original first owner.
     let known = sharing.filter { $0.member != nil }
     let candidates = known.isEmpty ? sharing : known
-    guard let owner = candidates.first(where: { $0.account.isAdded }) ?? candidates.first,
-      owner.account != provider else { return nil }
+    guard let owner = ClaudeAccountAttribution.preferredOwner(among: candidates.map(\.binding)),
+      owner != provider else { return nil }
     if identity.member == nil {
       return .credentialsNotFound(
         "Another card uses this Claude team. Sign in again so Reserve can identify your team member account.")
     }
     return .credentialsNotFound(
-      "Signed in to the same Claude account as \(owner.account.displayName). Choose a different account on Claude’s sign-in page.")
+      "Signed in to the same Claude account as \(owner.displayName). Choose a different account on Claude’s sign-in page.")
   }
 
   func insightHistoryName(for provider: ProviderID) -> String {
@@ -919,7 +919,11 @@ final class UsageStore {
       return
     }
     // "Nimbus · Admin" keeps only the organization.
-    let name = organization.components(separatedBy: " · ").first ?? organization
+    let teamName = String((organization.components(separatedBy: " · ").first ?? organization).prefix(64))
+    let nameInUse = account.isAnthropic && self.claudeProviders.contains {
+      $0 != account && ProviderAccountLabels.label(for: $0) == teamName
+    }
+    let name = nameInUse ? self.neutralLabel(for: account) : teamName
     guard !name.isEmpty, ProviderAccountLabels.label(for: account) != name else { return }
     self.defaults.set(name, forKey: "\(account.rawValue).label")
     ProviderAccountLabels.set(name, for: account)
@@ -3550,7 +3554,7 @@ final class UsageStore {
       }
       guard isCurrent() else { return }
       if let binding, self.tracksMultipleClaudeAccounts, claudeIdentity != self.claudeIdentity(for: binding) {
-        throw UsageProviderError.credentialsNotFound("The Claude sign-in changed while Reserve was checking usage. Try again.")
+        throw UsageProviderError.unavailable("The Claude sign-in changed while Reserve was checking usage. Refresh to check again.")
       }
       let snapshot = fetched.attributed(to: provider).withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot

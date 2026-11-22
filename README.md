@@ -78,8 +78,9 @@ How the accounts are kept apart depends on the provider:
 For a folder-based account, Reserve opens the usual browser sign-in with the
 folder set, so the first account is left untouched. If your browser is already
 signed in to the other account, switch accounts on the sign-in page. Added
-Claude accounts are named after the organization they find ("Claude ·
-Nimbus"); every other added account starts as "Account 2". You can rename any
+Claude accounts use their organization's name when it's available ("Claude ·
+Nimbus"). If another card already uses that name, the new card keeps its
+account number. Every other added account starts as "Account 2". You can rename any
 of them in the card, and **Hide personal info** shows the neutral name.
 
 An added account reads only its folder: no fallback to the default home, which

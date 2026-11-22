@@ -1664,6 +1664,16 @@ enum ConnectionFlowSelfTest {
       if Set(addedNames).count != addedNames.count || !addedNames.contains(where: { $0.contains("Example Team") }) {
         failures.append("team seats: cards for different people were all named after the same organization")
       }
+      store.hidesPersonalInfo = true
+      if accounts.contains(where: { $0.displayName != $0.neutralDisplayName }) {
+        failures.append("team seats: hiding personal info left a team name visible")
+      }
+      store.hidesPersonalInfo = false
+      store.setAccountLabel("Support", for: accounts[3])
+      await refresh(3)
+      if store.accountShownLabel(for: accounts[3]) != "Support" {
+        failures.append("team seats: refreshing replaced a name chosen by the user")
+      }
       // Reconnecting an older card must not take a seat already verified by a later one.
       try await signIn(1, member: "seat-3")
       await refresh(2)

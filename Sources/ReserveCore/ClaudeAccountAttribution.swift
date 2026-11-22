@@ -112,6 +112,14 @@ public enum ClaudeAccountAttribution {
     return identity.organization == nil ? nil : identity
   }
 
+  /// A card that already verified this seat keeps it through another card's
+  /// sign-in. Ties favor an explicitly added folder, in original addition order.
+  public static func preferredOwner(among matching: [ClaudeAccountBinding]) -> ProviderID? {
+    let verified = matching.filter { $0.verifiedIdentity?.member != nil }
+    let candidates = verified.isEmpty ? matching : verified
+    return candidates.first(where: \.account.isAdded)?.account ?? candidates.first?.account
+  }
+
   /// The tracked account whose sessions `folder` holds, or nil when none can
   /// be proven. `identity` reads a profile URL; tests pass a fixture.
   /// `requiresVerifiedOrganization` defaults to "an added Claude account
@@ -127,17 +135,17 @@ public enum ClaudeAccountAttribution {
   ) -> ProviderID? {
     let claude = accounts.filter(\.account.isAnthropic)
     let path = Self.resolved(folder)
-    // An explicitly attached folder may supply its card directly. Once the
-    // card has verified an organization, its current sign-in must still match.
+    // Saved transcripts stay in their explicitly attached folder. A live
+    // reading for a known member follows the verified owner of that seat.
     if let own = claude.first(where: { $0.account.isAdded && $0.folder?.resolvedPath == path }) {
+      let profile = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))
       if let expected = own.verifiedIdentity {
-        let profile = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))
-        // Signing out keeps this explicitly assigned folder's saved history.
-        // A live reading or a profile naming a different organization needs proof.
         if profile == nil && includeSignedOutManagedHistory { return own.account }
         guard expected.accepts(profile) else { return nil }
       }
-      return own.account
+      if includeSignedOutManagedHistory || profile?.member == nil || requiresVerifiedOrganization == false {
+        return own.account
+      }
     }
     let first = claude.first { $0.account.isDefault }
     let isDefaultHome = path == Self.resolved(Self.defaultHome(homeDirectory))
@@ -164,9 +172,7 @@ public enum ClaudeAccountAttribution {
       guard let own else { return false }
       return Self.samePerson(mine, own)
     }
-    // As for limits: when both cards name one seat, the added card,
-    // signed in on purpose, keeps it.
-    return matches.first(where: \.account.isAdded)?.account ?? matches.first?.account
+    return Self.preferredOwner(among: matches)
   }
 
   /// Every Claude `projects` folder whose sessions belong to a tracked
