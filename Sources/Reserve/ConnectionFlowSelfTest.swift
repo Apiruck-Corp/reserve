@@ -549,6 +549,7 @@ enum ConnectionFlowSelfTest {
     failures += self.checkDashboardHotKeyRegistration()
     failures += self.checkAdaptiveRefresh(in: directory)
     failures += await self.checkAddedAccounts(in: directory)
+    failures += await self.checkClaudeTeamSeats(in: directory)
     failures += await self.checkClaudeFolderHistoryChange(in: directory)
 
     // Render actual native controls for each step, with no real credentials.
@@ -1596,39 +1597,6 @@ enum ConnectionFlowSelfTest {
         "switching the retained card to Team failed")
       expect(Self.text(in: dashboard).contains(team.displayName + " · Team"),
         "the Team detail card retained personal content")
-      // Both cards signed in to one organization: the added folder keeps the
-      // reading, the first card asks for the other sign-in.
-      let second = ProviderID(rawValue: "anthropic@selftest2")!
-      let sameOrganization: (ProviderID) -> String? = { _ in "org-team" }
-      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
-        organization: sameOrganization) == team, "the first card kept a duplicate of the added Team reading")
-      expect(UsageStore.claudeOrganizationOwner(of: team, among: [.anthropic, team],
-        organization: sameOrganization) == nil, "the added Team card lost its own reading")
-      expect(UsageStore.claudeOrganizationOwner(of: second, among: [.anthropic, team, second],
-        organization: sameOrganization) == team, "the later added card kept a duplicate reading")
-      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
-        organization: { $0 == team ? "org-team" : "org-personal" }) == nil,
-        "two organizations were treated as one account")
-      expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
-        organization: { $0 == team ? nil : "org-personal" }) == nil,
-        "an unidentified card was treated as a duplicate")
-      // A third card can be a different member of the second card's team.
-      if let third = try? store.addClaudeAccount(),
-        let secondFolder = store.claudeConfigDirectory(for: team),
-        let thirdFolder = store.claudeConfigDirectory(for: third)
-      {
-        store.setEnabled(.anthropic, enabled: false)
-        do {
-          for (folder, member) in [(secondFolder, "member-two"), (thirdFolder, "member-three")] {
-            let profile = #"{"oauthAccount":{"organizationUuid":"shared-team","accountUuid":"\#(member)"}}"#
-            try Data(profile.utf8).write(to: folder.accountProfileURL)
-          }
-          expect(store.claudeAccountSharingOrganization(with: third) == nil,
-            "the third Claude card was rejected as a duplicate of a different team member")
-        } catch { failures.append("could not write the team seat profiles") }
-        try? store.removeAccount(third)
-        store.setEnabled(.anthropic, enabled: true, refreshImmediately: false)
-      } else { failures.append("could not create the third Claude card") }
       failures += await Self.checkClaudeFolderAttribution(
         store: store, defaults: defaults, home: home, team: team)
       try? store.removeAccount(team)
@@ -1637,6 +1605,83 @@ enum ConnectionFlowSelfTest {
     } else { failures.append("added accounts: a second Claude account could not be created") }
     try? FileManager.default.removeItem(at: home)
     failures += await self.checkAddedAPIAccounts()
+    return failures
+  }
+
+  /// Exercise the verification after browser sign-in with five isolated
+  /// profiles. Only the login helper and the quota response are substituted.
+  private static func checkClaudeTeamSeats(in directory: URL) async -> [String] {
+    let suite = "Reserve.TeamSeats.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["team seats: preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let home = directory.appendingPathComponent("team-seats")
+    let cache = SnapshotCache(fileURL: home.appendingPathComponent("snapshots.json"))
+    let setup = UsageStore(defaults: defaults, startAutomatically: false, cache: cache)
+    setup.accountsHome = home
+    var failures: [String] = []
+    do {
+      let accounts: [ProviderID] = [.anthropic] + (try (2...5).map { _ in try setup.addClaudeAccount() })
+      let usage = Dictionary(uniqueKeysWithValues: accounts.enumerated().map { ($0.element, Double(($0.offset + 1) * 10)) })
+      let store = UsageStore(defaults: defaults, startAutomatically: false, cache: cache,
+        fetchOverride: { account, _ in
+          UsageSnapshot(provider: account, windows: [
+            UsageWindow(id: "five-hour", label: "5 hours", usedPercent: usage[account]!)
+          ], source: "Team seat fixture")
+        }, loginCommandOverride: { _ in ("/usr/bin/true", []) }, serviceStatusFetch: { _ in nil })
+      store.accountsHome = home
+      store.setEnabled(.anthropic, enabled: true, refreshImmediately: false)
+      func signIn(_ index: Int, member: String?, organization: String = "shared-team") async throws {
+        let account = accounts[index]
+        let url = store.claudeConfigDirectory(for: account)?.accountProfileURL ?? home.appendingPathComponent(".claude.json")
+        var fields = ["organizationUuid": organization]
+        fields["accountUuid"] = member
+        try JSONSerialization.data(withJSONObject: ["oauthAccount": fields]).write(to: url, options: .atomic)
+        await withCheckedContinuation { done in store.connect(account) { done.resume() } }
+      }
+      func hasOwnLimits(_ index: Int) -> Bool {
+        let account = accounts[index]
+        guard let state = store.states[account], state.error == nil, !state.requiresConnection,
+          let snapshot = state.snapshot else { return false }
+        return snapshot.provider == account && snapshot.windows.first?.usedPercent == usage[account]
+      }
+      try await signIn(0, member: "seat-1")
+      try await signIn(1, member: "seat-2")
+      try await signIn(2, member: "seat-2")
+      let duplicate = store.states[accounts[2]]
+      if duplicate?.requiresConnection != true || duplicate?.snapshot != nil
+        || duplicate?.error?.contains(accounts[1].displayName) != true || !hasOwnLimits(1) {
+        failures.append("team seats: reusing the second card's sign-in did not keep only its reading")
+      }
+      for index in 2..<accounts.count { try await signIn(index, member: "seat-\(index + 1)") }
+      if !accounts.indices.allSatisfy(hasOwnLimits) {
+        failures.append("team seats: the five distinct team members did not keep their individual limits")
+      }
+      // Upgrade an existing organization-only card on a regular usage check.
+      let legacy = accounts[4]
+      defaults.removeObject(forKey: "\(legacy.rawValue).memberIdentifier")
+      await withCheckedContinuation { done in
+        store.refresh(legacy) { done.resume() }
+      }
+      let saved = ClaudeAccountAttribution.bindings(defaults: defaults)
+      if Set(saved.compactMap { $0.verifiedIdentity?.member }).count != accounts.count {
+        failures.append("team seats: the five verified members were not saved separately for relaunch")
+      }
+      try await signIn(2, member: nil)
+      let unknown = store.states[accounts[2]]
+      if unknown?.requiresConnection != true || unknown?.snapshot != nil
+        || unknown?.error?.contains("identify") != true || !hasOwnLimits(1) {
+        failures.append("team seats: an unidentified team member displaced a verified seat or was called a duplicate")
+      }
+      try await signIn(0, member: "seat-2")
+      if store.states[.anthropic]?.error?.contains(accounts[1].displayName) != true || !hasOwnLimits(1) {
+        failures.append("team seats: the default CLI sign-in displaced the explicit card for the same seat")
+      }
+      try await signIn(0, member: "seat-2", organization: "personal")
+      if !hasOwnLimits(0) { failures.append("team seats: one person using two organizations was blocked") }
+      store.setEnabled(accounts[1], enabled: false)
+      try await signIn(2, member: "seat-2")
+      if !hasOwnLimits(2) { failures.append("team seats: a disabled card reserved a seat") }
+    } catch { failures.append("team seats: could not exercise the account sign-in workflow: \(error)") }
     return failures
   }
 

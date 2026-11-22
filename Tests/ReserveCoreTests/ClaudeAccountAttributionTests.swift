@@ -166,6 +166,30 @@ import Testing
     #expect(routed == nil)
   }
 
+  @Test func aVerifiedCardCannotFollowAnotherMemberOfTheSameTeam() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let firstProfile = fixture.home.appendingPathComponent(".claude.json")
+    try Fixture.profile(firstProfile, "org-team", "first-seat")
+    let cards = fixture.bindings.map { binding in
+      ClaudeAccountBinding(account: binding.account, folder: binding.folder, verifiedIdentity:
+        ClaudeAccountAttribution.liveIdentity(profileURL: binding.folder?.accountProfileURL ?? firstProfile))
+    }
+    let plan = fixture.plan(bindings: cards)
+    #expect(!plan.defaultHistoryUnattributed)
+    #expect(self.accounts(plan, fixture.t3) == [Self.team])
+    try Fixture.profile(firstProfile, "org-team", "untracked-seat")
+    try Fixture.profile(fixture.managed.appendingPathComponent(".claude.json"), "org-team", "colleague")
+    let switched = fixture.plan(bindings: cards)
+    #expect(switched.defaultHistoryUnattributed)
+    #expect(self.accounts(switched, fixture.managed).isEmpty && self.accounts(switched, fixture.colleague).isEmpty)
+    let cache = fixture.root.appendingPathComponent("claude-statusline.json")
+    for environment in [[:], ["CLAUDE_CONFIG_DIR": fixture.managed.path]] {
+      #expect(ClaudeStatuslineBridge.routedCacheURL(requested: cache, environment: environment,
+        accounts: cards, homeDirectory: fixture.home) == nil)
+    }
+  }
+
   @Test func signedOutManagedFolderKeepsHistoryButCannotSupplyLiveQuota() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }

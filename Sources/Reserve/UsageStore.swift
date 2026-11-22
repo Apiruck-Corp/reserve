@@ -591,12 +591,7 @@ final class UsageStore {
   /// Every Claude account configured here, enabled or not, so a folder can
   /// never be credited to the only enabled account by elimination.
   func claudeAccountBindings() -> [ClaudeAccountBinding] {
-    self.claudeProviders.map { account in
-      ClaudeAccountBinding(
-        account: account,
-        folder: account.isAdded ? self.claudeConfigDirectory(for: account) : nil,
-        verifiedOrganization: self.defaults.string(forKey: "\(account.rawValue).organizationIdentifier"))
-    }
+    ClaudeAccountAttribution.bindings(defaults: self.defaults)
   }
 
   /// Works out which Claude folders count toward which account and hands the
@@ -635,32 +630,36 @@ final class UsageStore {
     return plan
   }
 
-  /// Two Claude cards signed in to one organization would show the same
-  /// quota twice under different names. An added account signed in inside its
-  /// own folder on purpose, so it keeps the reading; the first card only
-  /// follows whatever Claude Code last signed in to. Returns the card that
-  /// keeps the reading when `provider` duplicates it.
-  func claudeAccountSharingOrganization(with provider: ProviderID) -> ProviderID? {
-    guard provider.isAnthropic else { return nil }
-    func organization(_ account: ProviderID) -> String? {
-      let directory = self.claudeConfigDirectory(for: account)
-      // An added card without a folder has no profile of its own yet.
-      if account.isAdded, directory == nil { return nil }
-      return AnthropicProvider.organizationIdentifier(configDirectory: directory)
-    }
-    return Self.claudeOrganizationOwner(
-      of: provider, among: self.accounts.filter { $0.isAnthropic && self.isEnabled($0) },
-      organization: organization)
+  private func claudeIdentity(for binding: ClaudeAccountBinding) -> ClaudeFolderIdentity? {
+    binding.profileURL(homeDirectory: self.accountsHome).flatMap(ClaudeAccountAttribution.liveIdentity)
   }
 
-  static func claudeOrganizationOwner(
-    of provider: ProviderID, among accounts: [ProviderID], organization: (ProviderID) -> String?
-  ) -> ProviderID? {
-    guard let mine = organization(provider) else { return nil }
-    let sharing = accounts.filter { $0 == provider || organization($0) == mine }
-    guard sharing.count > 1 else { return nil }
-    let owner = sharing.first(where: \.isAdded) ?? sharing[0]
-    return owner == provider ? nil : owner
+  /// Only one card may show a seat's quota. Explicitly added cards take
+  /// precedence over the default CLI sign-in, then addition order breaks ties.
+  private func claudeSignInConflict(
+    for provider: ProviderID, identity: ClaudeFolderIdentity, among accounts: [ClaudeAccountBinding]
+  ) -> UsageProviderError? {
+    let sharing = accounts.compactMap { binding -> (account: ProviderID, member: String?)? in
+      guard self.isEnabled(binding.account),
+        let live = binding.account == provider ? identity : self.claudeIdentity(for: binding),
+        binding.verifiedIdentity?.accepts(live) != false,
+        live.organization == identity.organization,
+        identity.member == nil || live.member == identity.member
+      else { return nil }
+      return (binding.account, live.member)
+    }
+    // An older profile naming only the organization cannot displace a
+    // known member. With only such profiles, keep the original first owner.
+    let known = sharing.filter { $0.member != nil }
+    let candidates = known.isEmpty ? sharing : known
+    guard let owner = candidates.first(where: { $0.account.isAdded }) ?? candidates.first,
+      owner.account != provider else { return nil }
+    if identity.member == nil {
+      return .credentialsNotFound(
+        "Another card uses this Claude team. Sign in again so Reserve can identify your team member account.")
+    }
+    return .credentialsNotFound(
+      "Signed in to the same Claude account as \(owner.account.displayName). Choose a different account on Claude’s sign-in page.")
   }
 
   func insightHistoryName(for provider: ProviderID) -> String {
@@ -816,12 +815,12 @@ final class UsageStore {
     if account.isAnthropic {
       self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
       try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: account))
+      ClaudeFolderIdentity.saveVerified(nil, for: account, defaults: self.defaults)
     }
     for key in [
       "provider.\(account.rawValue).enabled",
       "\(account.rawValue).keychainReadAllowed",
       "\(account.rawValue).passiveStatusline",
-      "\(account.rawValue).organizationIdentifier",
       "\(account.rawValue).label",
       "\(account.rawValue).labelIsCustom",
       "\(account.rawValue).ordinal",
@@ -1107,7 +1106,7 @@ final class UsageStore {
     } else {
       self.defaults.removeObject(forKey: Self.configDirectoryKey(provider))
     }
-    self.defaults.removeObject(forKey: "\(provider.rawValue).organizationIdentifier")
+    if provider.isAnthropic { ClaudeFolderIdentity.saveVerified(nil, for: provider, defaults: self.defaults) }
     self.states[provider] = ProviderViewState(provider: provider)
     self.staleProviders.remove(provider)
     self.incidentProviders.remove(provider)
@@ -2929,7 +2928,7 @@ final class UsageStore {
       // A deliberate successful sign-in may choose a new organization. A CLI
       // switch outside Reserve cannot silently rebind an existing card.
       if provider.isAnthropic {
-        self.defaults.removeObject(forKey: "\(provider.rawValue).organizationIdentifier")
+        ClaudeFolderIdentity.saveVerified(nil, for: provider, defaults: self.defaults)
       }
       self.states[provider]?.error = nil
       if !self.refresh(provider, queueIfBusy: true, onFinished: { [weak self] in
@@ -3501,16 +3500,14 @@ final class UsageStore {
     }
 
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
-    let claudeOrganization = provider.isAnthropic && self.fetchOverride == nil
-      && self.tracksMultipleClaudeAccounts
-      ? AnthropicProvider.organizationIdentifier(configDirectory: self.claudeConfigDirectory(for: provider)) : nil
-    if self.fetchOverride == nil, let owner = self.claudeAccountSharingOrganization(with: provider) {
-      // The last reading is the other card's quota under this card's name.
+    let claudeAccounts = provider.isAnthropic ? self.claudeAccountBindings() : []
+    let binding = claudeAccounts.first { $0.account == provider }
+    let claudeIdentity = self.tracksMultipleClaudeAccounts ? binding.flatMap(self.claudeIdentity) : nil
+    if let claudeIdentity,
+      let conflict = self.claudeSignInConflict(for: provider, identity: claudeIdentity, among: claudeAccounts) {
       self.states[provider]?.snapshot = nil
       if var state = self.states[provider] {
-        Self.applyFailure(UsageProviderError.credentialsNotFound(
-          "Signed in to the same Claude account as \(owner.displayName). Sign in with your other account."),
-          to: &state)
+        Self.applyFailure(conflict, to: &state)
         self.states[provider] = state
       }
       self.changed()
@@ -3529,8 +3526,8 @@ final class UsageStore {
           allowKeychainInteraction: allowKeychainInteraction,
           passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider),
           requireAccountIdentity: self.tracksMultipleClaudeAccounts,
-          expectedOrganizationIdentifier: self.defaults.string(forKey: "\(provider.rawValue).organizationIdentifier")
-            ?? claudeOrganization)
+          expectedOrganizationIdentifier: binding?.verifiedOrganization ?? claudeIdentity?.organization,
+          expectedMemberIdentifier: binding?.verifiedIdentity?.member ?? claudeIdentity?.member)
       case .grok: GrokProvider(environment: self.helperEnvironment(for: provider))
       case .cursor:
         CursorProvider(
@@ -3552,10 +3549,13 @@ final class UsageStore {
         fetched = try await fetcher.fetch()
       }
       guard isCurrent() else { return }
+      if let binding, self.tracksMultipleClaudeAccounts, claudeIdentity != self.claudeIdentity(for: binding) {
+        throw UsageProviderError.credentialsNotFound("The Claude sign-in changed while Reserve was checking usage. Try again.")
+      }
       let snapshot = fetched.attributed(to: provider).withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
-      if let claudeOrganization {
-        self.defaults.set(claudeOrganization, forKey: "\(provider.rawValue).organizationIdentifier")
+      if let claudeIdentity {
+        ClaudeFolderIdentity.saveVerified(claudeIdentity, for: provider, defaults: self.defaults)
       }
       self.adoptAutomaticLabel(for: provider, from: snapshot)
       self.states[provider]?.error = nil
