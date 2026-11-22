@@ -1626,9 +1626,10 @@ enum ConnectionFlowSelfTest {
         fetchOverride: { account, _ in
           UsageSnapshot(provider: account, windows: [
             UsageWindow(id: "five-hour", label: "5 hours", usedPercent: usage[account]!)
-          ], source: "Team seat fixture")
+          ], source: "Team seat fixture", details: [UsageDetail("Organization", "Example Team · Member", isPersonal: true)])
         }, loginCommandOverride: { _ in ("/usr/bin/true", []) }, serviceStatusFetch: { _ in nil })
       store.accountsHome = home
+      store.hidesPersonalInfo = false
       store.setEnabled(.anthropic, enabled: true, refreshImmediately: false)
       func signIn(_ index: Int, member: String?, organization: String = "shared-team") async throws {
         let account = accounts[index]
@@ -1637,6 +1638,9 @@ enum ConnectionFlowSelfTest {
         fields["accountUuid"] = member
         try JSONSerialization.data(withJSONObject: ["oauthAccount": fields]).write(to: url, options: .atomic)
         await withCheckedContinuation { done in store.connect(account) { done.resume() } }
+      }
+      func refresh(_ index: Int) async {
+        await withCheckedContinuation { done in store.refresh(accounts[index]) { done.resume() } }
       }
       func hasOwnLimits(_ index: Int) -> Bool {
         let account = accounts[index]
@@ -1656,22 +1660,34 @@ enum ConnectionFlowSelfTest {
       if !accounts.indices.allSatisfy(hasOwnLimits) {
         failures.append("team seats: the five distinct team members did not keep their individual limits")
       }
+      let addedNames = accounts.dropFirst().map(\.displayName)
+      if Set(addedNames).count != addedNames.count || !addedNames.contains(where: { $0.contains("Example Team") }) {
+        failures.append("team seats: cards for different people were all named after the same organization")
+      }
+      // Reconnecting an older card must not take a seat already verified by a later one.
+      try await signIn(1, member: "seat-3")
+      await refresh(2)
+      if store.states[accounts[1]]?.error?.contains(accounts[2].displayName) != true
+        || store.states[accounts[1]]?.snapshot != nil || !hasOwnLimits(2) {
+        failures.append("team seats: reconnecting an older card displaced the verified owner of the seat")
+      }
+      try await signIn(1, member: "seat-2")
       // Upgrade an existing organization-only card on a regular usage check.
       let legacy = accounts[4]
       defaults.removeObject(forKey: "\(legacy.rawValue).memberIdentifier")
-      await withCheckedContinuation { done in
-        store.refresh(legacy) { done.resume() }
-      }
+      await refresh(4)
       let saved = ClaudeAccountAttribution.bindings(defaults: defaults)
       if Set(saved.compactMap { $0.verifiedIdentity?.member }).count != accounts.count {
         failures.append("team seats: the five verified members were not saved separately for relaunch")
       }
-      try await signIn(2, member: nil)
-      let unknown = store.states[accounts[2]]
+      try await signIn(1, member: nil)
+      await refresh(2)
+      let unknown = store.states[accounts[1]]
       if unknown?.requiresConnection != true || unknown?.snapshot != nil
-        || unknown?.error?.contains("identify") != true || !hasOwnLimits(1) {
+        || unknown?.error?.contains("identify") != true || !hasOwnLimits(2) {
         failures.append("team seats: an unidentified team member displaced a verified seat or was called a duplicate")
       }
+      try await signIn(1, member: "seat-2")
       try await signIn(0, member: "seat-2")
       if store.states[.anthropic]?.error?.contains(accounts[1].displayName) != true || !hasOwnLimits(1) {
         failures.append("team seats: the default CLI sign-in displaced the explicit card for the same seat")
