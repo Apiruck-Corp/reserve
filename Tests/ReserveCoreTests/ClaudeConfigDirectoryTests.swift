@@ -142,6 +142,44 @@ import Testing
     }
   }
 
+  @Test(arguments: ["member-three", "member-two", ""])
+  func limitsMustComeFromTheSignedInTeamMember(reportedMember: String) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let folder = try #require(ClaudeConfigDirectory(path: root.path))
+    try Data(#"{"oauthAccount":{"organizationUuid":"shared-team","accountUuid":"member-three"}}"#.utf8)
+      .write(to: folder.accountProfileURL)
+    try Data(#"{"claudeAiOauth":{"accessToken":"test-access","subscriptionType":"team"}}"#.utf8)
+      .write(to: folder.credentialFileURL)
+    let provider = AnthropicProvider(
+      environment: [:], allowKeychainRead: false,
+      requestHandler: { request in
+        let url = try #require(request.url)
+        let payload: String
+        if url.lastPathComponent == "profile" {
+          payload = reportedMember.isEmpty
+            ? #"{"organization":{"uuid":"shared-team"}}"#
+            : #"{"organization":{"uuid":"shared-team"},"account":{"uuid":"\#(reportedMember)"}}"#
+        } else {
+          #expect(reportedMember == "member-three", "requested usage before verifying the seat")
+          payload = #"{"five_hour":{"utilization":37}}"#
+        }
+        return (Data(payload.utf8), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+      },
+      rateLimitGate: ClaudeRateLimitGate(defaults: nil),
+      id: Self.team, configDirectory: folder, keychainItemExists: { false }, requireAccountIdentity: true)
+    if reportedMember == "member-three" {
+      let snapshot = try await provider.fetch()
+      #expect(snapshot.provider == Self.team && snapshot.windows.map(\.usedPercent) == [37])
+    } else {
+      do {
+        _ = try await provider.fetch()
+        Issue.record("The team card accepted usage from an unverified seat")
+      } catch UsageProviderError.credentialsNotFound { }
+    }
+  }
+
   @Test func aPinnedOrganizationCannotSilentlyFollowAClISwitch() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

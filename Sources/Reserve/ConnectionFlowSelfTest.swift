@@ -1612,6 +1612,23 @@ enum ConnectionFlowSelfTest {
       expect(UsageStore.claudeOrganizationOwner(of: .anthropic, among: [.anthropic, team],
         organization: { $0 == team ? nil : "org-personal" }) == nil,
         "an unidentified card was treated as a duplicate")
+      // A third card can be a different member of the second card's team.
+      if let third = try? store.addClaudeAccount(),
+        let secondFolder = store.claudeConfigDirectory(for: team),
+        let thirdFolder = store.claudeConfigDirectory(for: third)
+      {
+        store.setEnabled(.anthropic, enabled: false)
+        do {
+          for (folder, member) in [(secondFolder, "member-two"), (thirdFolder, "member-three")] {
+            let profile = #"{"oauthAccount":{"organizationUuid":"shared-team","accountUuid":"\#(member)"}}"#
+            try Data(profile.utf8).write(to: folder.accountProfileURL)
+          }
+          expect(store.claudeAccountSharingOrganization(with: third) == nil,
+            "the third Claude card was rejected as a duplicate of a different team member")
+        } catch { failures.append("could not write the team seat profiles") }
+        try? store.removeAccount(third)
+        store.setEnabled(.anthropic, enabled: true, refreshImmediately: false)
+      } else { failures.append("could not create the third Claude card") }
       failures += await Self.checkClaudeFolderAttribution(
         store: store, defaults: defaults, home: home, team: team)
       try? store.removeAccount(team)
