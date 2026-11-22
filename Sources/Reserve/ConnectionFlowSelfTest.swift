@@ -1664,6 +1664,17 @@ enum ConnectionFlowSelfTest {
       if Set(addedNames).count != addedNames.count || !addedNames.contains(where: { $0.contains("Example Team") }) {
         failures.append("team seats: cards for different people were all named after the same organization")
       }
+      // Older installations can already have two identical automatic names.
+      for account in accounts[1...2] {
+        defaults.set("Example Team", forKey: "\(account.rawValue).label")
+        ProviderAccountLabels.set("Example Team", for: account)
+      }
+      await refresh(1)
+      await refresh(2)
+      if store.accountShownLabel(for: accounts[1]) != "Example Team"
+        || store.accountShownLabel(for: accounts[2]) == "Example Team" {
+        failures.append("team seats: refreshing the earlier card first took its existing team name away")
+      }
       store.hidesPersonalInfo = true
       if accounts.contains(where: { $0.displayName != $0.neutralDisplayName }) {
         failures.append("team seats: hiding personal info left a team name visible")
@@ -1707,6 +1718,31 @@ enum ConnectionFlowSelfTest {
       store.setEnabled(accounts[1], enabled: false)
       try await signIn(2, member: "seat-2")
       if !hasOwnLimits(2) { failures.append("team seats: a disabled card reserved a seat") }
+      guard let active = store.claudeConfigDirectory(for: accounts[2]),
+        let previous = store.states[accounts[2]]?.snapshot else {
+        return failures + ["team seats: the active seat has no folder or limits"]
+      }
+      let extra = home.appendingPathComponent(".claude-extra")
+      try FileManager.default.createDirectory(at: extra, withIntermediateDirectories: true)
+      try FileManager.default.copyItem(at: active.accountProfileURL, to: extra.appendingPathComponent(".claude.json"))
+      for folder in [active.url, extra] {
+        let cacheURL = ClaudeStatuslineBridge.routedCacheURL(requested: home.appendingPathComponent("quota.json"),
+          environment: ["CLAUDE_CONFIG_DIR": folder.path], accounts: store.claudeAccountBindings(), homeDirectory: home)
+        if cacheURL?.lastPathComponent != ClaudeStatuslineBridge.cacheURL(provider: accounts[2]).lastPathComponent {
+          failures.append("team seats: a disabled card received the active seat's live reading")
+        }
+      }
+      let changing = UsageStore(defaults: defaults, startAutomatically: false, cache: cache,
+        fetchOverride: { _, _ in
+          try Data("{}".utf8).write(to: active.accountProfileURL, options: .atomic)
+          return previous
+        }, serviceStatusFetch: { _ in nil })
+      changing.accountsHome = home
+      await withCheckedContinuation { done in changing.refresh(accounts[2]) { done.resume() } }
+      let interrupted = changing.states[accounts[2]]
+      if interrupted?.error == nil || interrupted?.requiresConnection != false || interrupted?.snapshot != nil {
+        failures.append("team seats: a profile changing during refresh accepted stale limits or requested a new sign-in")
+      }
     } catch { failures.append("team seats: could not exercise the account sign-in workflow: \(error)") }
     return failures
   }

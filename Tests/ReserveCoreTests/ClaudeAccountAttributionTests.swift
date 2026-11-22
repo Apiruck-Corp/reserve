@@ -154,7 +154,9 @@ import Testing
     let verified = ClaudeAccountBinding(account: Self.team, folder: ClaudeConfigDirectory(path: fixture.managed.path),
       verifiedIdentity: ClaudeAccountAttribution.liveIdentity(profileURL: fixture.managed.appendingPathComponent(".claude.json")))
     let cards = [fixture.bindings[0], earlier, verified]
-    #expect(self.accounts(fixture.plan(bindings: cards), fixture.t3) == [Self.team])
+    let plan = fixture.plan(bindings: cards)
+    #expect(self.accounts(plan, fixture.t3) == [Self.team])
+    #expect(self.accounts(plan, fixture.colleague) == [earlier.account])
     for folder in [fixture.t3, fixture.colleague] {
       #expect(ClaudeStatuslineBridge.routedCacheURL(requested: fixture.root.appendingPathComponent("quota.json"),
         environment: ["CLAUDE_CONFIG_DIR": folder.path], accounts: cards, homeDirectory: fixture.home)?
