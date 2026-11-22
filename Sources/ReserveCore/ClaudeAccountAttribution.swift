@@ -7,6 +7,7 @@ public struct ClaudeAccountBinding: Sendable, Equatable {
   /// The account's own Claude Code folder. Nil for the first card, which
   /// owns Claude Code's ordinary home (`~/.claude`, profile `~/.claude.json`).
   public let folder: ClaudeConfigDirectory?
+  public let isEnabled: Bool
   /// Older installations stored only the organization. A successful limits
   /// read can also pin the member, so a card stays with its seat after restart.
   public let verifiedIdentity: ClaudeFolderIdentity?
@@ -18,10 +19,13 @@ public struct ClaudeAccountBinding: Sendable, Equatable {
     })
   }
 
-  public init(account: ProviderID, folder: ClaudeConfigDirectory?, verifiedIdentity: ClaudeFolderIdentity?) {
+  public init(
+    account: ProviderID, folder: ClaudeConfigDirectory?, verifiedIdentity: ClaudeFolderIdentity?, isEnabled: Bool = true
+  ) {
     self.account = account
     self.folder = folder
     self.verifiedIdentity = verifiedIdentity
+    self.isEnabled = isEnabled
   }
 
   public func profileURL(homeDirectory: URL) -> URL? {
@@ -112,11 +116,13 @@ public enum ClaudeAccountAttribution {
     return identity.organization == nil ? nil : identity
   }
 
-  /// A card that already verified this seat keeps it through another card's
-  /// sign-in. Ties favor an explicitly added folder, in original addition order.
+  /// Among matching cards prefer one that is enabled, then one that verified
+  /// the seat. Ties favor an explicitly added folder, in original addition order.
   public static func preferredOwner(among matching: [ClaudeAccountBinding]) -> ProviderID? {
-    let verified = matching.filter { $0.verifiedIdentity?.member != nil }
-    let candidates = verified.isEmpty ? matching : verified
+    let enabled = matching.filter(\.isEnabled)
+    let eligible = enabled.isEmpty ? matching : enabled
+    let verified = eligible.filter { $0.verifiedIdentity?.member != nil }
+    let candidates = verified.isEmpty ? eligible : verified
     return candidates.first(where: \.account.isAdded)?.account ?? candidates.first?.account
   }
 
@@ -261,18 +267,18 @@ public enum ClaudeAccountAttribution {
   }
 
   public static func bindings(defaults: UserDefaults) -> [ClaudeAccountBinding] {
-    var accounts = [ClaudeAccountBinding(
-      account: .anthropic, folder: nil,
-      verifiedIdentity: .verified(for: .anthropic, defaults: defaults))]
+    func binding(_ account: ProviderID, folder: ClaudeConfigDirectory? = nil) -> ClaudeAccountBinding {
+      ClaudeAccountBinding(account: account, folder: folder, verifiedIdentity: .verified(for: account, defaults: defaults),
+        isEnabled: defaults.object(forKey: "provider.\(account.rawValue).enabled") as? Bool ?? account.isDefault)
+    }
+    var accounts = [binding(.anthropic)]
     var seen: Set<ProviderID> = [.anthropic]
     for raw in defaults.stringArray(forKey: "accounts.added") ?? [] {
       guard let account = ProviderID(rawValue: raw), account.isAnthropic, account.isAdded,
         seen.insert(account).inserted
       else { continue }
-      accounts.append(ClaudeAccountBinding(
-        account: account,
-        folder: defaults.string(forKey: "\(raw).configDirectory").flatMap(ClaudeConfigDirectory.init(path:)),
-        verifiedIdentity: .verified(for: account, defaults: defaults)))
+      accounts.append(binding(account,
+        folder: defaults.string(forKey: "\(raw).configDirectory").flatMap(ClaudeConfigDirectory.init(path:))))
     }
     return accounts
   }

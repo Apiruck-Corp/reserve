@@ -640,7 +640,7 @@ final class UsageStore {
     for provider: ProviderID, identity: ClaudeFolderIdentity, among accounts: [ClaudeAccountBinding]
   ) -> UsageProviderError? {
     let sharing = accounts.compactMap { binding -> (binding: ClaudeAccountBinding, member: String?)? in
-      guard self.isEnabled(binding.account),
+      guard binding.isEnabled,
         let live = binding.account == provider ? identity : self.claudeIdentity(for: binding),
         binding.verifiedIdentity?.accepts(live) != false,
         live.organization == identity.organization,
@@ -920,10 +920,10 @@ final class UsageStore {
     }
     // "Nimbus · Admin" keeps only the organization.
     let teamName = String((organization.components(separatedBy: " · ").first ?? organization).prefix(64))
-    let nameInUse = account.isAnthropic && self.claudeProviders.contains {
-      $0 != account && ProviderAccountLabels.label(for: $0) == teamName
-    }
-    let name = nameInUse ? self.neutralLabel(for: account) : teamName
+    let usingName = account.isAnthropic
+      ? self.claudeProviders.filter { ProviderAccountLabels.label(for: $0) == teamName } : []
+    let owner = usingName.first(where: ProviderAccountLabels.isCustom) ?? usingName.first
+    let name = owner == nil || owner == account ? teamName : self.neutralLabel(for: account)
     guard !name.isEmpty, ProviderAccountLabels.label(for: account) != name else { return }
     self.defaults.set(name, forKey: "\(account.rawValue).label")
     ProviderAccountLabels.set(name, for: account)
