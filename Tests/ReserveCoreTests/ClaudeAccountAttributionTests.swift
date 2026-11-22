@@ -155,9 +155,11 @@ import Testing
       verifiedIdentity: ClaudeAccountAttribution.liveIdentity(profileURL: fixture.managed.appendingPathComponent(".claude.json")))
     let cards = [fixture.bindings[0], earlier, verified]
     #expect(self.accounts(fixture.plan(bindings: cards), fixture.t3) == [Self.team])
-    #expect(ClaudeStatuslineBridge.routedCacheURL(requested: fixture.root.appendingPathComponent("quota.json"),
-      environment: ["CLAUDE_CONFIG_DIR": fixture.t3.path], accounts: cards, homeDirectory: fixture.home)?
-      .lastPathComponent == ClaudeStatuslineBridge.cacheFileName(provider: Self.team))
+    for folder in [fixture.t3, fixture.colleague] {
+      #expect(ClaudeStatuslineBridge.routedCacheURL(requested: fixture.root.appendingPathComponent("quota.json"),
+        environment: ["CLAUDE_CONFIG_DIR": folder.path], accounts: cards, homeDirectory: fixture.home)?
+        .lastPathComponent == ClaudeStatuslineBridge.cacheFileName(provider: Self.team))
+    }
   }
 
   @Test func clearingAnAddedAccountsFolderCannotClaimTheDefaultSignIn() throws {
