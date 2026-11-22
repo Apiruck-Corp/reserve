@@ -1,9 +1,11 @@
 # Roadmap
 
 > **Frozen on 2026-11-22.** The roadmap is now kept privately by the owner. What follows is a record of what shipped. Do not edit.
-Last updated: 2026-11-20
+
+Last updated: 2026-11-22
 
 ## Now
+- 2026-11-22: Fix the false duplicate sign-in when adding a third Claude account on a five-seat team. Reproduced with two distinct members of one organization. The native connection check covers five simulated seats with distinct card names and limits, and retrying a duplicate sign-in without displacing the verified card. Public release pending.
 
 ## Next
 

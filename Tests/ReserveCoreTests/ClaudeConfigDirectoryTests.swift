@@ -142,12 +142,52 @@ import Testing
     }
   }
 
-  @Test func aPinnedOrganizationCannotSilentlyFollowAClISwitch() async throws {
+  @Test(arguments: ["member-three", "member-two", "", nil] as [String?])
+  func limitsMustComeFromTheSignedInTeamMember(reportedMember: String?) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let folder = try #require(ClaudeConfigDirectory(path: root.path))
+    try Data(#"{"oauthAccount":{"organizationUuid":"shared-team","accountUuid":"member-three"}}"#.utf8)
+      .write(to: folder.accountProfileURL)
+    try Data(#"{"claudeAiOauth":{"accessToken":"test-access","subscriptionType":"team"}}"#.utf8)
+      .write(to: folder.credentialFileURL)
+    let provider = AnthropicProvider(
+      environment: [:], allowKeychainRead: false,
+      requestHandler: { request in
+        let url = try #require(request.url)
+        let payload: Data
+        if url.lastPathComponent == "profile" {
+          var profile = ["organization": ["uuid": "shared-team"]]
+          profile["account"] = reportedMember.map { $0.isEmpty ? [:] : ["uuid": $0] }
+          payload = try JSONSerialization.data(withJSONObject: profile)
+        } else {
+          #expect(reportedMember == "member-three", "requested usage before verifying the seat")
+          payload = Data(#"{"five_hour":{"utilization":37}}"#.utf8)
+        }
+        return (payload, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+      },
+      rateLimitGate: ClaudeRateLimitGate(defaults: nil),
+      id: Self.team, configDirectory: folder, keychainItemExists: { false }, requireAccountIdentity: true)
+    if reportedMember == "member-three" {
+      let snapshot = try await provider.fetch()
+      #expect(snapshot.provider == Self.team && snapshot.windows.map(\.usedPercent) == [37])
+    } else {
+      do {
+        _ = try await provider.fetch()
+        Issue.record("The team card accepted usage from an unverified seat")
+      } catch UsageProviderError.credentialsNotFound { }
+    }
+  }
+
+  @Test(arguments: ["new-team-org", "original-org"])
+  func aPinnedSeatCannotSilentlyFollowAClISwitch(currentOrganization: String) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let profile = root.appendingPathComponent(".claude.json")
-    try Data(#"{"oauthAccount":{"organizationUuid":"new-team-org"}}"#.utf8).write(to: profile)
+    try Data(#"{"oauthAccount":{"organizationUuid":"\#(currentOrganization)","accountUuid":"other-member"}}"#.utf8)
+      .write(to: profile)
     let provider = AnthropicProvider(
       environment: [:], allowKeychainRead: true,
       requestHandler: { _ in Issue.record("A switched organization reached a usage request"); throw URLError(.badURL) },
@@ -155,12 +195,13 @@ import Testing
       keychainCandidateLoader: { _ in Issue.record("A switched organization read credentials"); return nil },
       credentialFileURLs: [], accountProfileURLs: [profile], keychainItemExists: { false },
       requireAccountIdentity: true,
-      expectedOrganizationIdentifier: StableIdentifier.notificationComponent("original-personal-org"))
+      expectedOrganizationIdentifier: StableIdentifier.notificationComponent("original-org"),
+      expectedMemberIdentifier: StableIdentifier.notificationComponent("original-org/original-member"))
     do {
       _ = try await provider.fetch()
-      Issue.record("The personal card silently followed the CLI into a Team organization")
+      Issue.record("The card silently followed the CLI into another seat")
     } catch UsageProviderError.credentialsNotFound(let message) {
-      #expect(message.contains("switched to another organization"))
+      #expect(message.contains(currentOrganization == "original-org" ? "team member" : "switched to another organization"))
     }
   }
 

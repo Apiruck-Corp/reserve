@@ -20,6 +20,7 @@ public struct AnthropicProvider: UsageProvider {
   private let passiveStatusline: Bool
   private let requireAccountIdentity: Bool
   private let expectedOrganizationIdentifier: String?
+  private let expectedMemberIdentifier: String?
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
   private let rateLimitGate: ClaudeRateLimitGate
   private let renewer: ClaudeSessionRenewalHook
@@ -40,6 +41,7 @@ public struct AnthropicProvider: UsageProvider {
     passiveStatusline: Bool = false,
     requireAccountIdentity: Bool = false,
     expectedOrganizationIdentifier: String? = nil,
+    expectedMemberIdentifier: String? = nil,
     session: URLSession? = nil
   ) {
     let session = session ?? ProviderHTTPSession.shared
@@ -54,6 +56,7 @@ public struct AnthropicProvider: UsageProvider {
     self.passiveStatusline = passiveStatusline
     self.requireAccountIdentity = requireAccountIdentity
     self.expectedOrganizationIdentifier = expectedOrganizationIdentifier
+    self.expectedMemberIdentifier = expectedMemberIdentifier
     self.requestHandler = {
       try await ProviderHTTPSession.boundedData(
         for: $0, using: session, maximumBytes: 1_048_576)
@@ -86,7 +89,8 @@ public struct AnthropicProvider: UsageProvider {
     configDirectory: ClaudeConfigDirectory? = nil,
     keychainItemExists: (@Sendable () -> Bool)? = nil,
     requireAccountIdentity: Bool = false,
-    expectedOrganizationIdentifier: String? = nil
+    expectedOrganizationIdentifier: String? = nil,
+    expectedMemberIdentifier: String? = nil
   ) {
     self.id = id
     self.configDirectory = configDirectory
@@ -99,6 +103,7 @@ public struct AnthropicProvider: UsageProvider {
     self.passiveStatusline = false
     self.requireAccountIdentity = requireAccountIdentity
     self.expectedOrganizationIdentifier = expectedOrganizationIdentifier
+    self.expectedMemberIdentifier = expectedMemberIdentifier
     self.requestHandler = requestHandler
     self.rateLimitGate = rateLimitGate
     self.renewer = renewer ?? ClaudeSessionRenewer.hook(for: id)
@@ -139,7 +144,7 @@ public struct AnthropicProvider: UsageProvider {
       throw UsageProviderError.keychainConsentRequired(self.id)
     }
     if self.passiveStatusline, !self.requireAccountIdentity,
-      self.expectedOrganizationIdentifier == nil
+      self.expectedOrganizationIdentifier == nil, self.expectedMemberIdentifier == nil
     {
       let snapshot = ClaudeStatuslineBridge.read(
         cacheURL: ClaudeStatuslineBridge.cacheURL(provider: self.id), provider: self.id)
@@ -170,6 +175,10 @@ public struct AnthropicProvider: UsageProvider {
     {
       throw UsageProviderError.credentialsNotFound(
         "Claude Code switched to another organization. Sign in to this account again in Settings > Providers.")
+    }
+    if let expected = self.expectedMemberIdentifier, profile?.memberIdentifier != expected {
+      throw UsageProviderError.credentialsNotFound(
+        "Claude Code's sign-in no longer matches this team member. Sign in to this account again in Settings > Providers.")
     }
     if self.requireAccountIdentity, profile?.organizationIdentifier == nil {
       throw UsageProviderError.credentialsNotFound(
@@ -382,8 +391,8 @@ public struct AnthropicProvider: UsageProvider {
     }
   }
 
-  /// Emails identify a person, not a subscription: a personal plan and a Team
-  /// seat can share the email while belonging to different organizations.
+  /// A person can use several organizations, and a team can have several
+  /// members. Verify both sides of a multi-account seat before reading usage.
   private func validateAccount(
     _ credentials: ClaudeCredentials, profile: ClaudeAccountProfile?, gateGeneration: Int
   ) async throws {
@@ -391,15 +400,29 @@ public struct AnthropicProvider: UsageProvider {
     let data = try await self.fetchData(
       path: "profile", accessToken: credentials.accessToken, gateGeneration: gateGeneration)
     struct Identity: Decodable {
-      struct Organization: Decodable { let uuid: String }
-      let organization: Organization
+      struct Identifier: Decodable { let uuid: String? }
+      let organization: Identifier
+      let account: Identifier?
     }
-    let identity: Identity
-    do { identity = try JSONDecoder().decode(Identity.self, from: data) }
-    catch { throw UsageProviderError.invalidResponse("Claude did not return this sign-in's organization.") }
-    guard identity.organization.uuid == expected else {
+    guard let identity = try? JSONDecoder().decode(Identity.self, from: data),
+      let organization = identity.organization.uuid, !organization.isEmpty else {
+      throw UsageProviderError.invalidResponse("Claude did not return this sign-in's organization.")
+    }
+    guard organization == expected else {
       throw UsageProviderError.credentialsNotFound(
         "This Claude sign-in belongs to a different organization. Sign in to this account again in Settings > Providers.")
+    }
+    if self.requireAccountIdentity || self.expectedMemberIdentifier != nil,
+      let member = profile?.accountUuid, !member.isEmpty
+    {
+      guard let reported = identity.account?.uuid, !reported.isEmpty else {
+        throw UsageProviderError.credentialsNotFound(
+          "Claude did not identify the team member for this sign-in. Sign in to this account again in Settings > Providers.")
+      }
+      guard reported == member else {
+        throw UsageProviderError.credentialsNotFound(
+          "This Claude sign-in belongs to a different team member. Sign in to this account again in Settings > Providers.")
+      }
     }
   }
 
@@ -1178,7 +1201,7 @@ struct ClaudeAccountProfile: Decodable, Sendable {
   let organizationRole: String?
   let subscriptionCreatedAt: String?
   let claudeCodeTrialEndsAt: String?
-  /// Only compared, hashed, inside this process; never stored or shown.
+  /// Reserve only persists the hash of this ID paired with its organization.
   let accountUuid: String?
 
   var organizationIdentifier: String? {
