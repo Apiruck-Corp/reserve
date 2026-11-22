@@ -145,6 +145,21 @@ import Testing
     #expect(self.accounts(fixture.plan(bindings: single), fixture.colleague).isEmpty)
   }
 
+  @Test func reconnectingAnEarlierCardDoesNotTakeAVerifiedSeatsOtherFolders() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try Fixture.profile(fixture.colleague.appendingPathComponent(".claude.json"), "org-team", "po")
+    let earlier = ClaudeAccountBinding(account: ProviderID(rawValue: "anthropic@earlier")!,
+      folder: ClaudeConfigDirectory(path: fixture.colleague.path), verifiedIdentity: nil)
+    let verified = ClaudeAccountBinding(account: Self.team, folder: ClaudeConfigDirectory(path: fixture.managed.path),
+      verifiedIdentity: ClaudeAccountAttribution.liveIdentity(profileURL: fixture.managed.appendingPathComponent(".claude.json")))
+    let cards = [fixture.bindings[0], earlier, verified]
+    #expect(self.accounts(fixture.plan(bindings: cards), fixture.t3) == [Self.team])
+    #expect(ClaudeStatuslineBridge.routedCacheURL(requested: fixture.root.appendingPathComponent("quota.json"),
+      environment: ["CLAUDE_CONFIG_DIR": fixture.t3.path], accounts: cards, homeDirectory: fixture.home)?
+      .lastPathComponent == ClaudeStatuslineBridge.cacheFileName(provider: Self.team))
+  }
+
   @Test func clearingAnAddedAccountsFolderCannotClaimTheDefaultSignIn() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
