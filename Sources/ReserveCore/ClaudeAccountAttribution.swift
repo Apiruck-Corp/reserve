@@ -7,14 +7,29 @@ public struct ClaudeAccountBinding: Sendable, Equatable {
   /// The account's own Claude Code folder. Nil for the first card, which
   /// owns Claude Code's ordinary home (`~/.claude`, profile `~/.claude.json`).
   public let folder: ClaudeConfigDirectory?
-  /// The hashed organization a successful limits read verified for this
-  /// account, if Reserve stored one.
-  public let verifiedOrganization: String?
+  public let isEnabled: Bool
+  /// Older installations stored only the organization. A successful limits
+  /// read can also pin the member, so a card stays with its seat after restart.
+  public let verifiedIdentity: ClaudeFolderIdentity?
+  public var verifiedOrganization: String? { self.verifiedIdentity?.organization }
 
   public init(account: ProviderID, folder: ClaudeConfigDirectory?, verifiedOrganization: String?) {
+    self.init(account: account, folder: folder, verifiedIdentity: verifiedOrganization.flatMap {
+      $0.isEmpty ? nil : ClaudeFolderIdentity(organization: $0, member: nil)
+    })
+  }
+
+  public init(
+    account: ProviderID, folder: ClaudeConfigDirectory?, verifiedIdentity: ClaudeFolderIdentity?, isEnabled: Bool = true
+  ) {
     self.account = account
     self.folder = folder
-    self.verifiedOrganization = verifiedOrganization.flatMap { $0.isEmpty ? nil : $0 }
+    self.verifiedIdentity = verifiedIdentity
+    self.isEnabled = isEnabled
+  }
+
+  public func profileURL(homeDirectory: URL) -> URL? {
+    self.account.isDefault ? homeDirectory.appendingPathComponent(".claude.json") : self.folder?.accountProfileURL
   }
 }
 
@@ -27,6 +42,24 @@ public struct ClaudeFolderIdentity: Sendable, Equatable {
   public init(organization: String?, member: String?) {
     self.organization = organization
     self.member = member
+  }
+
+  /// An organization-only binding keeps its original meaning until a read
+  /// verifies a member. Once pinned, a missing or different member cannot match.
+  public func accepts(_ current: Self?) -> Bool {
+    guard let organization, current?.organization == organization else { return false }
+    return self.member == nil || self.member == current?.member
+  }
+
+  public static func verified(for account: ProviderID, defaults: UserDefaults) -> Self? {
+    guard let organization = defaults.string(forKey: "\(account.rawValue).organizationIdentifier"),
+      !organization.isEmpty else { return nil }
+    return Self(organization: organization, member: defaults.string(forKey: "\(account.rawValue).memberIdentifier"))
+  }
+
+  public static func saveVerified(_ identity: Self?, for account: ProviderID, defaults: UserDefaults) {
+    defaults.set(identity?.organization, forKey: "\(account.rawValue).organizationIdentifier")
+    defaults.set(identity?.member, forKey: "\(account.rawValue).memberIdentifier")
   }
 }
 
@@ -83,6 +116,16 @@ public enum ClaudeAccountAttribution {
     return identity.organization == nil ? nil : identity
   }
 
+  /// Among matching cards prefer one that is enabled, then one that verified
+  /// the seat. Ties favor an explicitly added folder, in original addition order.
+  public static func preferredOwner(among matching: [ClaudeAccountBinding]) -> ProviderID? {
+    let enabled = matching.filter(\.isEnabled)
+    let eligible = enabled.isEmpty ? matching : enabled
+    let verified = eligible.filter { $0.verifiedIdentity?.member != nil }
+    let candidates = verified.isEmpty ? eligible : verified
+    return candidates.first(where: \.account.isAdded)?.account ?? candidates.first?.account
+  }
+
   /// The tracked account whose sessions `folder` holds, or nil when none can
   /// be proven. `identity` reads a profile URL; tests pass a fixture.
   /// `requiresVerifiedOrganization` defaults to "an added Claude account
@@ -98,17 +141,17 @@ public enum ClaudeAccountAttribution {
   ) -> ProviderID? {
     let claude = accounts.filter(\.account.isAnthropic)
     let path = Self.resolved(folder)
-    // An explicitly attached folder may supply its card directly. Once the
-    // card has verified an organization, its current sign-in must still match.
+    // Saved transcripts stay in their explicitly attached folder. A live
+    // reading for a known member follows the verified owner of that seat.
     if let own = claude.first(where: { $0.account.isAdded && $0.folder?.resolvedPath == path }) {
-      if let expected = own.verifiedOrganization {
-        let profile = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))
-        // Signing out keeps this explicitly assigned folder's saved history.
-        // A live reading or a profile naming a different organization needs proof.
+      let profile = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory))
+      if let expected = own.verifiedIdentity {
         if profile == nil && includeSignedOutManagedHistory { return own.account }
-        guard profile?.organization == expected else { return nil }
+        guard expected.accepts(profile) else { return nil }
       }
-      return own.account
+      if includeSignedOutManagedHistory || profile?.member == nil || requiresVerifiedOrganization == false {
+        return own.account
+      }
     }
     let first = claude.first { $0.account.isDefault }
     let isDefaultHome = path == Self.resolved(Self.defaultHome(homeDirectory))
@@ -123,23 +166,19 @@ public enum ClaudeAccountAttribution {
       else { return nil }
       return first.account
     }
-    guard let mine = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory)),
-      let organization = mine.organization
-    else { return nil }
+    guard let mine = identity(Self.profileURL(forFolder: folder, homeDirectory: homeDirectory)) else { return nil }
     let matches = claude.filter { binding in
-      guard binding.account.isDefault || binding.folder != nil else { return false }
-      let own = identity(binding.folder?.accountProfileURL ?? homeProfile)
+      guard let profileURL = binding.profileURL(homeDirectory: homeDirectory) else { return false }
+      let own = identity(profileURL)
       // The first card follows whatever Claude Code last signed in to, so
       // only an organization a limits read verified counts for it.
-      let expected = binding.verifiedOrganization ?? (binding.account.isAdded ? own?.organization : nil)
-      guard let expected, expected == organization else { return false }
+      let expected = binding.verifiedIdentity ?? (binding.account.isAdded ? own : nil)
+      guard let expected, expected.accepts(mine) else { return false }
       if isDefaultHome && binding.account.isDefault { return true }
       guard let own else { return false }
       return Self.samePerson(mine, own)
     }
-    // As for limits: when both cards name one organization, the added card,
-    // signed in on purpose, keeps it.
-    return matches.first(where: \.account.isAdded)?.account ?? matches.first?.account
+    return Self.preferredOwner(among: matches)
   }
 
   /// Every Claude `projects` folder whose sessions belong to a tracked
@@ -228,18 +267,20 @@ public enum ClaudeAccountAttribution {
   }
 
   public static func bindings(defaults: UserDefaults) -> [ClaudeAccountBinding] {
-    var accounts = [ClaudeAccountBinding(
-      account: .anthropic, folder: nil,
-      verifiedOrganization: defaults.string(forKey: "anthropic.organizationIdentifier"))]
+    func binding(_ account: ProviderID, folder: ClaudeConfigDirectory? = nil) -> ClaudeAccountBinding {
+      // The standalone status-line command has no registered app defaults.
+      // With no saved choice, it treats Claude's ordinary home as enabled.
+      ClaudeAccountBinding(account: account, folder: folder, verifiedIdentity: .verified(for: account, defaults: defaults),
+        isEnabled: defaults.object(forKey: "provider.\(account.rawValue).enabled") as? Bool ?? account.isDefault)
+    }
+    var accounts = [binding(.anthropic)]
     var seen: Set<ProviderID> = [.anthropic]
     for raw in defaults.stringArray(forKey: "accounts.added") ?? [] {
       guard let account = ProviderID(rawValue: raw), account.isAnthropic, account.isAdded,
         seen.insert(account).inserted
       else { continue }
-      accounts.append(ClaudeAccountBinding(
-        account: account,
-        folder: defaults.string(forKey: "\(raw).configDirectory").flatMap(ClaudeConfigDirectory.init(path:)),
-        verifiedOrganization: defaults.string(forKey: "\(raw).organizationIdentifier")))
+      accounts.append(binding(account,
+        folder: defaults.string(forKey: "\(raw).configDirectory").flatMap(ClaudeConfigDirectory.init(path:))))
     }
     return accounts
   }

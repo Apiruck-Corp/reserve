@@ -7,7 +7,7 @@ and Kimi Code.
 Optional insights show provider-reported account activity or activity from this Mac.
 Copilot support is experimental and still needs an authenticated release check.
 
-[Reserve 1.12.2](https://github.com/Apiruck-Corp/reserve/releases/tag/v1.12.2) fixes inflated Claude token counts in Insights and corrects a double count that could appear after restoring history while travelling. If a Claude folder switches accounts, its old reading is cleared.
+Reserve 1.12.3 fixes a sign-in warning that could block another member of the same Claude team. Each member can now connect a separate card and see their own usage limits. [Release notes](https://github.com/Apiruck-Corp/reserve/releases/tag/v1.12.3)
 
 Learn more at [pocarles.com/reserve](https://pocarles.com/reserve/).
 
@@ -78,8 +78,9 @@ How the accounts are kept apart depends on the provider:
 For a folder-based account, Reserve opens the usual browser sign-in with the
 folder set, so the first account is left untouched. If your browser is already
 signed in to the other account, switch accounts on the sign-in page. Added
-Claude accounts are named after the organization they find ("Claude ·
-Nimbus"); every other added account starts as "Account 2". You can rename any
+Claude accounts use their organization's name when it's available ("Claude ·
+Nimbus"). If another card already uses that name, the new card keeps its
+account number. Every other added account starts as "Account 2". You can rename any
 of them in the card, and **Hide personal info** shows the neutral name.
 
 An added account reads only its folder: no fallback to the default home, which
@@ -93,10 +94,15 @@ use an added account in your own terminal, run the helper with its variable
 Claude's first
 card always reads its ordinary home, even when Reserve is launched from a
 terminal using another `CLAUDE_CONFIG_DIR`. Before accepting limits, Reserve
-checks that the sign-in's organization matches that folder's account profile;
-a shared email alone is not enough. Once verified, the card keeps that
-organization binding across restarts. If Claude Code switches organizations,
-Reserve asks for a new sign-in instead of silently replacing the card's limits.
+checks the organization in that folder's account profile. When you track
+multiple Claude accounts, Reserve also verifies the team member when the
+profile identifies one. Each member of the same team can have a separate
+card. If you select a seat already in use, Reserve names the card using it
+and asks you to choose a different account on Claude's sign-in page.
+If an older profile identifies only the team and could match another card,
+Reserve asks you to sign in again. It remembers the verified organization and
+member across restarts. Switching seats in Claude Code requires a new sign-in
+on the affected card.
 Passive status-line readings cannot replace verified limits while tracking
 multiple Claude accounts.
 
@@ -106,7 +112,7 @@ folder; another Claude folder in your home (for example one an app such as
 T3 Code runs with `CLAUDE_CONFIG_DIR=~/.claude_team`) counts toward the account
 signed in there as the same person in the same organization; and, once you track
 several Claude accounts, the default `~/.claude` counts toward the first card
-only while its sign-in matches the organization that card's limits verified.
+only while its sign-in matches the organization and member verified for that card.
 Until then it stays in Insights as **Claude on this Mac**, separate from
 subscription cards. Reserve reads only each folder's profile for this, never its
 credentials. A folder linked to one already counted is counted once, and history
