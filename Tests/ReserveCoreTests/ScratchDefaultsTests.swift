@@ -17,6 +17,10 @@ import Testing
     defaults.set(7, forKey: "value")
     // A second handle on the same suite sees the value, as a relaunch would.
     #expect(UserDefaults(suiteName: suite)?.integer(forKey: "value") == 7)
+    // The value is on disk in the scratch folder, not only in memory.
+    defaults.synchronize()
+    let stored = NSDictionary(contentsOfFile: suite + ".plist")
+    #expect(stored?["value"] as? Int == 7)
 
     ScratchDefaults.remove(suite)
     CFPreferencesAppSynchronize(suite as CFString)
