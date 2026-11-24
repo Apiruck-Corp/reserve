@@ -383,9 +383,9 @@ import Testing
   }
 
   @Test func bindingsAreReadFromReserveSettings() throws {
-    let suite = "reserve-attribution-\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("attribution")
     let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     defaults.set(["anthropic@56148cb5", "openai@aaaa1111"], forKey: "accounts.added")
     defaults.set("/tmp/nimbus", forKey: "anthropic@56148cb5.configDirectory")
     defaults.set(Self.teamOrg, forKey: "anthropic@56148cb5.organizationIdentifier")
