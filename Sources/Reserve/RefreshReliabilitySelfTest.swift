@@ -685,7 +685,7 @@ private final class Fixture {
   private let directory: URL
 
   init(_ name: String) {
-    self.suite = "Reserve.Reliability.\(name).\(UUID().uuidString)"
+    self.suite = ScratchDefaults.makeSuiteName("Reliability.\(name)")
     self.defaults = UserDefaults(suiteName: self.suite)!
     self.directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "reserve-reliability-\(UUID().uuidString)", isDirectory: true)
@@ -694,7 +694,7 @@ private final class Fixture {
   }
 
   deinit {
-    self.defaults.removePersistentDomain(forName: self.suite)
+    ScratchDefaults.remove(self.suite)
     try? FileManager.default.removeItem(at: self.directory)
   }
 }

@@ -64,10 +64,10 @@ enum ConnectionFlowSelfTest {
     }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "reserve-connection-check-\(UUID().uuidString)", isDirectory: true)
-    let suite = "Reserve.ConnectionSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("ConnectionSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["isolated preferences unavailable"] }
     defer {
-      defaults.removePersistentDomain(forName: suite)
+      ScratchDefaults.remove(suite)
       try? FileManager.default.removeItem(at: directory)
     }
     do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
@@ -947,9 +947,10 @@ enum ConnectionFlowSelfTest {
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     hourlyScanner: LocalHourlyUsageScanner? = nil
   ) -> UsageStore {
-    let suite = "Reserve.LocalHistoryRefresh.\(name).\(UUID().uuidString)"
+    // Stored inside the check's folder, which the caller deletes: a named suite
+    // would leave an empty plist in ~/Library/Preferences on every run.
+    let suite = directory.appendingPathComponent("defaults-\(name)-\(UUID().uuidString)").path
     let defaults = UserDefaults(suiteName: suite)!
-    defaults.removePersistentDomain(forName: suite)
     for provider in ProviderID.defaults {
       defaults.set(provider == .openAI, forKey: "provider.\(provider.rawValue).enabled")
     }
@@ -1125,12 +1126,12 @@ enum ConnectionFlowSelfTest {
   private static func checkRefreshScheduling(in directory: URL) async -> [String] {
     var failures: [String] = []
     for scenario in ["interactive-sweep", "bounded-sweep", "history-cleared"] {
-      let suite = "Reserve.SchedulingSelfTest.\(UUID().uuidString)"
+      let suite = ScratchDefaults.makeSuiteName("SchedulingSelfTest")
       guard let defaults = UserDefaults(suiteName: suite) else {
         failures.append("\(scenario): isolated preferences unavailable")
         continue
       }
-      defer { defaults.removePersistentDomain(forName: suite) }
+      defer { ScratchDefaults.remove(suite) }
       let cache = SnapshotCache(fileURL: directory.appendingPathComponent("\(scenario).json"))
       let probe = ConnectionSchedulingProbe(historyThenNone: scenario == "history-cleared")
       let store = UsageStore(
@@ -1208,9 +1209,9 @@ enum ConnectionFlowSelfTest {
     func expect(_ value: Bool, _ message: String) {
       if !value { failures.append(message) }
     }
-    let suite = "Reserve.HandoffSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("HandoffSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["handoff: isolated preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let script = directory.appendingPathComponent("handoff-login.sh")
     let responses = ConnectionTestResponses()
     var opened: [URL] = []
@@ -1295,9 +1296,9 @@ enum ConnectionFlowSelfTest {
   /// first and names the reason, instead of a sign-in that cannot start.
   private static func checkClaudeCodeSetup(in directory: URL) async -> [String] {
     var failures: [String] = []
-    let suite = "Reserve.ClaudeCodeSetupSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("ClaudeCodeSetupSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["claude code: isolated preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let responses = ConnectionTestResponses()
     await responses.set(.signedOut)
     let selection = ClaudeCodeSelectionFixture()
@@ -1408,9 +1409,9 @@ enum ConnectionFlowSelfTest {
 
   private static func checkEarlyCompletions(in directory: URL) async -> [String] {
     var failures: [String] = []
-    let suite = "Reserve.CompletionSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("CompletionSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["completions: isolated preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let script = directory.appendingPathComponent("completion-login.sh")
     do { try "#!/bin/sh\nsleep 0.4\nexit 1\n".write(to: script, atomically: true, encoding: .utf8) }
     catch { return ["completions: login fixture could not be saved"] }
@@ -1457,9 +1458,9 @@ enum ConnectionFlowSelfTest {
     func expect(_ value: Bool, _ message: String) {
       if !value { failures.append("added accounts: \(message)") }
     }
-    let suite = "Reserve.AddedAccountsSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("AddedAccountsSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["added accounts: preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let home = directory.appendingPathComponent("added-accounts-home-\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
     var savedPlanKeys: [ProviderID: String] = [:]
@@ -1611,9 +1612,9 @@ enum ConnectionFlowSelfTest {
   /// Exercise the verification after browser sign-in with five isolated
   /// profiles. Only the login helper and the quota response are substituted.
   private static func checkClaudeTeamSeats(in directory: URL) async -> [String] {
-    let suite = "Reserve.TeamSeats.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("TeamSeats")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["team seats: preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let home = directory.appendingPathComponent("team-seats")
     let cache = SnapshotCache(fileURL: home.appendingPathComponent("snapshots.json"))
     let setup = UsageStore(defaults: defaults, startAutomatically: false, cache: cache)
@@ -1838,9 +1839,9 @@ enum ConnectionFlowSelfTest {
   }
 
   private static func checkClaudeFolderHistoryChange(in directory: URL) async -> [String] {
-    let suite = "Reserve.FolderHistory.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("FolderHistory")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["Claude folder history: preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let home = directory.appendingPathComponent("folder-history")
     let roots = LocalUsageScanner.Roots(codex: home.appendingPathComponent(".codex/sessions"),
       claude: home.appendingPathComponent(".claude/projects"), grok: home.appendingPathComponent(".grok"))
@@ -1904,9 +1905,9 @@ enum ConnectionFlowSelfTest {
     func expect(_ value: Bool, _ message: String) {
       if !value { failures.append("added API accounts: \(message)") }
     }
-    let suite = "Reserve.AddedAPIAccountsSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("AddedAPIAccountsSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else { return ["added API accounts: preferences unavailable"] }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     var keys: [APIAccountID: String] = [:]
     let access = APIConsumptionKeyAccess(
       availability: { keys[$0] == nil ? .missing : .present },
@@ -2061,11 +2062,11 @@ enum ConnectionFlowSelfTest {
     func expect(_ value: Bool, _ message: String) {
       if !value { failures.append(message) }
     }
-    let suite = "Reserve.AdaptiveRefreshSelfTest.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("AdaptiveRefreshSelfTest")
     guard let defaults = UserDefaults(suiteName: suite) else {
       return ["adaptive: isolated preferences unavailable"]
     }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { ScratchDefaults.remove(suite) }
     let keys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
     func makeStore(_ name: String) -> UsageStore {
       UsageStore(

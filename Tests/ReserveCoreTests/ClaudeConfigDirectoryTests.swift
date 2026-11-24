@@ -329,8 +329,8 @@ import Testing
     #expect(ClaudeSessionRenewer.instance(for: Self.team) !== ClaudeSessionRenewer.shared)
     #expect(ClaudeSessionRenewer.instance(for: Self.team) !== ClaudeSessionRenewer.instance(for: other))
     // A block on one slot's key never shows up on the other's.
-    let suite = "reserve.tests.claude-gates.\(UUID().uuidString)"
-    defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+    let suite = ScratchDefaults.makeSuiteName("claude-gates")
+    defer { ScratchDefaults.remove(suite) }
     // Each actor gets its own handle on the same suite, so nothing is shared
     // across isolation boundaries.
     let first = ClaudeRateLimitGate(defaults: UserDefaults(suiteName: suite))

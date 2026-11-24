@@ -731,7 +731,7 @@ enum LifecycleSelfTest {
   /// after an unrelated layout change was deferred by a key draft.
   static func checkSettingsLiveValues() -> Result {
     var result = Result()
-    let suite = "com.reserve.settings-live.\(UUID().uuidString)"
+    let suite = ScratchDefaults.makeSuiteName("settings-live")
     guard let defaults = UserDefaults(suiteName: suite) else {
       result.failures.append("could not create isolated Settings preferences")
       return result
@@ -739,7 +739,7 @@ enum LifecycleSelfTest {
     let originalTheme = ReserveAppearance.current
     let originalMode = ReserveAppearance.mode
     defer {
-      defaults.removePersistentDomain(forName: suite)
+      ScratchDefaults.remove(suite)
       ReserveAppearance.current = originalTheme
       ReserveAppearance.mode = originalMode
     }
