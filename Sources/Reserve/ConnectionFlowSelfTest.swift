@@ -493,7 +493,7 @@ enum ConnectionFlowSelfTest {
     // Cursor prints a storage error but exits zero. Also cover a successful
     // exit whose subsequent status check still finds no saved session.
     for diagnostic in ["Failed to store authentication tokens. Please try again.", ""] {
-      let cursorScript = "#!/bin/sh\necho https://cursor.com/loginDeepControl?challenge=test\nsleep 0.1\necho '\(diagnostic)'\nexit 0\n"
+      let cursorScript = "#!/bin/sh\necho 'https://cursor.com/loginDeepControl?challenge=abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE&uuid=123e4567-e89b-12d3-a456-426614174000&mode=login&redirectTarget=cli'\nsleep 0.1\necho '\(diagnostic)'\nexit 0\n"
       do { try cursorScript.write(to: directory.appendingPathComponent("login.sh"), atomically: true, encoding: .utf8) }
       catch { failures.append("Cursor storage failure fixture could not be saved") }
       await responses.set(.signedOut)
