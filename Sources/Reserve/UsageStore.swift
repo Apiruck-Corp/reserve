@@ -3056,6 +3056,12 @@ final class UsageStore {
   }
 
   static func authorizationURL(in output: String, for provider: ProviderID) -> URL? {
+    if provider == .cursor {
+      // Cursor's link is long and wraps across lines in piped output. Only a
+      // complete link is opened; a fragment lands on an expired-link page.
+      guard let hosts = Self.loginConfiguration(for: provider)?.trustedHosts else { return nil }
+      return CursorLoginLink.url(in: output, trustedHosts: hosts)
+    }
     let pattern = #"https://[^\s\u001B<>\"]+"#
     guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
     let range = NSRange(output.startIndex..., in: output)
