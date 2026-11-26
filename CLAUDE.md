@@ -21,3 +21,11 @@ live. Until that audit has run, the pull request stays a draft with `Audit pendi
 of its description. Once it has finished, the description carries, alone on a line,
 `Audit: done by <auditor>, <rounds and outcome>`. Never write that line for an audit that did
 not run and finish.
+
+GitHub refuses to merge a pull request whose newest commit has no audit stamp. Once the audit
+has finished and its fixes are pushed, the session that ran it, on the maintainer's computer,
+runs `~/.claude/bin/audit-stamp --by "<model>" --outcome "<rounds and what came of them>"` in
+the pull request's checkout; that marks the newest commit and writes the `Audit: done by` line.
+For Markdown only, run `audit-stamp --prose`; `audit-stamp --waived` only when the maintainer
+said to skip the audit for that task. A commit pushed after the stamp needs a new one. The tool
+exists only on his machines: a cloud thread cannot stamp.
