@@ -832,9 +832,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         for: .grok)?.host
         == "auth.x.ai"
       && UsageStore.authorizationURL(
-        in: "Continue at https://auth.cursor.com/oauth/authorize?code=sample",
+        in: "Open a browser and navigate to this link: https://cursor.com/loginDeepControl?challenge=abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE&uuid=123e4567-e89b-12d3-a456-426614174000&mode=login&redirectTarget=cli\n",
         for: .cursor)?.host
-        == "auth.cursor.com"
+        == "cursor.com"
       && UsageStore.authorizationURL(
         in: "https://example.com/oauth/authorize?code=not-trusted", for: .anthropic) == nil
     let updateMigrationWorks: Bool = {

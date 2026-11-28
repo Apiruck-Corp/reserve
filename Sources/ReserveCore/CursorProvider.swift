@@ -101,11 +101,10 @@ public struct CursorProvider: UsageProvider {
       guard let executable = self.agentLocator(self.environment) else {
         throw UsageProviderError.executableNotFound("Cursor Agent")
       }
-      let status = try await self.statusRunner(
-        executable, ["status", "--format", "json"],
-        BinaryLocator.childEnvironment(self.environment))
-      try Task.checkCancellation()
-      try Self.validateStatusOutput(status)
+      try await Self.checkStatus(
+        executable: executable,
+        environment: BinaryLocator.childEnvironment(self.environment),
+        runner: self.statusRunner)
       return try await self.credentialLoader(self.allowKeychainInteraction)
     }
     let credential = try await self.credentialSession.credential {
@@ -262,6 +261,63 @@ public struct CursorProvider: UsageProvider {
   public static func clearCachedCredential() async {
     await Self.sharedCredentialSession.clear()
     await Self.sharedDataCache.clear()
+  }
+
+  static let jsonStatusArguments = ["status", "--format", "json"]
+  static let textStatusArguments = ["status"]
+
+  /// Runs Cursor's official status check. Current Cursor CLIs answer
+  /// `status --format json`; builds from before that option (early 2026)
+  /// exit with "unknown option '--format'", so a failed JSON launch is retried
+  /// once with plain `status`, whose text output is read strictly.
+  static func checkStatus(
+    executable: String,
+    environment: [String: String],
+    runner: @Sendable (String, [String], [String: String]) async throws -> String
+  ) async throws {
+    let output: String
+    do {
+      output = try await runner(executable, Self.jsonStatusArguments, environment)
+    } catch UsageProviderError.processFailed {
+      try Task.checkCancellation()
+      let text = try await runner(executable, Self.textStatusArguments, environment)
+      try Task.checkCancellation()
+      try Self.validateStatusText(text)
+      return
+    }
+    try Task.checkCancellation()
+    try Self.validateStatusOutput(output)
+  }
+
+  /// Plain `cursor-agent status` prints "✓ Logged in as <email>" when signed
+  /// in and "Not logged in" otherwise. Only the signed-in line is accepted.
+  static func validateStatusText(_ output: String) throws {
+    guard output.utf8.count <= 65_536 else {
+      throw UsageProviderError.invalidResponse("cursor-agent status output was too large")
+    }
+    let lines = Self.strippingTerminalCodes(output)
+      .split(whereSeparator: \.isNewline)
+      .map {
+        $0.trimmingCharacters(
+          in: .whitespaces.union(CharacterSet(charactersIn: "✓✔✅·•-*")))
+          .lowercased()
+      }
+    let signedOut = lines.contains {
+      $0.contains("not logged in") || $0.contains("not authenticated")
+        || $0.contains("logged out")
+    }
+    guard !signedOut, lines.contains(where: { $0.hasPrefix("logged in as ") }) else {
+      throw UsageProviderError.unauthorized(
+        "Cursor authentication expired. Use Sign in to authenticate again.")
+    }
+  }
+
+  /// Removes ANSI colour and OSC hyperlink sequences that a CLI may print.
+  static func strippingTerminalCodes(_ text: String) -> String {
+    let pattern = #"\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)|\u001B\[[0-9;?]*[ -/]*[@-~]|\u001B[@-_]"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+    return regex.stringByReplacingMatches(
+      in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
   }
 
   static func validateStatusOutput(_ output: String) throws {
