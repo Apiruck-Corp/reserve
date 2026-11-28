@@ -404,6 +404,20 @@ enum ConnectionFlowSelfTest {
     emptyUsage.snapshot = UsageSnapshot(provider: .openAI, windows: [], source: "empty fixture")
     expect(ProviderSetupCoordinator.phase(after: emptyUsage) == .unavailable,
       "a fresh response without usable usage was shown as connected")
+    emptyUsage.snapshot = UsageSnapshot(
+      provider: .openAI, windows: [], source: "identity only",
+      details: [UsageDetail("Account", "a@example.com", isPersonal: true)])
+    expect(ProviderSetupCoordinator.phase(after: emptyUsage) == .unavailable,
+      "a response naming only the signed-in account was shown as connected")
+    var businessUsage = ProviderViewState(provider: .openAI)
+    businessUsage.snapshot = UsageSnapshot(
+      provider: .openAI, planName: "Business", windows: [], source: "business fixture",
+      details: [UsageDetail("Credits", "120 left"), UsageDetail("Spend cap", "12 of 50 used · 76% left")])
+    expect(ProviderSetupCoordinator.phase(after: businessUsage) == .connected,
+      "a Business seat with credits and a spend cap but no windows was shown as unavailable")
+    let businessSummary = AllowanceBuilder.summary(for: businessUsage)
+    expect(businessSummary.primary == nil && businessSummary.leadingFactHeadline == "Credits: 120 left",
+      "a Business seat without windows did not lead with its reported credits")
 
     // Exercise the real login process, browser handoff, queued verification,
     // and cancellation with a local script and fake provider responses.

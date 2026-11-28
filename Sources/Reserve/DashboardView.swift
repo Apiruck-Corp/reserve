@@ -1323,6 +1323,9 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
         "\(DashboardFormat.remainingPercent(primary.remainingPercent))% "
         + (summary.paceState == .stale ? "last known" : "left")
       valueColor = summary.paceState == .stale ? ReserveColor.muted : ReserveColor.text
+    } else if let headline = summary.leadingFactHeadline {
+      valueText = headline
+      valueColor = ReserveColor.text
     } else if let usage = summary.localUsage, usage.origin == .providerAccount {
       valueText = "\(DashboardFormat.tokens(usage.todayTokens)) today"
       valueColor = ReserveColor.text
@@ -1421,6 +1424,9 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
           ? nil : primary.expectedPercent.map { 100 - $0 },
         color: summary.paceState.color,
         isStale: summary.paceState == .stale)
+    } else if let headline = summary.leadingFactHeadline {
+      valueText = headline
+      valueColor = ReserveColor.text
     } else if let usage = summary.localUsage, usage.origin == .providerAccount {
       valueText = "\(DashboardFormat.tokens(usage.todayTokens)) today"
       valueColor = ReserveColor.text
@@ -1767,6 +1773,8 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     parts.append(localUsageKind)
     parts.append(secondaryStructure)
     parts.append(summary.details.map(\.label).joined(separator: ","))
+    // The row's trailing text is built once; a new credit or spend figure rebuilds it.
+    parts.append(summary.leadingFactHeadline ?? "-")
     if let primary = summary.primary {
       let forecast = DashboardFormat.showsForecast(
         primary, paceState: summary.paceState,
@@ -1878,6 +1886,9 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
   /// the order someone would ask for them.
   static func spokenState(summary: ProviderSummary, now: Date) -> String {
     guard let primary = summary.primary else {
+      if let fact = summary.leadingFact {
+        return "\(fact.label) \(fact.value), plan percentage unavailable"
+      }
       if let usage = summary.localUsage, usage.origin == .providerAccount {
         let today = DashboardFormat.tokens(usage.todayTokens)
         let cycle = DashboardFormat.tokens(usage.cycleTokens)
@@ -1974,6 +1985,13 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
       let remaining = RemainingValueView(allowance: primary, paceState: summary.paceState)
       remaining.identifier = NSUserInterfaceItemIdentifier("remaining-\(summary.provider.rawValue)")
       trailing = remaining
+    } else if let headline = summary.leadingFactHeadline, let fact = summary.leadingFact {
+      let value = ReserveLabel(
+        headline, font: ReserveFont.sans(ReserveType.body, .semibold), color: ReserveColor.text
+      ).fitted()
+      value.toolTip = "\(fact.label): \(fact.value)"
+      value.setAccessibilityLabel("\(fact.label) \(fact.value)")
+      trailing = value
     } else if let usage = summary.localUsage, usage.origin == .providerAccount {
       let today = DashboardFormat.tokens(usage.todayTokens)
       let value = ReserveLabel(

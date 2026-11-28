@@ -37,8 +37,12 @@ public struct OpenAIProvider: UsageProvider {
     }
     if planName == nil { planName = OpenAIPlanFormatter.plan(from: account?.planType) }
 
+    // A ChatGPT Business seat can be metered by workspace credits and a
+    // personal spend cap instead of time windows. That answer is real usage:
+    // show what it reports, never a made-up percentage. Only a reply with
+    // neither windows nor credit or spend facts is unusable.
     let windows = response.usageWindows
-    guard !windows.isEmpty else {
+    guard !windows.isEmpty || OpenAIDetails.hasLimitFacts(selected) else {
       throw UsageProviderError.unavailable("OpenAI did not return subscription usage windows.")
     }
 
@@ -170,6 +174,13 @@ enum OpenAIDetails {
       }
     }
     return details
+  }
+
+  /// Whether the limit read itself says something about the plan's allowance
+  /// (a block, credits or a spend cap), apart from who is signed in or how
+  /// much they have used Codex over time.
+  static func hasLimitFacts(_ limits: OpenAIRateLimitSnapshot) -> Bool {
+    !self.details(limits: limits, account: nil, activity: nil).isEmpty
   }
 
   static func blockedReason(_ limits: OpenAIRateLimitSnapshot) -> String? {

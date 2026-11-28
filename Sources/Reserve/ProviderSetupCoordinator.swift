@@ -180,8 +180,11 @@ final class ProviderSetupCoordinator {
     if state.signInCouldNotStart { return .signInCouldNotStart }
     if state.requiresConnection { return .needsSignIn }
     if state.usageAccessDenied { return .accessDenied }
+    // Plan facts without windows (an OpenAI Business seat's credits and spend
+    // cap) are a real answer; only the signed-in identity on its own is not.
     guard state.error == nil, let snapshot = state.snapshot,
       !snapshot.windows.isEmpty || snapshot.accountUsage != nil || snapshot.includedSpend != nil
+        || snapshot.details.contains(where: { !$0.isPersonal })
     else { return .unavailable }
     return .connected
   }

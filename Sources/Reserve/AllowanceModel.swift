@@ -128,6 +128,19 @@ struct ProviderSummary {
   var hasUnattributedClaudeHistory = false
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
+  /// With no limit to measure, the first plan fact the provider reported
+  /// (credits, a spend cap) leads the card instead of "Plan unavailable".
+  /// It is shown as reported, never turned into a percentage.
+  var leadingFact: UsageDetail? {
+    guard self.allowances.isEmpty else { return nil }
+    return self.details.first { !$0.isPersonal }
+  }
+  /// The leading fact short enough for a tile: "Spend cap: 12 of 50 used".
+  var leadingFactHeadline: String? {
+    guard let fact = self.leadingFact else { return nil }
+    let first = fact.value.components(separatedBy: " · ").first ?? fact.value
+    return "\(fact.label): \(first)"
+  }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
 
   func at(_ now: Date) -> ProviderSummary {
